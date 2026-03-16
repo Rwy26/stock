@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from typing import Literal
 
 import httpx
 
@@ -182,3 +183,148 @@ def inquire_price(
         change_rate=change_rate,
         as_of=str(as_of),
     )
+
+
+def generate_hashkey(
+    *,
+    app_key: str,
+    app_secret: str,
+    is_paper: bool,
+    payload: dict[str, Any],
+    live_base_url: str | None = None,
+    paper_base_url: str | None = None,
+    timeout_seconds: float = 10.0,
+) -> str:
+    """Generate hashkey for trading POST APIs.
+
+    KIS requires a hashkey header for certain trading endpoints.
+    """
+
+    base = _base_url(is_paper, live_base_url=live_base_url, paper_base_url=paper_base_url)
+    url = f"{base}/uapi/hashkey"
+
+    headers = {
+        "content-type": "application/json",
+        "appkey": app_key,
+        "appsecret": app_secret,
+    }
+
+    try:
+        resp = httpx.post(url, headers=headers, json=payload, timeout=timeout_seconds)
+    except Exception as exc:
+        raise KisError(f"KIS hashkey request failed: {exc}") from exc
+
+    data = _safe_json(resp)
+    if resp.status_code >= 400:
+        msg = data.get("msg1") or data.get("message") or f"HTTP {resp.status_code}"
+        raise KisError(f"KIS hashkey HTTP error: {msg}", status_code=resp.status_code, payload=data)
+
+    # Most responses include { HASH: "..." }
+    key = data.get("HASH") or data.get("hash") or data.get("hashkey")
+    if not key:
+        raise KisError("KIS hashkey response missing HASH", status_code=resp.status_code, payload=data)
+    return str(key)
+
+
+def place_cash_order(
+    *,
+    app_key: str,
+    app_secret: str,
+    is_paper: bool,
+    account_prefix: str,
+    account_product_code: str = "01",
+    side: Literal["buy", "sell"],
+    code: str,
+    qty: int,
+    order_type: Literal["market", "limit"] = "market",
+    limit_price: float | None = None,
+    live_base_url: str | None = None,
+    paper_base_url: str | None = None,
+    timeout_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """Place a domestic stock cash order.
+
+    Returns the raw JSON payload for logging/auditing.
+    """
+
+    code = code.strip()
+    if not code:
+        raise KisError("code is required")
+    if qty <= 0:
+        raise KisError("qty must be > 0")
+
+    token, _expires_in = get_access_token(
+        app_key=app_key,
+        app_secret=app_secret,
+        is_paper=is_paper,
+        live_base_url=live_base_url,
+        paper_base_url=paper_base_url,
+        timeout_seconds=timeout_seconds,
+    )
+
+    base = _base_url(is_paper, live_base_url=live_base_url, paper_base_url=paper_base_url)
+    url = f"{base}/uapi/domestic-stock/v1/trading/order-cash"
+
+    # KIS order type: 00=limit, 01=market (commonly)
+    ord_dvsn = "01" if order_type == "market" else "00"
+    ord_unpr = "0"
+    if order_type == "limit":
+        if limit_price is None:
+            raise KisError("limit_price is required for limit orders")
+        try:
+            ord_unpr = str(int(round(float(limit_price))))
+        except Exception as exc:
+            raise KisError("invalid limit_price") from exc
+
+    body = {
+        "CANO": str(account_prefix).strip(),
+        "ACNT_PRDT_CD": str(account_product_code).zfill(2),
+        "PDNO": code,
+        "ORD_DVSN": ord_dvsn,
+        "ORD_QTY": str(int(qty)),
+        "ORD_UNPR": ord_unpr,
+    }
+
+    tr_id = None
+    if side == "buy":
+        tr_id = "VTTC0802U" if is_paper else "TTTC0802U"
+    elif side == "sell":
+        tr_id = "VTTC0801U" if is_paper else "TTTC0801U"
+    else:
+        raise KisError("side must be buy|sell")
+
+    hashkey = generate_hashkey(
+        app_key=app_key,
+        app_secret=app_secret,
+        is_paper=is_paper,
+        payload=body,
+        live_base_url=live_base_url,
+        paper_base_url=paper_base_url,
+        timeout_seconds=timeout_seconds,
+    )
+
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appkey": app_key,
+        "appsecret": app_secret,
+        "tr_id": tr_id,
+        "custtype": "P",
+        "hashkey": hashkey,
+    }
+
+    try:
+        resp = httpx.post(url, headers=headers, json=body, timeout=timeout_seconds)
+    except Exception as exc:
+        raise KisError(f"KIS order request failed: {exc}") from exc
+
+    data = _safe_json(resp)
+    if resp.status_code >= 400:
+        msg = data.get("msg1") or data.get("message") or f"HTTP {resp.status_code}"
+        raise KisError(f"KIS order HTTP error: {msg}", status_code=resp.status_code, payload=data)
+
+    rt_cd = str(data.get("rt_cd") or "")
+    if rt_cd and rt_cd != "0":
+        msg = data.get("msg1") or "KIS error"
+        raise KisError(f"KIS order error: {msg}", status_code=resp.status_code, payload=data)
+
+    return data

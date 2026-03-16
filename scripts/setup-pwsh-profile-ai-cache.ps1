@@ -43,8 +43,9 @@ if ($hasBlock -and -not $Force) {
 
 if ($hasBlock) {
   $pattern = [regex]::Escape($markerBegin) + '([\s\S]*?)' + [regex]::Escape($markerEnd)
-  $content = [regex]::Replace($content, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $block })
-} else {
+  $content = [regex]::Replace($content, $pattern, [System.Text.RegularExpressions.MatchEvaluator] { param($m) $block })
+}
+else {
   if ($content -and -not $content.EndsWith("`r`n")) { $content += "`r`n" }
   $content += $block
 }

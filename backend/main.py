@@ -13,7 +13,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPBearer
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 import kis_client
@@ -158,8 +158,252 @@ def _is_market_open(now: datetime) -> bool:
         return False
     t = now.time()
     start = datetime(now.year, now.month, now.day, 9, 0, 0).time()
-    end = datetime(now.year, now.month, now.day, 15, 20, 0).time()
+    # Keep the loop running a bit after close so liquidation at 15:20 can still run
+    # even if the 1-minute scheduler is not perfectly aligned.
+    end = datetime(now.year, now.month, now.day, 15, 30, 0).time()
     return start <= t <= end
+
+
+def _should_sa_friday_liquidate(now: datetime) -> bool:
+    # Friday 15:15 이후 전량 청산
+    if now.weekday() != 4:
+        return False
+    return now.time() >= datetime(now.year, now.month, now.day, 15, 15, 0).time()
+
+
+def _should_daily_close_liquidate(now: datetime) -> bool:
+    # 15:20 이후 잔여 포지션 정리
+    return now.time() >= datetime(now.year, now.month, now.day, 15, 20, 0).time()
+
+
+def _kis_account_product_code_from_prefix(prefix: str | None) -> str | None:
+    # 요구사항상 계좌 앞 8자리만 저장하므로 상품코드는 01로 가정
+    if not prefix:
+        return None
+    p = str(prefix).strip()
+    if len(p) < 8:
+        return None
+    return "01"
+
+
+def _place_market_order_and_log(
+    *,
+    db: Session,
+    user_id: int,
+    engine: str,
+    side: str,
+    stock_code: str,
+    qty: int,
+    profile,
+) -> tuple[bool, str]:
+    """Place KIS market order and write Sa/Plus trade logs.
+
+    Returns (ok, message).
+    """
+
+    app_key = (str(getattr(profile, "app_key", "") or "").strip())
+    app_secret = (str(getattr(profile, "app_secret", "") or "").strip())
+    is_paper = bool(getattr(profile, "is_paper", False))
+    account_prefix = (str(getattr(profile, "account_prefix", "") or "").strip())
+    prdt_cd = _kis_account_product_code_from_prefix(account_prefix)
+
+    if not app_key or not app_secret or not account_prefix or not prdt_cd:
+        return False, "KIS 프로필(appKey/appSecret/accountPrefix) 설정 필요"
+
+    if (not is_paper) and (not settings.autotrading_live_orders):
+        return False, "실계좌 주문은 AUTOTRADING_LIVE_ORDERS=1 설정이 필요합니다."
+
+    try:
+        resp = kis_client.place_cash_order(
+            app_key=app_key,
+            app_secret=app_secret,
+            is_paper=is_paper,
+            account_prefix=account_prefix,
+            account_product_code=prdt_cd,
+            side=("buy" if side == "buy" else "sell"),
+            code=stock_code,
+            qty=int(qty),
+            order_type="market",
+            live_base_url=settings.kis_live_base_url,
+            paper_base_url=settings.kis_paper_base_url,
+            timeout_seconds=10.0,
+        )
+
+        odno = None
+        try:
+            output = resp.get("output") or {}
+            odno = output.get("ODNO") or output.get("odno")
+        except Exception:
+            odno = None
+
+        msg = (f"주문 성공" + (f" (ODNO={odno})" if odno else ""))
+
+        if engine == "sa":
+            db.add(
+                models.SaAutoTradingLog(
+                    user_id=int(user_id),
+                    stock_code=stock_code,
+                    action=("buy" if side == "buy" else "sell"),
+                    qty=int(qty),
+                    price=None,
+                    message=msg,
+                )
+            )
+        elif engine == "plus":
+            db.add(
+                models.PlusAutoTradingLog(
+                    user_id=int(user_id),
+                    stock_code=stock_code,
+                    action=("buy" if side == "buy" else "sell"),
+                    qty=int(qty),
+                    price=None,
+                    message=msg,
+                )
+            )
+
+        return True, msg
+    except Exception as exc:
+        err = str(exc)
+        if engine == "sa":
+            db.add(
+                models.SaAutoTradingLog(
+                    user_id=int(user_id),
+                    stock_code=stock_code,
+                    action=("buy" if side == "buy" else "sell"),
+                    qty=int(qty),
+                    price=None,
+                    message=f"주문 실패: {err}",
+                )
+            )
+        elif engine == "plus":
+            db.add(
+                models.PlusAutoTradingLog(
+                    user_id=int(user_id),
+                    stock_code=stock_code,
+                    action=("buy" if side == "buy" else "sell"),
+                    qty=int(qty),
+                    price=None,
+                    message=f"주문 실패: {err}",
+                )
+            )
+        return False, err
+
+
+def _pick_top_recommendation_code(db: Session, *, exclude_codes: set[str]) -> str | None:
+    assert models is not None
+    today = date.today()
+    rows = db.execute(
+        select(models.Recommendation.stock_code)
+        .where(models.Recommendation.rec_date == today)
+        .order_by(models.Recommendation.rank.is_(None), models.Recommendation.rank, desc(models.Recommendation.score_total))
+        .limit(50)
+    ).all()
+    for (code,) in rows:
+        c = str(code)
+        if c and c not in exclude_codes:
+            return c
+    return None
+
+
+def _run_sa_engine_tick(db: Session, *, user_id: int, profile, now: datetime) -> None:
+    assert models is not None
+
+    # liquidation rules
+    if _should_sa_friday_liquidate(now) or _should_daily_close_liquidate(now):
+        open_pos = db.execute(
+            select(models.SaAutoTradingPosition)
+            .where(models.SaAutoTradingPosition.user_id == user_id, models.SaAutoTradingPosition.closed_at.is_(None))
+        ).scalars().all()
+        for p in open_pos:
+            ok, msg = _place_market_order_and_log(
+                db=db,
+                user_id=user_id,
+                engine="sa",
+                side="sell",
+                stock_code=str(p.stock_code),
+                qty=int(p.qty),
+                profile=profile,
+            )
+            db.add(models.AutomationEngineLog(user_id=user_id, engine="sa", event=("sell" if ok else "error"), message=msg))
+            if ok:
+                p.closed_at = datetime.now()
+        return
+
+    # buy minimal: if holdings < 5, buy 1 share of top recommendation not held
+    open_pos = db.execute(
+        select(models.SaAutoTradingPosition)
+        .where(models.SaAutoTradingPosition.user_id == user_id, models.SaAutoTradingPosition.closed_at.is_(None))
+    ).scalars().all()
+    if len(open_pos) >= 5:
+        return
+
+    held = {str(p.stock_code) for p in open_pos}
+    code = _pick_top_recommendation_code(db, exclude_codes=held)
+    if not code:
+        return
+
+    ok, msg = _place_market_order_and_log(
+        db=db,
+        user_id=user_id,
+        engine="sa",
+        side="buy",
+        stock_code=code,
+        qty=1,
+        profile=profile,
+    )
+    db.add(models.AutomationEngineLog(user_id=user_id, engine="sa", event=("buy" if ok else "error"), message=msg))
+    if ok:
+        # create a new position; avg_buy will be unknown until fill (set 0 for now)
+        db.add(models.SaAutoTradingPosition(user_id=user_id, stock_code=code, qty=1, avg_buy=0.0))
+
+
+def _run_plus_engine_tick(db: Session, *, user_id: int, profile, now: datetime) -> None:
+    assert models is not None
+
+    if _should_daily_close_liquidate(now):
+        open_pos = db.execute(
+            select(models.PlusAutoTradingPosition)
+            .where(models.PlusAutoTradingPosition.user_id == user_id, models.PlusAutoTradingPosition.closed_at.is_(None))
+        ).scalars().all()
+        for p in open_pos:
+            ok, msg = _place_market_order_and_log(
+                db=db,
+                user_id=user_id,
+                engine="plus",
+                side="sell",
+                stock_code=str(p.stock_code),
+                qty=int(p.qty),
+                profile=profile,
+            )
+            db.add(models.AutomationEngineLog(user_id=user_id, engine="plus", event=("sell" if ok else "error"), message=msg))
+            if ok:
+                p.closed_at = datetime.now()
+        return
+
+    open_pos = db.execute(
+        select(models.PlusAutoTradingPosition)
+        .where(models.PlusAutoTradingPosition.user_id == user_id, models.PlusAutoTradingPosition.closed_at.is_(None))
+    ).scalars().all()
+    if len(open_pos) >= 5:
+        return
+
+    held = {str(p.stock_code) for p in open_pos}
+    code = _pick_top_recommendation_code(db, exclude_codes=held)
+    if not code:
+        return
+
+    ok, msg = _place_market_order_and_log(
+        db=db,
+        user_id=user_id,
+        engine="plus",
+        side="buy",
+        stock_code=code,
+        qty=1,
+        profile=profile,
+    )
+    db.add(models.AutomationEngineLog(user_id=user_id, engine="plus", event=("buy" if ok else "error"), message=msg))
+    if ok:
+        db.add(models.PlusAutoTradingPosition(user_id=user_id, stock_code=code, qty=1, avg_buy=0.0))
 
 
 def _autotrade_tick_loop() -> None:
@@ -195,27 +439,29 @@ def _autotrade_tick_loop() -> None:
                 plus_users = db.execute(
                     select(models.PlusAutoTradingConfig.user_id).where(models.PlusAutoTradingConfig.enabled.is_(True))
                 ).all()
-                sv_users = db.execute(
-                    select(models.SvAgentConfig.user_id).where(models.SvAgentConfig.enabled.is_(True))
-                ).all()
 
-                seen: set[tuple[int, str]] = set()
-                for (uid,) in sa_users:
-                    seen.add((int(uid), "sa"))
-                for (uid,) in plus_users:
-                    seen.add((int(uid), "plus"))
-                for (uid,) in sv_users:
-                    seen.add((int(uid), "sv"))
+                sa_ids = {int(uid) for (uid,) in sa_users}
+                plus_ids = {int(uid) for (uid,) in plus_users}
+                all_ids = sorted(sa_ids.union(plus_ids))
 
-                for user_id, engine in seen:
-                    db.add(
-                        models.AutomationEngineLog(
-                            user_id=int(user_id),
-                            engine=str(engine),
-                            event="tick",
-                            message="dry-run",
-                        )
-                    )
+                for uid in all_ids:
+                    # profile is per-user
+                    profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == int(uid))).scalar_one_or_none()
+
+                    if uid in sa_ids:
+                        try:
+                            db.add(models.AutomationEngineLog(user_id=int(uid), engine="sa", event="tick", message=None))
+                            _run_sa_engine_tick(db, user_id=int(uid), profile=profile, now=now)
+                        except Exception as exc:
+                            db.add(models.AutomationEngineLog(user_id=int(uid), engine="sa", event="error", message=str(exc)))
+
+                    if uid in plus_ids:
+                        try:
+                            db.add(models.AutomationEngineLog(user_id=int(uid), engine="plus", event="tick", message=None))
+                            _run_plus_engine_tick(db, user_id=int(uid), profile=profile, now=now)
+                        except Exception as exc:
+                            db.add(models.AutomationEngineLog(user_id=int(uid), engine="plus", event="error", message=str(exc)))
+
                 db.commit()
             except Exception:
                 db.rollback()
@@ -537,6 +783,9 @@ def get_dashboard(current_user=Depends(get_current_user)):
     plus_on = False
     sv_on = False
     kis_connected = False
+    sa_trades_today = 0
+    plus_trades_today = 0
+    sv_trades_today = 0
 
     if apollo_db is not None and models is not None:
         db: Session = apollo_db.get_session_factory()()
@@ -547,6 +796,44 @@ def get_dashboard(current_user=Depends(get_current_user)):
             sa_on = bool(sa_cfg.enabled) if sa_cfg else False
             plus_on = bool(plus_cfg.enabled) if plus_cfg else False
             sv_on = bool(sv_cfg.enabled) if sv_cfg else False
+
+            start_dt = datetime.combine(date.today(), datetime.min.time())
+            end_dt = start_dt + timedelta(days=1)
+
+            try:
+                sa_trades_today = int(
+                    db.execute(
+                        select(func.count())
+                        .select_from(models.SaAutoTradingLog)
+                        .where(
+                            models.SaAutoTradingLog.user_id == user_id,
+                            models.SaAutoTradingLog.at >= start_dt,
+                            models.SaAutoTradingLog.at < end_dt,
+                        )
+                    ).scalar_one()
+                    or 0
+                )
+            except Exception:
+                sa_trades_today = 0
+
+            try:
+                plus_trades_today = int(
+                    db.execute(
+                        select(func.count())
+                        .select_from(models.PlusAutoTradingLog)
+                        .where(
+                            models.PlusAutoTradingLog.user_id == user_id,
+                            models.PlusAutoTradingLog.at >= start_dt,
+                            models.PlusAutoTradingLog.at < end_dt,
+                        )
+                    ).scalar_one()
+                    or 0
+                )
+            except Exception:
+                plus_trades_today = 0
+
+            # SV Agent trades are not yet logged in a dedicated table in this codebase.
+            sv_trades_today = 0
 
             profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
             if profile and profile.app_key and profile.app_secret:
@@ -582,10 +869,10 @@ def get_dashboard(current_user=Depends(get_current_user)):
             {"name": "POSCO홀딩스", "code": "005490", "score": 83},
         ],
         "automation": {
-            "basic": {"on": False, "label": "OFF"},
-            "sa": {"on": sa_on, "label": "ON" if sa_on else "OFF"},
-            "plus": {"on": plus_on, "label": "ON" if plus_on else "OFF"},
-            "svAgent": {"on": sv_on, "label": "ON" if sv_on else "OFF"},
+            "basic": {"on": False, "label": "OFF / 0건"},
+            "sa": {"on": sa_on, "label": ("ON" if sa_on else "OFF") + f" / {sa_trades_today}건"},
+            "plus": {"on": plus_on, "label": ("ON" if plus_on else "OFF") + f" / {plus_trades_today}건"},
+            "svAgent": {"on": sv_on, "label": ("ON" if sv_on else "OFF") + f" / {sv_trades_today}건"},
         },
         "kis": {"connected": kis_connected, "label": ("KIS 실시간 연결" if kis_connected else "KIS 연결 필요")},
     }

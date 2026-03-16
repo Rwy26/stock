@@ -16,7 +16,8 @@ try {
   }
   if (-not $env:TEMP -or -not (Test-Path $env:TEMP)) { $env:TEMP = $fallbackTemp }
   if (-not $env:TMP -or -not (Test-Path $env:TMP)) { $env:TMP = $fallbackTemp }
-} catch { }
+}
+catch { }
 
 if (-not (Test-Path $RepoPath)) {
   throw "RepoPath not found: $RepoPath"
@@ -29,16 +30,16 @@ if (-not (Test-Path $scriptPath)) {
 
 $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
 
-$taskArgs = @(
+$taskArgumentList = @(
   '-NoProfile',
   '-ExecutionPolicy', 'Bypass',
   '-File', "`"$scriptPath`"",
   '-RepoPath', "`"$RepoPath`"",
   '-MessagePrefix', 'auto-save'
 )
-if ($Push) { $taskArgs += '-Push' }
+if ($Push) { $taskArgumentList += '-Push' }
 
-$action = New-ScheduledTaskAction -Execute $pwsh -Argument ($taskArgs -join ' ') -WorkingDirectory $RepoPath
+$action = New-ScheduledTaskAction -Execute $pwsh -Argument ($taskArgumentList -join ' ') -WorkingDirectory $RepoPath
 
 # Start 1 minute from now, then repeat forever
 $start = (Get-Date).AddMinutes(1)
@@ -61,7 +62,8 @@ $task = New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings 
 # Replace if exists
 try {
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-} catch { }
+}
+catch { }
 
 Register-ScheduledTask -TaskName $TaskName -InputObject $task | Out-Null
 
