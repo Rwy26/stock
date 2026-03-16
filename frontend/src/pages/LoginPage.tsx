@@ -40,10 +40,14 @@ export function LoginPage() {
                 .then((res) => {
                   setAccessToken(res.accessToken)
                   if (res.user?.role) setUserRole(res.user.role)
-                  return fetchJson<{ nickname: string | null; kis: { appKey: string | null; accountPrefix: string | null } }>('/api/profile')
+                  return fetchJson<{
+                    nickname: string | null
+                    kis: { appKey: string | null; accountPrefix: string | null; hasAppSecret: boolean }
+                  }>('/api/profile')
                 })
                 .then((profile) => {
-                  const needsSetup = !profile.nickname || !profile.kis?.appKey || !profile.kis?.accountPrefix
+                  const needsSetup =
+                    !profile.nickname || !profile.kis?.appKey || !profile.kis?.accountPrefix || !profile.kis?.hasAppSecret
                   navigate(needsSetup ? '/profile-setup' : '/', { replace: true })
                 })
                 .catch(() => {

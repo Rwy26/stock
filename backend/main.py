@@ -4,6 +4,8 @@ import json
 import mimetypes
 import secrets
 import string
+import threading
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -89,6 +91,76 @@ def get_current_user_for_refresh(credentials=Depends(bearer_scheme)):
         db.close()
 
 app = FastAPI(title="Apollo Stock Trading System")
+
+
+_kis_refresh_stop = threading.Event()
+
+
+def _kis_refresh_loop() -> None:
+    """Best-effort hourly KIS token warm-up.
+
+    Keeps cached KIS tokens fresh without requiring manual restarts.
+    """
+
+    time.sleep(2.0)
+
+    while not _kis_refresh_stop.is_set():
+        try:
+            if apollo_db is not None and models is not None:
+                db: Session = apollo_db.get_session_factory()()
+                try:
+                    rows = db.execute(
+                        select(models.KisProfile.app_key, models.KisProfile.app_secret, models.KisProfile.is_paper)
+                        .where(models.KisProfile.app_key.is_not(None), models.KisProfile.app_secret.is_not(None))
+                    ).all()
+                finally:
+                    db.close()
+
+                unique_profiles: dict[tuple[str, bool], str] = {}
+                for app_key, app_secret, is_paper in rows:
+                    ak = (str(app_key).strip() if app_key is not None else "")
+                    sec = (str(app_secret).strip() if app_secret is not None else "")
+                    if not ak or not sec:
+                        continue
+                    unique_profiles[(ak, bool(is_paper))] = sec
+
+                for (ak, is_paper), sec in unique_profiles.items():
+                    try:
+                        _token, remaining = kis_client.get_access_token(
+                            app_key=ak,
+                            app_secret=sec,
+                            is_paper=is_paper,
+                            live_base_url=settings.kis_live_base_url,
+                            paper_base_url=settings.kis_paper_base_url,
+                            timeout_seconds=5.0,
+                        )
+                        if int(remaining) <= 60 * 60:
+                            kis_client.get_access_token(
+                                app_key=ak,
+                                app_secret=sec,
+                                is_paper=is_paper,
+                                force_refresh=True,
+                                live_base_url=settings.kis_live_base_url,
+                                paper_base_url=settings.kis_paper_base_url,
+                                timeout_seconds=5.0,
+                            )
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        _kis_refresh_stop.wait(timeout=60 * 60)
+
+
+@app.on_event("startup")
+def _startup_kis_refresh() -> None:
+    t = threading.Thread(target=_kis_refresh_loop, name="kis-token-refresh", daemon=True)
+    t.start()
+
+
+@app.on_event("shutdown")
+def _shutdown_kis_refresh() -> None:
+    _kis_refresh_stop.set()
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MOCK_DIR = REPO_ROOT / "frontend-prototype" / "mock"
@@ -430,6 +502,57 @@ def get_dashboard(current_user=Depends(get_current_user)):
         },
         "kis": {"connected": kis_connected, "label": ("KIS 실시간 연결" if kis_connected else "KIS 연결 필요")},
     }
+
+
+@app.get("/api/kis/token-status")
+def kis_token_status(current_user=Depends(get_current_user)):
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    user_id = int(current_user.id)
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
+        app_key = (str(profile.app_key).strip() if profile and profile.app_key else "")
+        app_secret = (str(profile.app_secret).strip() if profile and profile.app_secret else "")
+        is_paper = bool(profile.is_paper) if profile else False
+
+        if not app_key or not app_secret:
+            return {
+                "ok": True,
+                "hasProfile": False,
+                "tradeType": ("모의투자" if is_paper else "실계좌"),
+                "expiresIn": None,
+                "asOf": datetime.now().isoformat(),
+            }
+
+        try:
+            _token, expires_in = kis_client.get_access_token(
+                app_key=app_key,
+                app_secret=app_secret,
+                is_paper=is_paper,
+                live_base_url=settings.kis_live_base_url,
+                paper_base_url=settings.kis_paper_base_url,
+                timeout_seconds=5.0,
+            )
+            return {
+                "ok": True,
+                "hasProfile": True,
+                "tradeType": ("모의투자" if is_paper else "실계좌"),
+                "expiresIn": int(expires_in),
+                "asOf": datetime.now().isoformat(),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "hasProfile": True,
+                "tradeType": ("모의투자" if is_paper else "실계좌"),
+                "expiresIn": None,
+                "error": str(exc),
+                "asOf": datetime.now().isoformat(),
+            }
+    finally:
+        db.close()
 
 
 @app.get("/api/automation/sa")
@@ -1064,11 +1187,12 @@ def get_profile(current_user=Depends(get_current_user)):
     try:
         user = db.execute(select(models.User).where(models.User.id == user_id)).scalar_one_or_none()
         profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
+        has_app_secret = bool(profile and profile.app_secret and str(profile.app_secret).strip())
         return {
             "nickname": (user.nickname if user else None),
             "kis": {
                 "appKey": (profile.app_key if profile else None),
-                "appSecret": (profile.app_secret if profile else None),
+                "hasAppSecret": has_app_secret,
                 "accountPrefix": (profile.account_prefix if profile else None),
                 "tradeType": ("모의투자" if (profile and profile.is_paper) else "실계좌"),
             },
@@ -1085,7 +1209,8 @@ def upsert_profile(payload: dict = Body(...), current_user=Depends(get_current_u
     user_id = int(current_user.id)
     nickname = (payload.get("nickname") or "").strip() or None
     app_key = (payload.get("appKey") or "").strip() or None
-    app_secret = (payload.get("appSecret") or "").strip() or None
+    raw_secret = payload.get("appSecret")
+    app_secret = (str(raw_secret).strip() if raw_secret is not None else "")
     account_prefix = (payload.get("accountPrefix") or payload.get("accountNo") or "").strip() or None
     trade_type = (payload.get("tradeType") or "").strip() or "실계좌"
     is_paper = trade_type != "실계좌"
@@ -1101,7 +1226,8 @@ def upsert_profile(payload: dict = Body(...), current_user=Depends(get_current_u
             session.add(profile)
 
         profile.app_key = app_key
-        profile.app_secret = app_secret
+        if app_secret:
+            profile.app_secret = app_secret
         profile.account_prefix = account_prefix
         profile.is_paper = is_paper
 

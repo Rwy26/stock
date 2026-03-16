@@ -8,6 +8,7 @@ export function ProfileSetupPage() {
   const [nickname, setNickname] = useState('')
   const [appKey, setAppKey] = useState('')
   const [appSecret, setAppSecret] = useState('')
+  const [hasAppSecret, setHasAppSecret] = useState(false)
   const [accountPrefix, setAccountPrefix] = useState('')
   const [tradeType, setTradeType] = useState<'실계좌' | '모의투자'>('실계좌')
   const [busy, setBusy] = useState(false)
@@ -17,7 +18,7 @@ export function ProfileSetupPage() {
       nickname: string | null
       kis: {
         appKey: string | null
-        appSecret: string | null
+        hasAppSecret: boolean
         accountPrefix: string | null
         tradeType: '실계좌' | '모의투자'
       }
@@ -25,7 +26,7 @@ export function ProfileSetupPage() {
       .then((data) => {
         if (data.nickname != null) setNickname(data.nickname)
         if (data.kis?.appKey != null) setAppKey(data.kis.appKey)
-        if (data.kis?.appSecret != null) setAppSecret(data.kis.appSecret)
+        if (typeof data.kis?.hasAppSecret === 'boolean') setHasAppSecret(data.kis.hasAppSecret)
         if (data.kis?.accountPrefix != null) setAccountPrefix(data.kis.accountPrefix)
         if (data.kis?.tradeType != null) setTradeType(data.kis.tradeType)
       })
@@ -61,7 +62,11 @@ export function ProfileSetupPage() {
           </label>
           <label>
             KIS 앱 시크릿(App Secret)
-            <input placeholder="app secret" value={appSecret} onChange={(e) => setAppSecret(e.target.value)} />
+            <input
+              placeholder={hasAppSecret ? '******** (변경 시에만 입력)' : 'app secret'}
+              value={appSecret}
+              onChange={(e) => setAppSecret(e.target.value)}
+            />
           </label>
           <label>
             계좌번호(앞 8자리)

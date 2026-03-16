@@ -58,6 +58,7 @@ def get_access_token(
     app_key: str,
     app_secret: str,
     is_paper: bool,
+    force_refresh: bool = False,
     live_base_url: str | None = None,
     paper_base_url: str | None = None,
     timeout_seconds: float = 10.0,
@@ -68,7 +69,7 @@ def get_access_token(
     cached = _TOKEN_CACHE.get(cache_key)
     if cached is not None:
         # Keep a small skew to avoid edge expiry.
-        if cached.expires_at - _utcnow() > timedelta(seconds=30):
+        if (not force_refresh) and (cached.expires_at - _utcnow() > timedelta(seconds=30)):
             remaining = int((cached.expires_at - _utcnow()).total_seconds())
             return cached.access_token, max(remaining, 0)
 

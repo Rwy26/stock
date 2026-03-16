@@ -36,11 +36,11 @@ $trigger = New-ScheduledTaskTrigger -Once -At $start
 $trigger.RepetitionInterval = New-TimeSpan -Minutes $EveryMinutes
 $trigger.RepetitionDuration = [TimeSpan]::MaxValue
 
-$settings = New-ScheduledTaskSettingsSet \
-  -AllowStartIfOnBatteries \
-  -DontStopIfGoingOnBatteries \
-  -StartWhenAvailable \
-  -ExecutionTimeLimit (New-TimeSpan -Minutes 10) \
+$settings = New-ScheduledTaskSettingsSet
+  -AllowStartIfOnBatteries
+  -DontStopIfGoingOnBatteries
+  -StartWhenAvailable
+  -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
   -MultipleInstances IgnoreNew
 
 # Run as current user (no password prompt), only when logged on
