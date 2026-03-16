@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Apollo - 포트폴리오</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+
+    <div class="app-shell" data-page="portfolio">
+      <aside class="sidebar glass">
+        <h1 class="brand">APOLLO</h1>
+        <p class="brand-sub">Jeminai UI for SongStock2</p>
+
+        <nav class="menu-list">
+          <a class="menu" data-route="dashboard" href="index.html">대시보드</a>
+          <a class="menu" data-route="portfolio" href="portfolio.html">포트폴리오</a>
+          <a class="menu" data-route="stock-search" href="stock-search.html">종목 탐색</a>
+          <a class="menu" data-route="recommendations" href="recommendations.html">추천 종목</a>
+          <a class="menu" data-route="watchlist" href="watchlist.html">관심 종목</a>
+          <a class="menu" data-route="auto-basic" href="auto-basic.html">일반 자동매매</a>
+          <a class="menu" data-route="auto-sa" href="auto-sa.html">SA 자동매매</a>
+          <a class="menu" data-route="auto-plus" href="auto-plus.html">Plus 자동매매</a>
+          <a class="menu" data-route="sv-agent" href="sv-agent.html">SV Agent</a>
+          <a class="menu" data-route="admin" href="admin.html">관리자</a>
+        </nav>
+      </aside>
+
+      <main class="main-panel">
+        <header class="topbar glass">
+          <div>
+            <p class="top-label">Portfolio</p>
+            <h2>포트폴리오</h2>
+            <p class="subtle">현재가는 반드시 KIS 실시간 API 기준</p>
+          </div>
+          <div class="auth-actions">
+            <button class="btn secondary" type="button">새로고침</button>
+            <div class="status-pill">동기화 준비</div>
+          </div>
+        </header>
+
+        <section class="panel glass reveal">
+          <div class="panel-head">
+            <h3>보유 종목</h3>
+            <p class="subtle">포트폴리오 화면 새로고침 시 KIS 계좌와 동기화</p>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>종목명</th>
+                  <th>수량</th>
+                  <th>평균 매수가</th>
+                  <th>현재가</th>
+                  <th>평가금액</th>
+                  <th>손익금</th>
+                  <th>수익률</th>
+                  <th>매수일</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>삼성전자</td>
+                  <td>320</td>
+                  <td>69,400</td>
+                  <td>72,100</td>
+                  <td>23,072,000</td>
+                  <td class="up">+864,000</td>
+                  <td class="up">+3.89%</td>
+                  <td>2026-03-05</td>
+                </tr>
+                <tr>
+                  <td>현대차</td>
+                  <td>92</td>
+                  <td>226,000</td>
+                  <td>221,500</td>
+                  <td>20,378,000</td>
+                  <td class="down">-414,000</td>
+                  <td class="down">-1.99%</td>
+                  <td>2026-03-11</td>
+                </tr>
+                <tr>
+                  <td>SK하이닉스</td>
+                  <td>74</td>
+                  <td>198,500</td>
+                  <td>210,500</td>
+                  <td>15,577,000</td>
+                  <td class="up">+888,000</td>
+                  <td class="up">+6.05%</td>
+                  <td>2026-03-07</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="divider"></div>
+          <p class="hint">주의: DB 일봉(daily_prices) 종가로 현재가를 대체하지 않습니다.</p>
+        </section>
+
+        <section class="two-col">
+          <article class="panel glass reveal">
+            <div class="panel-head">
+              <h3>자산 요약</h3>
+            </div>
+            <ul class="engine-list">
+              <li><span>총 평가금액</span><b>₩184,380,000</b></li>
+              <li><span>총 투자금액</span><b>₩161,000,000</b></li>
+              <li><span>평가손익</span><b class="up">+₩23,380,000</b></li>
+              <li><span>예수금</span><b>₩39,640,000</b></li>
+            </ul>
+          </article>
+          <article class="panel glass reveal">
+            <div class="panel-head">
+              <h3>자산 추이 (30일)</h3>
+            </div>
+            <div class="chart-placeholder">Chart Placeholder</div>
+            <p class="hint">Hover 시 상세 금액 표시 (실데이터 연동 예정)</p>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

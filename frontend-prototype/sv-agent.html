@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Apollo - SV Agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+
+    <div class="app-shell" data-page="sv-agent">
+      <aside class="sidebar glass">
+        <h1 class="brand">APOLLO</h1>
+        <p class="brand-sub">Jeminai UI for SongStock2</p>
+
+        <nav class="menu-list">
+          <a class="menu" data-route="dashboard" href="index.html">대시보드</a>
+          <a class="menu" data-route="portfolio" href="portfolio.html">포트폴리오</a>
+          <a class="menu" data-route="stock-search" href="stock-search.html">종목 탐색</a>
+          <a class="menu" data-route="recommendations" href="recommendations.html">추천 종목</a>
+          <a class="menu" data-route="watchlist" href="watchlist.html">관심 종목</a>
+          <a class="menu" data-route="auto-basic" href="auto-basic.html">일반 자동매매</a>
+          <a class="menu" data-route="auto-sa" href="auto-sa.html">SA 자동매매</a>
+          <a class="menu" data-route="auto-plus" href="auto-plus.html">Plus 자동매매</a>
+          <a class="menu" data-route="sv-agent" href="sv-agent.html">SV Agent</a>
+          <a class="menu" data-route="admin" href="admin.html">관리자</a>
+        </nav>
+      </aside>
+
+      <main class="main-panel">
+        <header class="topbar glass">
+          <div>
+            <p class="top-label">Supervisor Agent</p>
+            <h2>SV Agent (AI 슈퍼바이저)</h2>
+            <p class="subtle">멀티 AI 에이전트 기반 감독 자동매매</p>
+          </div>
+          <div class="status-pill">Kill Switch</div>
+        </header>
+
+        <section class="two-col">
+          <article class="panel glass reveal">
+            <div class="panel-head"><h3>설정</h3></div>
+            <div class="settings-grid">
+              <label>활성화 <select><option>Off</option><option>On</option></select></label>
+              <label>총 예산 <input placeholder="예: 10000000" /></label>
+              <label>최대 종목 수 <input type="number" value="5" /></label>
+              <label>종목당 최대 예산 <input placeholder="예: 2000000" /></label>
+              <label>승인 모드 <select><option>rule_based</option><option>ai_assisted</option><option>full_ai</option></select></label>
+              <label>손절률(%) <input type="number" value="-5" /></label>
+              <label>익절률(%) <input type="number" value="10" /></label>
+              <label>트레일링 시작 수익률(%) <input type="number" value="3" /></label>
+              <label>최대 보유일 <input type="number" value="10" /></label>
+              <label>AI 학습 활성화 <select><option>On</option><option>Off</option></select></label>
+              <label>Kill Switch 임계값(%) <input type="number" value="-10" /></label>
+            </div>
+            <div class="divider"></div>
+            <button class="btn" type="button">저장</button>
+          </article>
+
+          <article class="panel glass reveal">
+            <div class="panel-head"><h3>Kill Switch 상태</h3></div>
+            <ul class="engine-list">
+              <li><span>임계값</span><b>-10%</b></li>
+              <li><span>현재 손실률</span><b class="up">-</b></li>
+              <li><span>상태</span><span class="chip on">대기</span></li>
+            </ul>
+            <div class="divider"></div>
+            <p class="hint">임계값 초과 시 모든 포지션 즉시 청산 후 비활성화</p>
+          </article>
+        </section>
+
+        <section class="panel glass reveal">
+          <div class="panel-head"><h3>탭</h3></div>
+          <div class="tabs" data-tabs="sv">
+            <button class="tab" type="button" data-tab="positions">보유 포지션</button>
+            <button class="tab" type="button" data-tab="ai">AI 추천</button>
+            <button class="tab" type="button" data-tab="approvals">승인 이력</button>
+            <button class="tab" type="button" data-tab="realized">실현손익</button>
+            <button class="tab" type="button" data-tab="settings">설정</button>
+          </div>
+
+          <div class="tab-panels" data-tab-panels="sv">
+            <div class="tab-panel" data-tab-panel="positions">
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>종목명</th>
+                      <th>수량</th>
+                      <th>매수가</th>
+                      <th>현재가</th>
+                      <th>수익률</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>삼성전자</td>
+                      <td>20</td>
+                      <td>69,400</td>
+                      <td>72,100</td>
+                      <td class="up">+3.89%</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="hint" style="margin-top:10px;">현재가는 KIS 실시간 API 조회</p>
+            </div>
+
+            <div class="tab-panel" data-tab-panel="ai">
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>종목</th>
+                      <th>AI 점수</th>
+                      <th>추천 사유</th>
+                      <th>승인 상태</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>현대차</td>
+                      <td><b>0.82</b></td>
+                      <td>리스크/수익 균형</td>
+                      <td><span class="chip off">대기</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="tab-panel" data-tab-panel="approvals">
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>시각</th>
+                      <th>종목</th>
+                      <th>신호</th>
+                      <th>결과</th>
+                      <th>사유</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>11:12</td>
+                      <td>현대차</td>
+                      <td>BUY</td>
+                      <td><span class="chip on">승인</span></td>
+                      <td>규칙 충족</td>
+                    </tr>
+                    <tr>
+                      <td>12:03</td>
+                      <td>팬오션</td>
+                      <td>BUY</td>
+                      <td><span class="chip off">거절</span></td>
+                      <td>리스크 과다</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="tab-panel" data-tab-panel="realized">
+              <div class="chart-placeholder">날짜별/종목별 실현손익 집계 Placeholder</div>
+              <p class="hint" style="margin-top:10px;">승/패 통계 확장 구현</p>
+            </div>
+
+            <div class="tab-panel" data-tab-panel="settings">
+              <p class="hint">상단 설정 패널과 동일 항목을 조정합니다.</p>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

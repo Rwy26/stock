@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Apollo - 관리자</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+
+    <div class="app-shell" data-page="admin">
+      <aside class="sidebar glass">
+        <h1 class="brand">APOLLO</h1>
+        <p class="brand-sub">Jeminai UI for SongStock2</p>
+
+        <nav class="menu-list">
+          <a class="menu" data-route="dashboard" href="index.html">대시보드</a>
+          <a class="menu" data-route="portfolio" href="portfolio.html">포트폴리오</a>
+          <a class="menu" data-route="stock-search" href="stock-search.html">종목 탐색</a>
+          <a class="menu" data-route="recommendations" href="recommendations.html">추천 종목</a>
+          <a class="menu" data-route="watchlist" href="watchlist.html">관심 종목</a>
+          <a class="menu" data-route="auto-basic" href="auto-basic.html">일반 자동매매</a>
+          <a class="menu" data-route="auto-sa" href="auto-sa.html">SA 자동매매</a>
+          <a class="menu" data-route="auto-plus" href="auto-plus.html">Plus 자동매매</a>
+          <a class="menu" data-route="sv-agent" href="sv-agent.html">SV Agent</a>
+          <a class="menu" data-route="admin" href="admin.html">관리자</a>
+        </nav>
+      </aside>
+
+      <main class="main-panel">
+        <header class="topbar glass">
+          <div>
+            <p class="top-label">Admin</p>
+            <h2>관리자 기능</h2>
+            <p class="subtle">사용자 관리 / 로그인 이력 / 토큰 갱신</p>
+          </div>
+          <div class="status-pill">관리자 전용</div>
+        </header>
+
+        <section class="panel glass reveal">
+          <div class="panel-head"><h3>사용자 관리</h3></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>이메일</th>
+                  <th>역할</th>
+                  <th>가입일</th>
+                  <th>활성</th>
+                  <th>KIS 설정</th>
+                  <th>비밀번호 초기화</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>administrator</td>
+                  <td><b>admin</b></td>
+                  <td>2026-03-03</td>
+                  <td><span class="chip on">ON</span></td>
+                  <td><button class="btn secondary" type="button">설정</button></td>
+                  <td><button class="btn secondary" type="button">초기화</button></td>
+                </tr>
+                <tr>
+                  <td>user01@example.com</td>
+                  <td>user</td>
+                  <td>2026-03-10</td>
+                  <td><span class="chip on">ON</span></td>
+                  <td><button class="btn secondary" type="button">설정</button></td>
+                  <td><button class="btn secondary" type="button">초기화</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="divider"></div>
+          <div class="form-row">
+            <label>사용자 생성(이메일) <input placeholder="email" /></label>
+            <label>비밀번호 <input placeholder="password" /></label>
+            <label>역할 <select><option>user</option><option>admin</option></select></label>
+          </div>
+          <div class="divider"></div>
+          <button class="btn" type="button">사용자 생성</button>
+        </section>
+
+        <section class="panel glass reveal">
+          <div class="panel-head"><h3>로그인 이력</h3></div>
+          <div class="form-row">
+            <label>시작일 <input type="date" value="2026-03-01" /></label>
+            <label>종료일 <input type="date" value="2026-03-16" /></label>
+            <label>액션 <button class="btn" type="button">조회</button></label>
+          </div>
+          <div class="divider"></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>시각</th>
+                  <th>이메일</th>
+                  <th>이벤트</th>
+                  <th>IP</th>
+                  <th>브라우저</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>2026-03-16 09:01</td>
+                  <td>administrator</td>
+                  <td>login</td>
+                  <td>203.0.113.10</td>
+                  <td>Chrome</td>
+                </tr>
+                <tr>
+                  <td>2026-03-16 15:30</td>
+                  <td>administrator</td>
+                  <td>logout</td>
+                  <td>203.0.113.10</td>
+                  <td>Chrome</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="hint" style="margin-top:10px;">관리자 JWT 토큰은 20시간 주기로 자동 갱신</p>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

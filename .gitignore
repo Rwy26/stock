@@ -1,0 +1,31 @@
+# Node
+node_modules/
+.npm/
+.pnpm-store/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+backend/.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env / secrets
+.env
+*.env
+.env.*
+
+# Logs
+logs/
+*.log
+
+# Local DB instance (from scripts/setup-mysql.ps1)
+.mysql/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/

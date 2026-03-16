@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Apollo - 관심 종목</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+
+    <div class="app-shell" data-page="watchlist">
+      <aside class="sidebar glass">
+        <h1 class="brand">APOLLO</h1>
+        <p class="brand-sub">Jeminai UI for SongStock2</p>
+
+        <nav class="menu-list">
+          <a class="menu" data-route="dashboard" href="index.html">대시보드</a>
+          <a class="menu" data-route="portfolio" href="portfolio.html">포트폴리오</a>
+          <a class="menu" data-route="stock-search" href="stock-search.html">종목 탐색</a>
+          <a class="menu" data-route="recommendations" href="recommendations.html">추천 종목</a>
+          <a class="menu" data-route="watchlist" href="watchlist.html">관심 종목</a>
+          <a class="menu" data-route="auto-basic" href="auto-basic.html">일반 자동매매</a>
+          <a class="menu" data-route="auto-sa" href="auto-sa.html">SA 자동매매</a>
+          <a class="menu" data-route="auto-plus" href="auto-plus.html">Plus 자동매매</a>
+          <a class="menu" data-route="sv-agent" href="sv-agent.html">SV Agent</a>
+          <a class="menu" data-route="admin" href="admin.html">관리자</a>
+        </nav>
+      </aside>
+
+      <main class="main-panel">
+        <header class="topbar glass">
+          <div>
+            <p class="top-label">Watchlist</p>
+            <h2>관심 종목</h2>
+            <p class="subtle">등록 종목의 현재가/등락률/점수 일괄 표시</p>
+          </div>
+          <div class="status-pill">총 3개</div>
+        </header>
+
+        <section class="panel glass reveal">
+          <div class="panel-head">
+            <h3>목록</h3>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>종목명</th>
+                  <th>코드</th>
+                  <th>현재가</th>
+                  <th>등락률</th>
+                  <th>점수</th>
+                  <th>삭제</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>삼성전자</td>
+                  <td>005930</td>
+                  <td>72,100</td>
+                  <td class="up">+1.02%</td>
+                  <td><b>91</b></td>
+                  <td><button class="btn secondary" type="button">삭제</button></td>
+                </tr>
+                <tr>
+                  <td>SK하이닉스</td>
+                  <td>000660</td>
+                  <td>210,500</td>
+                  <td class="up">+2.12%</td>
+                  <td><b>88</b></td>
+                  <td><button class="btn secondary" type="button">삭제</button></td>
+                </tr>
+                <tr>
+                  <td>현대차</td>
+                  <td>005380</td>
+                  <td>221,500</td>
+                  <td class="down">-0.35%</td>
+                  <td><b>85</b></td>
+                  <td><button class="btn secondary" type="button">삭제</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="hint" style="margin-top: 10px;">종목 클릭 시 상세 화면으로 이동 (연동 예정)</p>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

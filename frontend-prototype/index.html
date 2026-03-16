@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Apollo - Jeminai UI Prototype</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+
+    <div class="app-shell" data-page="dashboard">
+      <aside class="sidebar glass">
+        <h1 class="brand">APOLLO</h1>
+        <p class="brand-sub">Jeminai UI for SongStock2</p>
+
+        <nav class="menu-list">
+          <a class="menu" data-route="dashboard" href="index.html">대시보드</a>
+          <a class="menu" data-route="portfolio" href="portfolio.html">포트폴리오</a>
+          <a class="menu" data-route="stock-search" href="stock-search.html">종목 탐색</a>
+          <a class="menu" data-route="recommendations" href="recommendations.html">추천 종목</a>
+          <a class="menu" data-route="watchlist" href="watchlist.html">관심 종목</a>
+          <a class="menu" data-route="auto-basic" href="auto-basic.html">일반 자동매매</a>
+          <a class="menu" data-route="auto-sa" href="auto-sa.html">SA 자동매매</a>
+          <a class="menu" data-route="auto-plus" href="auto-plus.html">Plus 자동매매</a>
+          <a class="menu" data-route="sv-agent" href="sv-agent.html">SV Agent</a>
+          <a class="menu" data-route="admin" href="admin.html">관리자</a>
+        </nav>
+      </aside>
+
+      <main class="main-panel">
+        <header class="topbar glass">
+          <div>
+            <p class="top-label">Production v1.0+</p>
+            <h2>Apollo Stock Trading System</h2>
+          </div>
+          <div class="status-pill">KIS 실시간 연결</div>
+        </header>
+
+        <section class="dashboard-grid">
+          <article class="panel glass reveal">
+            <div class="panel-head">
+              <h3>자산 요약 (Asset Summary)</h3>
+            </div>
+            <div class="kpi-grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
+              <div class="card gradient-a" style="box-shadow:none;">
+                <h3>총 평가금액</h3>
+                <p class="value">₩184,380,000</p>
+                <span class="delta up">+2.41%</span>
+              </div>
+              <div class="card gradient-b" style="box-shadow:none;">
+                <h3>총 투자금액</h3>
+                <p class="value">₩161,000,000</p>
+                <span class="delta up">+1.04%</span>
+              </div>
+              <div class="card gradient-c" style="box-shadow:none;">
+                <h3>수익금</h3>
+                <p class="value">₩23,380,000</p>
+                <span class="delta up">+14.52%</span>
+              </div>
+              <div class="card gradient-d" style="box-shadow:none;">
+                <h3>예수금</h3>
+                <p class="value">₩39,640,000</p>
+                <span class="delta">가용 가능</span>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel glass reveal">
+            <div class="panel-head">
+              <h3>자산 추이 차트 (30일)</h3>
+            </div>
+            <div class="chart-placeholder">Asset Trend Chart Placeholder</div>
+            <p class="hint" style="margin-top: 10px;">날짜 hover 시 상세 금액 표시</p>
+          </article>
+
+          <article class="panel glass reveal">
+            <div class="panel-head">
+              <h3>자동매매 상태</h3>
+            </div>
+            <ul class="engine-list">
+              <li><span>일반 자동매매</span><span class="chip off">OFF</span></li>
+              <li><span>SA 자동매매</span><span class="chip on">ON / 12건</span></li>
+              <li><span>Plus 자동매매</span><span class="chip off">OFF</span></li>
+              <li><span>SV Agent</span><span class="chip on">ON / ai_assisted</span></li>
+            </ul>
+          </article>
+
+          <article class="panel glass reveal">
+            <div class="panel-head">
+              <h3>Top 추천 종목</h3>
+            </div>
+            <ol class="ranking">
+              <li><span>삼성전자</span><b>91점</b></li>
+              <li><span>SK하이닉스</span><b>88점</b></li>
+              <li><span>현대차</span><b>85점</b></li>
+              <li><span>KB금융</span><b>84점</b></li>
+              <li><span>POSCO홀딩스</span><b>83점</b></li>
+            </ol>
+          </article>
+
+          <article class="panel glass reveal">
+            <div class="panel-head">
+              <h3>일봉 캔들 차트</h3>
+              <p class="subtle">선택 종목: 삼성전자 (005930)</p>
+            </div>
+            <div class="chart-placeholder">Daily Candle Chart Placeholder</div>
+          </article>
+
+          <article class="panel glass reveal">
+            <div class="panel-head">
+              <h3>시장 지수 차트</h3>
+              <p class="subtle">KOSPI / KOSDAQ 당일 분봉</p>
+            </div>
+            <div class="chart-placeholder">Market Index Chart Placeholder</div>
+          </article>
+
+          <article class="panel glass reveal">
+            <div class="panel-head">
+              <h3>금리 차트</h3>
+              <p class="subtle">한국 기준금리 / CD금리</p>
+            </div>
+            <div class="chart-placeholder">Interest Rate Chart Placeholder</div>
+          </article>
+
+          <article class="panel glass reveal">
+            <div class="panel-head">
+              <h3>환율 차트</h3>
+              <p class="subtle">USD/KRW 최근 30일</p>
+            </div>
+            <div class="chart-placeholder">FX Chart Placeholder</div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
