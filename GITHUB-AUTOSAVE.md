@@ -67,4 +67,5 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall-git-auto-save-
 
 - PC가 꺼져있거나 절전이면 해당 시간에 실행되지 않습니다(다음 부팅 후 `StartWhenAvailable`로 따라잡을 수 있음).
 - 네트워크/인증 문제로 push가 실패하면 작업이 실패로 남습니다(작업 스케줄러 기록 확인).
+- 실행 로그는 `c:\stock\logs\git-auto-save.log`에 누적됩니다(`logs/`는 git에 커밋되지 않도록 제외되어 있습니다).
 - 같은 파일을 여러 PC에서 동시에 작업하면 충돌(conflict)이 날 수 있으니 주의하세요.
