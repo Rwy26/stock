@@ -28,7 +28,7 @@ $args = @(
 )
 if ($Push) { $args += '-Push' }
 
-$action = New-ScheduledTaskAction -Execute $pwsh -Argument ($args -join ' ')
+$action = New-ScheduledTaskAction -Execute $pwsh -Argument ($args -join ' ') -WorkingDirectory $RepoPath
 
 # Start 1 minute from now, then repeat forever
 $start = (Get-Date).AddMinutes(1)

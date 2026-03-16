@@ -153,67 +153,78 @@ def _kis_refresh_loop() -> None:
         _kis_refresh_stop.wait(timeout=60 * 60)
 
 
-    def _is_market_open(now: datetime) -> bool:
-        if now.weekday() >= 5:
-            return False
-        t = now.time()
-        start = datetime(now.year, now.month, now.day, 9, 0, 0).time()
-        end = datetime(now.year, now.month, now.day, 15, 20, 0).time()
-        return start <= t <= end
+def _is_market_open(now: datetime) -> bool:
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    start = datetime(now.year, now.month, now.day, 9, 0, 0).time()
+    end = datetime(now.year, now.month, now.day, 15, 20, 0).time()
+    return start <= t <= end
 
 
-    def _autotrade_tick_loop() -> None:
-        """Dry-run engine scheduler.
+def _autotrade_tick_loop() -> None:
+    """Dry-run engine scheduler.
 
-        - Runs every minute during market hours.
-        - Reads per-user enabled flags.
-        - Writes a simple tick log (no orders are placed).
-        """
+    - Runs every minute during market hours.
+    - Reads per-user enabled flags.
+    - Writes a simple tick log (no orders are placed).
+    """
 
-        time.sleep(2.0)
+    time.sleep(2.0)
 
-        while not _autotrade_stop.is_set():
+    while not _autotrade_stop.is_set():
+        try:
+            if settings.autotrading_kill_switch:
+                _autotrade_stop.wait(timeout=60)
+                continue
+
+            if apollo_db is None or models is None:
+                _autotrade_stop.wait(timeout=60)
+                continue
+
+            now = datetime.now()
+            if not _is_market_open(now):
+                _autotrade_stop.wait(timeout=60)
+                continue
+
+            db: Session = apollo_db.get_session_factory()()
             try:
-                if settings.autotrading_kill_switch:
-                    _autotrade_stop.wait(timeout=60)
-                    continue
+                sa_users = db.execute(
+                    select(models.SaAutoTradingConfig.user_id).where(models.SaAutoTradingConfig.enabled.is_(True))
+                ).all()
+                plus_users = db.execute(
+                    select(models.PlusAutoTradingConfig.user_id).where(models.PlusAutoTradingConfig.enabled.is_(True))
+                ).all()
+                sv_users = db.execute(
+                    select(models.SvAgentConfig.user_id).where(models.SvAgentConfig.enabled.is_(True))
+                ).all()
 
-                if apollo_db is None or models is None:
-                    _autotrade_stop.wait(timeout=60)
-                    continue
+                seen: set[tuple[int, str]] = set()
+                for (uid,) in sa_users:
+                    seen.add((int(uid), "sa"))
+                for (uid,) in plus_users:
+                    seen.add((int(uid), "plus"))
+                for (uid,) in sv_users:
+                    seen.add((int(uid), "sv"))
 
-                now = datetime.now()
-                if not _is_market_open(now):
-                    _autotrade_stop.wait(timeout=60)
-                    continue
-
-                db: Session = apollo_db.get_session_factory()()
-                try:
-                    sa_users = db.execute(select(models.SaAutoTradingConfig.user_id).where(models.SaAutoTradingConfig.enabled.is_(True))).all()
-                    plus_users = db.execute(
-                        select(models.PlusAutoTradingConfig.user_id).where(models.PlusAutoTradingConfig.enabled.is_(True))
-                    ).all()
-                    sv_users = db.execute(select(models.SvAgentConfig.user_id).where(models.SvAgentConfig.enabled.is_(True))).all()
-
-                    seen: set[tuple[int, str]] = set()
-                    for (uid,) in sa_users:
-                        seen.add((int(uid), "sa"))
-                    for (uid,) in plus_users:
-                        seen.add((int(uid), "plus"))
-                    for (uid,) in sv_users:
-                        seen.add((int(uid), "sv"))
-
-                    for user_id, engine in seen:
-                        db.add(models.AutomationEngineLog(user_id=int(user_id), engine=str(engine), event="tick", message="dry-run"))
-                    db.commit()
-                except Exception:
-                    db.rollback()
-                finally:
-                    db.close()
+                for user_id, engine in seen:
+                    db.add(
+                        models.AutomationEngineLog(
+                            user_id=int(user_id),
+                            engine=str(engine),
+                            event="tick",
+                            message="dry-run",
+                        )
+                    )
+                db.commit()
             except Exception:
-                pass
+                db.rollback()
+            finally:
+                db.close()
+        except Exception:
+            pass
 
-            _autotrade_stop.wait(timeout=60)
+        _autotrade_stop.wait(timeout=60)
 
 
 @app.on_event("startup")
@@ -1265,6 +1276,54 @@ def admin_login_history(limit: int = 200, startDate: str = None, endDate: str = 
                     "event": r.event,
                     "ip": r.ip,
                     "userAgent": r.user_agent,
+                    "at": (r.at.isoformat() if r.at else None),
+                }
+                for (r, email) in rows
+            ]
+        }
+    finally:
+        db.close()
+
+
+@app.get("/api/admin/engine-logs")
+def admin_engine_logs(
+    limit: int = 200,
+    userId: int = None,
+    engine: str = None,
+    event: str = None,
+    _admin=Depends(require_admin),
+):
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    limit = max(1, min(int(limit or 200), 1000))
+
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        stmt = (
+            select(models.AutomationEngineLog, models.User.email)
+            .outerjoin(models.User, models.User.id == models.AutomationEngineLog.user_id)
+            .order_by(desc(models.AutomationEngineLog.at))
+        )
+
+        if userId is not None:
+            stmt = stmt.where(models.AutomationEngineLog.user_id == int(userId))
+        if engine:
+            stmt = stmt.where(models.AutomationEngineLog.engine == str(engine))
+        if event:
+            stmt = stmt.where(models.AutomationEngineLog.event == str(event))
+
+        stmt = stmt.limit(limit)
+        rows = db.execute(stmt).all()
+        return {
+            "items": [
+                {
+                    "id": int(r.id),
+                    "userId": int(r.user_id),
+                    "email": email,
+                    "engine": r.engine,
+                    "event": r.event,
+                    "message": r.message,
                     "at": (r.at.isoformat() if r.at else None),
                 }
                 for (r, email) in rows
