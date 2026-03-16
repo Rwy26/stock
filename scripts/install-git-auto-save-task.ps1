@@ -3,7 +3,7 @@ param(
   [string]$RepoPath = 'C:\stock',
   [string]$TaskName = 'stock-git-auto-save',
   [int]$EveryMinutes = 60,
-  [switch]$Push
+  [switch]$Push = $true
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,21 +41,15 @@ if ($Push) { $taskArgumentList += '-Push' }
 
 $action = New-ScheduledTaskAction -Execute $pwsh -Argument ($taskArgumentList -join ' ') -WorkingDirectory $RepoPath
 
-# Start 1 minute from now, then repeat forever
+# Start 1 minute from now, then repeat every N minutes for a long duration.
+# Note: The ScheduledTasks cmdlet only supports repetition with the -Once trigger parameter set.
 $start = (Get-Date).AddMinutes(1)
-$trigger = New-ScheduledTaskTrigger -Once -At $start
-$trigger.RepetitionInterval = New-TimeSpan -Minutes $EveryMinutes
-$trigger.RepetitionDuration = [TimeSpan]::MaxValue
+$trigger = New-ScheduledTaskTrigger -Once -At $start -RepetitionInterval (New-TimeSpan -Minutes $EveryMinutes) -RepetitionDuration (New-TimeSpan -Days 3650)
 
-$settings = New-ScheduledTaskSettingsSet
-  -AllowStartIfOnBatteries
-  -DontStopIfGoingOnBatteries
-  -StartWhenAvailable
-  -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
-  -MultipleInstances IgnoreNew
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -MultipleInstances IgnoreNew
 
 # Run as current user (no password prompt), only when logged on
-$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel LeastPrivilege
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
 
 $task = New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings -Principal $principal
 

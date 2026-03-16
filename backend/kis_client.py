@@ -328,3 +328,74 @@ def place_cash_order(
         raise KisError(f"KIS order error: {msg}", status_code=resp.status_code, payload=data)
 
     return data
+
+
+def inquire_balance(
+    *,
+    app_key: str,
+    app_secret: str,
+    is_paper: bool,
+    account_prefix: str,
+    account_product_code: str = "01",
+    live_base_url: str | None = None,
+    paper_base_url: str | None = None,
+    timeout_seconds: float = 10.0,
+    ctx_area_fk100: str = "",
+    ctx_area_nk100: str = "",
+) -> dict[str, Any]:
+    """Inquire domestic stock balance/holdings.
+
+    Returns raw JSON. Callers can parse output1 holdings list.
+    """
+
+    token, _expires_in = get_access_token(
+        app_key=app_key,
+        app_secret=app_secret,
+        is_paper=is_paper,
+        live_base_url=live_base_url,
+        paper_base_url=paper_base_url,
+        timeout_seconds=timeout_seconds,
+    )
+
+    base = _base_url(is_paper, live_base_url=live_base_url, paper_base_url=paper_base_url)
+    url = f"{base}/uapi/domestic-stock/v1/trading/inquire-balance"
+
+    tr_id = "VTTC8434R" if is_paper else "TTTC8434R"
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appkey": app_key,
+        "appsecret": app_secret,
+        "tr_id": tr_id,
+        "custtype": "P",
+    }
+
+    params = {
+        "CANO": str(account_prefix).strip(),
+        "ACNT_PRDT_CD": str(account_product_code).zfill(2),
+        "AFHR_FLPR_YN": "N",
+        "OFL_YN": "",
+        "INQR_DVSN": "02",
+        "UNPR_DVSN": "01",
+        "FUND_STTL_ICLD_YN": "N",
+        "FNCG_AMT_AUTO_RDPT_YN": "N",
+        "PRCS_DVSN": "00",
+        "CTX_AREA_FK100": ctx_area_fk100,
+        "CTX_AREA_NK100": ctx_area_nk100,
+    }
+
+    try:
+        resp = httpx.get(url, headers=headers, params=params, timeout=timeout_seconds)
+    except Exception as exc:
+        raise KisError(f"KIS inquire-balance request failed: {exc}") from exc
+
+    data = _safe_json(resp)
+    if resp.status_code >= 400:
+        msg = data.get("msg1") or data.get("message") or f"HTTP {resp.status_code}"
+        raise KisError(f"KIS inquire-balance HTTP error: {msg}", status_code=resp.status_code, payload=data)
+
+    rt_cd = str(data.get("rt_cd") or "")
+    if rt_cd and rt_cd != "0":
+        msg = data.get("msg1") or "KIS error"
+        raise KisError(f"KIS inquire-balance error: {msg}", status_code=resp.status_code, payload=data)
+
+    return data

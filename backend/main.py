@@ -176,14 +176,177 @@ def _should_daily_close_liquidate(now: datetime) -> bool:
     return now.time() >= datetime(now.year, now.month, now.day, 15, 20, 0).time()
 
 
-def _kis_account_product_code_from_prefix(prefix: str | None) -> str | None:
-    # 요구사항상 계좌 앞 8자리만 저장하므로 상품코드는 01로 가정
-    if not prefix:
+def _parse_kis_account(value: str | None) -> tuple[str | None, str | None]:
+    """Parse stored account field into (CANO, ACNT_PRDT_CD).
+
+    We store in DB as either:
+    - "12345678" (CANO only) -> product defaults to "01" for ordering
+    - "12345678-01" or "1234567801" -> both parts
+    """
+
+    if value is None:
+        return None, None
+    raw = str(value).strip()
+    if not raw:
+        return None, None
+
+    raw = raw.replace(" ", "")
+    cano: str | None = None
+    prdt: str | None = None
+
+    if "-" in raw:
+        left, right = raw.split("-", 1)
+        cano = left.strip() or None
+        prdt = right.strip() or None
+    elif len(raw) == 10 and raw.isdigit():
+        cano = raw[:8]
+        prdt = raw[8:]
+    else:
+        cano = raw
+        prdt = None
+
+    if cano is not None:
+        cano = "".join([c for c in cano if c.isdigit()])
+        if len(cano) >= 8:
+            cano = cano[:8]
+        if len(cano) != 8:
+            cano = None
+
+    if prdt is not None:
+        prdt = "".join([c for c in prdt if c.isdigit()])
+        if prdt:
+            prdt = prdt.zfill(2)[:2]
+        else:
+            prdt = None
+
+    return cano, prdt
+
+
+def _format_kis_account(cano: str | None, prdt: str | None) -> str | None:
+    if not cano:
         return None
-    p = str(prefix).strip()
-    if len(p) < 8:
+    c = "".join([x for x in str(cano).strip() if x.isdigit()])
+    if len(c) != 8:
         return None
-    return "01"
+    if prdt is None:
+        return c
+    p = "".join([x for x in str(prdt).strip() if x.isdigit()])
+    if not p:
+        return c
+    p = p.zfill(2)[:2]
+    return f"{c}-{p}"
+
+
+def _sync_portfolio_from_kis(db: Session, *, user_id: int, profile) -> tuple[int, int]:
+    """Best-effort sync: KIS holdings -> portfolio table.
+
+    Returns (upserted_count, deleted_count).
+    """
+
+    assert models is not None
+
+    app_key = (str(getattr(profile, "app_key", "") or "").strip())
+    app_secret = (str(getattr(profile, "app_secret", "") or "").strip())
+    is_paper = bool(getattr(profile, "is_paper", False))
+    stored = (str(getattr(profile, "account_prefix", "") or "").strip())
+    cano, prdt_cd = _parse_kis_account(stored)
+    if prdt_cd is None:
+        prdt_cd = "01"
+
+    if not app_key or not app_secret or not cano:
+        return 0, 0
+    if (not is_paper) and (not settings.autotrading_live_orders):
+        # Don't touch live accounts unless explicitly enabled.
+        return 0, 0
+
+    bal = kis_client.inquire_balance(
+        app_key=app_key,
+        app_secret=app_secret,
+        is_paper=is_paper,
+        account_prefix=cano,
+        account_product_code=prdt_cd,
+        live_base_url=settings.kis_live_base_url,
+        paper_base_url=settings.kis_paper_base_url,
+        timeout_seconds=10.0,
+    )
+
+    holdings = bal.get("output1") or []
+
+    def _to_int(v) -> int:
+        try:
+            return int(float(str(v).replace(",", "").strip() or 0))
+        except Exception:
+            return 0
+
+    def _to_float(v) -> float:
+        try:
+            return float(str(v).replace(",", "").strip() or 0)
+        except Exception:
+            return 0.0
+
+    desired: dict[str, tuple[int, float]] = {}
+    for item in holdings:
+        try:
+            code = str(item.get("pdno") or item.get("PDNO") or "").strip()
+            if not code:
+                continue
+            qty = _to_int(item.get("hldg_qty") or item.get("HLDG_QTY") or 0)
+            if qty <= 0:
+                continue
+            avg = _to_float(item.get("pchs_avg_pric") or item.get("PCHS_AVG_PRIC") or 0)
+            desired[code] = (qty, avg)
+        except Exception:
+            continue
+
+    if not desired:
+        # If KIS says no holdings, clear portfolio.
+        existing_positions = db.execute(select(models.PortfolioPosition).where(models.PortfolioPosition.user_id == int(user_id))).scalars().all()
+        deleted = 0
+        for p in existing_positions:
+            db.delete(p)
+            deleted += 1
+        return 0, deleted
+
+    # Filter to codes that exist in stocks table (FK safety).
+    codes = sorted(desired.keys())
+    existing_stock_codes = set(
+        c
+        for (c,) in db.execute(select(models.Stock.code).where(models.Stock.code.in_(codes))).all()
+    )
+    desired = {c: v for c, v in desired.items() if c in existing_stock_codes}
+
+    existing = {
+        str(p.stock_code): p
+        for p in db.execute(select(models.PortfolioPosition).where(models.PortfolioPosition.user_id == int(user_id))).scalars().all()
+    }
+
+    upserted = 0
+    for code, (qty, avg) in desired.items():
+        pos = existing.get(code)
+        if pos is None:
+            db.add(
+                models.PortfolioPosition(
+                    user_id=int(user_id),
+                    stock_code=code,
+                    qty=int(qty),
+                    avg_buy=float(avg),
+                    buy_date=date.today(),
+                )
+            )
+        else:
+            pos.qty = int(qty)
+            pos.avg_buy = float(avg)
+            if pos.buy_date is None:
+                pos.buy_date = date.today()
+        upserted += 1
+
+    deleted = 0
+    for code, pos in existing.items():
+        if code not in desired:
+            db.delete(pos)
+            deleted += 1
+
+    return upserted, deleted
 
 
 def _place_market_order_and_log(
@@ -204,10 +367,12 @@ def _place_market_order_and_log(
     app_key = (str(getattr(profile, "app_key", "") or "").strip())
     app_secret = (str(getattr(profile, "app_secret", "") or "").strip())
     is_paper = bool(getattr(profile, "is_paper", False))
-    account_prefix = (str(getattr(profile, "account_prefix", "") or "").strip())
-    prdt_cd = _kis_account_product_code_from_prefix(account_prefix)
+    stored = (str(getattr(profile, "account_prefix", "") or "").strip())
+    cano, prdt_cd = _parse_kis_account(stored)
+    if prdt_cd is None:
+        prdt_cd = "01"
 
-    if not app_key or not app_secret or not account_prefix or not prdt_cd:
+    if not app_key or not app_secret or not cano or not prdt_cd:
         return False, "KIS 프로필(appKey/appSecret/accountPrefix) 설정 필요"
 
     if (not is_paper) and (not settings.autotrading_live_orders):
@@ -218,7 +383,7 @@ def _place_market_order_and_log(
             app_key=app_key,
             app_secret=app_secret,
             is_paper=is_paper,
-            account_prefix=account_prefix,
+            account_prefix=cano,
             account_product_code=prdt_cd,
             side=("buy" if side == "buy" else "sell"),
             code=stock_code,
@@ -260,6 +425,76 @@ def _place_market_order_and_log(
                     message=msg,
                 )
             )
+
+        # Best-effort sync of filled qty/avg from KIS holdings.
+        try:
+            bal = kis_client.inquire_balance(
+                app_key=app_key,
+                app_secret=app_secret,
+                is_paper=is_paper,
+                account_prefix=cano,
+                account_product_code=prdt_cd,
+                live_base_url=settings.kis_live_base_url,
+                paper_base_url=settings.kis_paper_base_url,
+                timeout_seconds=10.0,
+            )
+            holdings = bal.get("output1") or []
+            holding_qty = 0
+            holding_avg = 0.0
+            for item in holdings:
+                try:
+                    pdno = str(item.get("pdno") or item.get("PDNO") or "").strip()
+                    if pdno != stock_code:
+                        continue
+                    q = str(item.get("hldg_qty") or item.get("HLDG_QTY") or "0").replace(",", "").strip()
+                    a = str(item.get("pchs_avg_pric") or item.get("PCHS_AVG_PRIC") or "0").replace(",", "").strip()
+                    holding_qty = int(float(q or 0))
+                    holding_avg = float(a or 0)
+                    break
+                except Exception:
+                    continue
+
+            if engine == "sa":
+                pos = db.execute(
+                    select(models.SaAutoTradingPosition)
+                    .where(
+                        models.SaAutoTradingPosition.user_id == int(user_id),
+                        models.SaAutoTradingPosition.stock_code == stock_code,
+                        models.SaAutoTradingPosition.closed_at.is_(None),
+                    )
+                ).scalar_one_or_none()
+                if holding_qty > 0:
+                    if pos is None:
+                        pos = models.SaAutoTradingPosition(user_id=int(user_id), stock_code=stock_code, qty=int(holding_qty), avg_buy=float(holding_avg))
+                        db.add(pos)
+                    else:
+                        pos.qty = int(holding_qty)
+                        pos.avg_buy = float(holding_avg)
+                else:
+                    if pos is not None and side == "sell":
+                        pos.closed_at = datetime.now()
+
+            elif engine == "plus":
+                pos = db.execute(
+                    select(models.PlusAutoTradingPosition)
+                    .where(
+                        models.PlusAutoTradingPosition.user_id == int(user_id),
+                        models.PlusAutoTradingPosition.stock_code == stock_code,
+                        models.PlusAutoTradingPosition.closed_at.is_(None),
+                    )
+                ).scalar_one_or_none()
+                if holding_qty > 0:
+                    if pos is None:
+                        pos = models.PlusAutoTradingPosition(user_id=int(user_id), stock_code=stock_code, qty=int(holding_qty), avg_buy=float(holding_avg))
+                        db.add(pos)
+                    else:
+                        pos.qty = int(holding_qty)
+                        pos.avg_buy = float(holding_avg)
+                else:
+                    if pos is not None and side == "sell":
+                        pos.closed_at = datetime.now()
+        except Exception:
+            pass
 
         return True, msg
     except Exception as exc:
@@ -416,6 +651,8 @@ def _autotrade_tick_loop() -> None:
 
     time.sleep(2.0)
 
+    last_portfolio_sync: dict[int, float] = {}
+
     while not _autotrade_stop.is_set():
         try:
             if settings.autotrading_kill_switch:
@@ -447,6 +684,32 @@ def _autotrade_tick_loop() -> None:
                 for uid in all_ids:
                     # profile is per-user
                     profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == int(uid))).scalar_one_or_none()
+
+                    # Periodic best-effort portfolio sync (covers manual trades & partial fills).
+                    try:
+                        now_ts = time.time()
+                        last = float(last_portfolio_sync.get(int(uid), 0.0) or 0.0)
+                        if now_ts - last >= 300:
+                            upserted, deleted = _sync_portfolio_from_kis(db, user_id=int(uid), profile=profile)
+                            if upserted or deleted:
+                                db.add(
+                                    models.AutomationEngineLog(
+                                        user_id=int(uid),
+                                        engine="basic",
+                                        event="sync",
+                                        message=f"portfolio synced: upserted={upserted}, deleted={deleted}",
+                                    )
+                                )
+                            last_portfolio_sync[int(uid)] = now_ts
+                    except Exception as exc:
+                        db.add(
+                            models.AutomationEngineLog(
+                                user_id=int(uid),
+                                engine="basic",
+                                event="error",
+                                message=f"portfolio sync failed: {exc}",
+                            )
+                        )
 
                     if uid in sa_ids:
                         try:
@@ -1340,10 +1603,12 @@ def admin_get_user_kis_profile(user_id: int, _admin=Depends(require_admin)):
             raise HTTPException(status_code=404, detail="User not found")
 
         profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == int(user_id))).scalar_one_or_none()
+        cano, prdt = _parse_kis_account(profile.account_prefix if profile else None)
         return {
             "userId": int(user_id),
             "appKey": (profile.app_key if profile else None),
-            "accountPrefix": (profile.account_prefix if profile else None),
+            "accountPrefix": cano,
+            "accountProductCode": (prdt or "01") if cano else None,
             "tradeType": ("모의투자" if (profile and profile.is_paper) else "실계좌"),
             "hasAppSecret": bool(profile and profile.app_secret),
         }
@@ -1360,6 +1625,7 @@ def admin_upsert_user_kis_profile(user_id: int, payload: dict = Body(...), _admi
     app_key_raw = payload.get("appKey", None)
     app_secret_raw = payload.get("appSecret", None)
     account_prefix_raw = payload.get("accountPrefix", payload.get("accountNo", None))
+    account_prdt_raw = payload.get("accountProductCode", payload.get("accountPrdtCd", None))
     trade_type_raw = payload.get("tradeType", None)
 
     with apollo_db.session_scope() as session:
@@ -1375,8 +1641,22 @@ def admin_upsert_user_kis_profile(user_id: int, payload: dict = Body(...), _admi
         if app_key_raw is not None:
             profile.app_key = (str(app_key_raw).strip() or None)
 
-        if account_prefix_raw is not None:
-            profile.account_prefix = (str(account_prefix_raw).strip() or None)
+        if (account_prefix_raw is not None) or (account_prdt_raw is not None):
+            existing_cano, existing_prdt = _parse_kis_account(profile.account_prefix)
+            next_cano = existing_cano
+            next_prdt = existing_prdt
+
+            if account_prefix_raw is not None:
+                next_cano, embedded_prdt = _parse_kis_account(str(account_prefix_raw))
+                if embedded_prdt:
+                    next_prdt = embedded_prdt
+
+            if account_prdt_raw is not None:
+                raw = str(account_prdt_raw).strip()
+                if raw:
+                    next_prdt = raw
+
+            profile.account_prefix = _format_kis_account(next_cano, next_prdt)
 
         if trade_type_raw is not None:
             trade_type = str(trade_type_raw).strip() or "실계좌"
@@ -1631,12 +1911,14 @@ def get_profile(current_user=Depends(get_current_user)):
         user = db.execute(select(models.User).where(models.User.id == user_id)).scalar_one_or_none()
         profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
         has_app_secret = bool(profile and profile.app_secret and str(profile.app_secret).strip())
+        cano, prdt = _parse_kis_account(profile.account_prefix if profile else None)
         return {
             "nickname": (user.nickname if user else None),
             "kis": {
                 "appKey": (profile.app_key if profile else None),
                 "hasAppSecret": has_app_secret,
-                "accountPrefix": (profile.account_prefix if profile else None),
+                "accountPrefix": cano,
+                "accountProductCode": (prdt or "01") if cano else None,
                 "tradeType": ("모의투자" if (profile and profile.is_paper) else "실계좌"),
             },
         }
@@ -1654,7 +1936,8 @@ def upsert_profile(payload: dict = Body(...), current_user=Depends(get_current_u
     app_key = (payload.get("appKey") or "").strip() or None
     raw_secret = payload.get("appSecret")
     app_secret = (str(raw_secret).strip() if raw_secret is not None else "")
-    account_prefix = (payload.get("accountPrefix") or payload.get("accountNo") or "").strip() or None
+    account_prefix_raw = (payload.get("accountPrefix") or payload.get("accountNo") or "").strip() or None
+    account_prdt_raw = (payload.get("accountProductCode") or payload.get("accountPrdtCd") or "").strip() or None
     trade_type = (payload.get("tradeType") or "").strip() or "실계좌"
     is_paper = trade_type != "실계좌"
 
@@ -1671,7 +1954,13 @@ def upsert_profile(payload: dict = Body(...), current_user=Depends(get_current_u
         profile.app_key = app_key
         if app_secret:
             profile.app_secret = app_secret
-        profile.account_prefix = account_prefix
+        # Normalize and store as "CANO-PRDT" when product code is provided.
+        embedded_cano, embedded_prdt = _parse_kis_account(account_prefix_raw)
+        cano = embedded_cano
+        prdt = embedded_prdt
+        if account_prdt_raw:
+            prdt = account_prdt_raw
+        profile.account_prefix = _format_kis_account(cano, prdt)
         profile.is_paper = is_paper
 
     return {"ok": True}

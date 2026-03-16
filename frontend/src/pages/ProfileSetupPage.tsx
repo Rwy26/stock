@@ -10,6 +10,7 @@ export function ProfileSetupPage() {
   const [appSecret, setAppSecret] = useState('')
   const [hasAppSecret, setHasAppSecret] = useState(false)
   const [accountPrefix, setAccountPrefix] = useState('')
+  const [accountProductCode, setAccountProductCode] = useState('01')
   const [tradeType, setTradeType] = useState<'실계좌' | '모의투자'>('실계좌')
   const [busy, setBusy] = useState(false)
 
@@ -20,6 +21,7 @@ export function ProfileSetupPage() {
         appKey: string | null
         hasAppSecret: boolean
         accountPrefix: string | null
+        accountProductCode?: string | null
         tradeType: '실계좌' | '모의투자'
       }
     }>('/api/profile')
@@ -28,6 +30,7 @@ export function ProfileSetupPage() {
         if (data.kis?.appKey != null) setAppKey(data.kis.appKey)
         if (typeof data.kis?.hasAppSecret === 'boolean') setHasAppSecret(data.kis.hasAppSecret)
         if (data.kis?.accountPrefix != null) setAccountPrefix(data.kis.accountPrefix)
+        if (data.kis?.accountProductCode != null) setAccountProductCode(data.kis.accountProductCode)
         if (data.kis?.tradeType != null) setTradeType(data.kis.tradeType)
       })
       .catch(() => {
@@ -73,6 +76,14 @@ export function ProfileSetupPage() {
             <input placeholder="12345678" value={accountPrefix} onChange={(e) => setAccountPrefix(e.target.value)} />
           </label>
           <label>
+            계좌 상품코드(2자리)
+            <input
+              placeholder="01"
+              value={accountProductCode}
+              onChange={(e) => setAccountProductCode(e.target.value)}
+            />
+          </label>
+          <label>
             거래 구분
             <select value={tradeType} onChange={(e) => setTradeType(e.target.value as '실계좌' | '모의투자')}>
               <option>실계좌</option>
@@ -91,7 +102,7 @@ export function ProfileSetupPage() {
               fetchJson<{ ok: boolean }>('/api/profile', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ nickname, appKey, appSecret, accountPrefix, tradeType }),
+                body: JSON.stringify({ nickname, appKey, appSecret, accountPrefix, accountProductCode, tradeType }),
               })
                 .then(() => navigate('/'))
                 .catch(() => {

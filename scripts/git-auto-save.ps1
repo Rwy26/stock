@@ -54,7 +54,7 @@ try {
   git add -A
 
   $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-  $msg = "$MessagePrefix: $ts"
+  $msg = "${MessagePrefix}: $ts"
 
   # Commit can fail if nothing staged (race) or user.name not set
   $commitOut = git commit -m $msg 2>&1

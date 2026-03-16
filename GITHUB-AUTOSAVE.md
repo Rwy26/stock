@@ -33,20 +33,18 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\publish-to-github.ps1 -R
 
 ## 3) 1시간마다 자동 commit(+push) 설정
 
-### 3-1) 자동 commit만 (push는 수동)
+기본값은 **자동 commit + 자동 push** 입니다.
 
 ```powershell
 Set-Location c:\stock
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-git-auto-save-task.ps1
 ```
 
-### 3-2) 자동 commit + 자동 push
-
-GitHub remote 설정이 완료된 뒤 실행하세요:
+### 3-1) 자동 commit만 (push는 수동)
 
 ```powershell
 Set-Location c:\stock
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-git-auto-save-task.ps1 -Push
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-git-auto-save-task.ps1 -Push:$false
 ```
 
 작업 스케줄러(Task Scheduler)에 `stock-git-auto-save`가 등록되고, 1시간마다 실행됩니다.
