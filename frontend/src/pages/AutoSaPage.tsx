@@ -43,6 +43,20 @@ type SaConfigResponse = {
   updatedAt: string | null
 }
 
+type SaConfigForm = {
+  totalBudget: string
+  perStockBudget: string
+  maxPositions: number
+  minSaScore: number
+  cautionMinScore: number
+  scanRankRange: number
+  weightObv: number
+  weightMfi: number
+  weightPattern: number
+  maxHoldingDays: number
+  volatilityAdjust: boolean
+}
+
 function formatHm(value: string | null): string {
   if (!value) return '-'
   const d = new Date(value)
@@ -68,6 +82,21 @@ export function AutoSaPage() {
   const [positions, setPositions] = useState<SaPositionItem[] | null>(null)
   const [logs, setLogs] = useState<SaLogItem[] | null>(null)
   const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const [form, setForm] = useState<SaConfigForm>({
+    totalBudget: '',
+    perStockBudget: '',
+    maxPositions: 5,
+    minSaScore: 50,
+    cautionMinScore: 55,
+    scanRankRange: 200,
+    weightObv: 1.0,
+    weightMfi: 1.0,
+    weightPattern: 1.0,
+    maxHoldingDays: 10,
+    volatilityAdjust: true,
+  })
 
   useEffect(() => {
     let cancelled = false
@@ -95,7 +124,30 @@ export function AutoSaPage() {
     let cancelled = false
     fetchJson<SaConfigResponse>('/api/automation/sa')
       .then((cfg) => {
-        if (!cancelled) setEnabled(Boolean(cfg.enabled))
+        if (cancelled) return
+        setEnabled(Boolean(cfg.enabled))
+
+        const cfgObj = cfg.config && typeof cfg.config === 'object' ? (cfg.config as Record<string, unknown>) : null
+        if (!cfgObj) return
+        setForm((prev) => ({
+          ...prev,
+          totalBudget: typeof cfgObj.totalBudget === 'string' ? cfgObj.totalBudget : prev.totalBudget,
+          perStockBudget: typeof cfgObj.perStockBudget === 'string' ? cfgObj.perStockBudget : prev.perStockBudget,
+          maxPositions: typeof cfgObj.maxPositions === 'number' && Number.isFinite(cfgObj.maxPositions) ? cfgObj.maxPositions : prev.maxPositions,
+          minSaScore: typeof cfgObj.minSaScore === 'number' && Number.isFinite(cfgObj.minSaScore) ? cfgObj.minSaScore : prev.minSaScore,
+          cautionMinScore:
+            typeof cfgObj.cautionMinScore === 'number' && Number.isFinite(cfgObj.cautionMinScore)
+              ? cfgObj.cautionMinScore
+              : prev.cautionMinScore,
+          scanRankRange: typeof cfgObj.scanRankRange === 'number' && Number.isFinite(cfgObj.scanRankRange) ? cfgObj.scanRankRange : prev.scanRankRange,
+          weightObv: typeof cfgObj.weightObv === 'number' && Number.isFinite(cfgObj.weightObv) ? cfgObj.weightObv : prev.weightObv,
+          weightMfi: typeof cfgObj.weightMfi === 'number' && Number.isFinite(cfgObj.weightMfi) ? cfgObj.weightMfi : prev.weightMfi,
+          weightPattern:
+            typeof cfgObj.weightPattern === 'number' && Number.isFinite(cfgObj.weightPattern) ? cfgObj.weightPattern : prev.weightPattern,
+          maxHoldingDays:
+            typeof cfgObj.maxHoldingDays === 'number' && Number.isFinite(cfgObj.maxHoldingDays) ? cfgObj.maxHoldingDays : prev.maxHoldingDays,
+          volatilityAdjust: typeof cfgObj.volatilityAdjust === 'boolean' ? cfgObj.volatilityAdjust : prev.volatilityAdjust,
+        }))
       })
       .catch(() => {
         if (!cancelled) setEnabled(false)
@@ -104,6 +156,38 @@ export function AutoSaPage() {
       cancelled = true
     }
   }, [])
+
+  const save = () => {
+    if (busy) return
+    setBusy(true)
+
+    const payload = {
+      enabled: Boolean(enabled),
+      config: {
+        totalBudget: form.totalBudget,
+        perStockBudget: form.perStockBudget,
+        maxPositions: form.maxPositions,
+        minSaScore: form.minSaScore,
+        cautionMinScore: form.cautionMinScore,
+        scanRankRange: form.scanRankRange,
+        weightObv: form.weightObv,
+        weightMfi: form.weightMfi,
+        weightPattern: form.weightPattern,
+        maxHoldingDays: form.maxHoldingDays,
+        volatilityAdjust: form.volatilityAdjust,
+      },
+    }
+
+    fetchJson<{ ok: boolean }>('/api/automation/sa', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+      .catch(() => {
+        // Keep UX minimal: no extra modals/toasts.
+      })
+      .finally(() => setBusy(false))
+  }
 
   const positionRows = useMemo(() => positions ?? [], [positions])
   const logRows = useMemo(() => logs ?? [], [logs])
@@ -138,61 +222,103 @@ export function AutoSaPage() {
         <div className="settings-grid">
           <label>
             상태
-            <select>
-              <option>Off</option>
-              <option>On</option>
+            <select
+              value={enabled ? 'On' : 'Off'}
+              onChange={(e) => {
+                const v = e.target.value
+                setEnabled(v === 'On')
+              }}
+            >
+              <option value="Off">Off</option>
+              <option value="On">On</option>
             </select>
           </label>
           <label>
             총 예산
-            <input placeholder="예: 10000000" />
+            <input
+              placeholder="예: 10000000"
+              inputMode="numeric"
+              value={form.totalBudget}
+              onChange={(e) => setForm((p) => ({ ...p, totalBudget: e.target.value.replace(/,/g, '') }))}
+            />
           </label>
           <label>
             종목당 예산
-            <input placeholder="예: 2000000" />
+            <input
+              placeholder="예: 2000000"
+              inputMode="numeric"
+              value={form.perStockBudget}
+              onChange={(e) => setForm((p) => ({ ...p, perStockBudget: e.target.value.replace(/,/g, '') }))}
+            />
           </label>
           <label>
             최대 종목 수
-            <input type="number" defaultValue={5} />
+            <input type="number" value={form.maxPositions} onChange={(e) => setForm((p) => ({ ...p, maxPositions: Number(e.target.value) }))} />
           </label>
           <label>
             최소 SA 점수
-            <input type="number" defaultValue={50} />
+            <input type="number" value={form.minSaScore} onChange={(e) => setForm((p) => ({ ...p, minSaScore: Number(e.target.value) }))} />
           </label>
           <label>
             주의 모드 최소 점수
-            <input type="number" defaultValue={55} />
+            <input
+              type="number"
+              value={form.cautionMinScore}
+              onChange={(e) => setForm((p) => ({ ...p, cautionMinScore: Number(e.target.value) }))}
+            />
           </label>
           <label>
             탐색 순위 범위
-            <input type="number" defaultValue={200} />
+            <input type="number" value={form.scanRankRange} onChange={(e) => setForm((p) => ({ ...p, scanRankRange: Number(e.target.value) }))} />
           </label>
           <label>
             OBV 가중치
-            <input type="number" step={0.1} defaultValue={1.0} />
+            <input
+              type="number"
+              step={0.1}
+              value={form.weightObv}
+              onChange={(e) => setForm((p) => ({ ...p, weightObv: Number(e.target.value) }))}
+            />
           </label>
           <label>
             MFI 가중치
-            <input type="number" step={0.1} defaultValue={1.0} />
+            <input
+              type="number"
+              step={0.1}
+              value={form.weightMfi}
+              onChange={(e) => setForm((p) => ({ ...p, weightMfi: Number(e.target.value) }))}
+            />
           </label>
           <label>
             패턴 가중치
-            <input type="number" step={0.1} defaultValue={1.0} />
+            <input
+              type="number"
+              step={0.1}
+              value={form.weightPattern}
+              onChange={(e) => setForm((p) => ({ ...p, weightPattern: Number(e.target.value) }))}
+            />
           </label>
           <label>
             최대 보유일
-            <input type="number" defaultValue={10} />
+            <input
+              type="number"
+              value={form.maxHoldingDays}
+              onChange={(e) => setForm((p) => ({ ...p, maxHoldingDays: Number(e.target.value) }))}
+            />
           </label>
           <label>
             변동성 조정
-            <select>
-              <option>On</option>
-              <option>Off</option>
+            <select
+              value={form.volatilityAdjust ? 'On' : 'Off'}
+              onChange={(e) => setForm((p) => ({ ...p, volatilityAdjust: e.target.value === 'On' }))}
+            >
+              <option value="On">On</option>
+              <option value="Off">Off</option>
             </select>
           </label>
         </div>
         <div className="divider"></div>
-        <button className="btn" type="button">
+        <button className="btn" type="button" disabled={busy} onClick={save}>
           저장
         </button>
         <p className="hint" style={{ marginTop: 10 }}>

@@ -95,6 +95,29 @@ app = FastAPI(title="Apollo Stock Trading System")
 
 _kis_refresh_stop = threading.Event()
 _autotrade_stop = threading.Event()
+_engine_skip_last_ts: dict[tuple[int, str, str], float] = {}
+_plus_last_rotation_check_ts: dict[int, float] = {}
+
+
+def _log_engine_skip_rate_limited(
+    db: Session,
+    *,
+    user_id: int,
+    engine: str,
+    reason: str,
+    message: str,
+    now_ts: float,
+    min_interval_seconds: float = 600.0,
+) -> None:
+    """Write an engine skip log with basic in-process rate limiting."""
+
+    assert models is not None
+    key = (int(user_id), str(engine), str(reason))
+    last = float(_engine_skip_last_ts.get(key, 0.0) or 0.0)
+    if now_ts - last < float(min_interval_seconds):
+        return
+    _engine_skip_last_ts[key] = now_ts
+    db.add(models.AutomationEngineLog(user_id=int(user_id), engine=str(engine), event="skip", message=str(message)))
 
 
 def _kis_refresh_loop() -> None:
@@ -540,8 +563,54 @@ def _pick_top_recommendation_code(db: Session, *, exclude_codes: set[str]) -> st
     return None
 
 
+def _parse_positive_int_like(value: object | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return int(value) if value > 0 else None
+    if isinstance(value, float):
+        if not (value > 0):
+            return None
+        return int(value)
+    if isinstance(value, str):
+        s = value.strip().replace(",", "")
+        if not s:
+            return None
+        for prefix in ("₩", "KRW", "krw"):
+            if s.startswith(prefix):
+                s = s[len(prefix) :].strip()
+        try:
+            n = int(float(s))
+            return n if n > 0 else None
+        except Exception:
+            return None
+    return None
+
+
 def _run_sa_engine_tick(db: Session, *, user_id: int, profile, now: datetime) -> None:
     assert models is not None
+
+    # Apply per-user config (maxPositions + budget-based sizing).
+    max_positions = 5
+    cfg_obj: dict | None = None
+    try:
+        cfg = db.execute(
+            select(models.SaAutoTradingConfig.config).where(models.SaAutoTradingConfig.user_id == int(user_id))
+        ).scalar_one_or_none()
+        if isinstance(cfg, dict):
+            cfg_obj = cfg
+            raw = cfg.get("maxPositions")
+            if raw is not None:
+                max_positions = int(raw)
+    except Exception:
+        max_positions = 5
+        cfg_obj = None
+    if max_positions < 1:
+        max_positions = 1
+    if max_positions > 50:
+        max_positions = 50
 
     # liquidation rules
     if _should_sa_friday_liquidate(now) or _should_daily_close_liquidate(now):
@@ -564,12 +633,12 @@ def _run_sa_engine_tick(db: Session, *, user_id: int, profile, now: datetime) ->
                 p.closed_at = datetime.now()
         return
 
-    # buy minimal: if holdings < 5, buy 1 share of top recommendation not held
+    # buy minimal: if holdings < max_positions, buy 1 share of top recommendation not held
     open_pos = db.execute(
         select(models.SaAutoTradingPosition)
         .where(models.SaAutoTradingPosition.user_id == user_id, models.SaAutoTradingPosition.closed_at.is_(None))
     ).scalars().all()
-    if len(open_pos) >= 5:
+    if len(open_pos) >= max_positions:
         return
 
     held = {str(p.stock_code) for p in open_pos}
@@ -577,23 +646,115 @@ def _run_sa_engine_tick(db: Session, *, user_id: int, profile, now: datetime) ->
     if not code:
         return
 
+    qty = 1
+    try:
+        per_budget = _parse_positive_int_like((cfg_obj or {}).get("perStockBudget"))
+        total_budget = _parse_positive_int_like((cfg_obj or {}).get("totalBudget"))
+        if per_budget is None and total_budget is not None and max_positions > 0:
+            per_budget = max(0, int(total_budget // max_positions))
+        if per_budget is not None and per_budget > 0:
+            price, _cr = _get_realtime_price_and_change(db, profile, code)
+            if float(price) <= 0:
+                _log_engine_skip_rate_limited(
+                    db,
+                    user_id=int(user_id),
+                    engine="sa",
+                    reason="price",
+                    message=f"buy skipped: price unavailable (code={code})",
+                    now_ts=time.time(),
+                )
+                return
+            qty = int(per_budget // float(price))
+            if qty < 1:
+                _log_engine_skip_rate_limited(
+                    db,
+                    user_id=int(user_id),
+                    engine="sa",
+                    reason="budget",
+                    message=f"buy skipped: budget too small (code={code}, perStockBudget={per_budget}, price={float(price):.2f})",
+                    now_ts=time.time(),
+                )
+                return
+            if qty > 1000:
+                qty = 1000
+    except Exception:
+        # Conservative: if sizing fails under a budget, skip the buy.
+        if _parse_positive_int_like((cfg_obj or {}).get("perStockBudget")) is not None or _parse_positive_int_like((cfg_obj or {}).get("totalBudget")) is not None:
+            _log_engine_skip_rate_limited(
+                db,
+                user_id=int(user_id),
+                engine="sa",
+                reason="sizing",
+                message=f"buy skipped: sizing failed (code={code})",
+                now_ts=time.time(),
+            )
+            return
+        qty = 1
+
     ok, msg = _place_market_order_and_log(
         db=db,
         user_id=user_id,
         engine="sa",
         side="buy",
         stock_code=code,
-        qty=1,
+        qty=qty,
         profile=profile,
     )
     db.add(models.AutomationEngineLog(user_id=user_id, engine="sa", event=("buy" if ok else "error"), message=msg))
     if ok:
         # create a new position; avg_buy will be unknown until fill (set 0 for now)
-        db.add(models.SaAutoTradingPosition(user_id=user_id, stock_code=code, qty=1, avg_buy=0.0))
+        db.add(models.SaAutoTradingPosition(user_id=user_id, stock_code=code, qty=int(qty), avg_buy=0.0))
 
 
 def _run_plus_engine_tick(db: Session, *, user_id: int, profile, now: datetime) -> None:
     assert models is not None
+
+    # Apply per-user config (maxPositions + budget-based sizing).
+    max_positions = 5
+    cfg_obj: dict | None = None
+    try:
+        cfg = db.execute(
+            select(models.PlusAutoTradingConfig.config).where(models.PlusAutoTradingConfig.user_id == int(user_id))
+        ).scalar_one_or_none()
+        if isinstance(cfg, dict):
+            cfg_obj = cfg
+            raw = cfg.get("maxPositions")
+            if raw is not None:
+                max_positions = int(raw)
+    except Exception:
+        max_positions = 5
+        cfg_obj = None
+    if max_positions < 1:
+        max_positions = 1
+    if max_positions > 50:
+        max_positions = 50
+
+    # Throttle plus rotation checks by user-configured interval.
+    rotation_minutes = None
+    try:
+        rotation_minutes = _parse_positive_int_like((cfg_obj or {}).get("rotationCheckMinutes"))
+    except Exception:
+        rotation_minutes = None
+    if rotation_minutes is not None:
+        if rotation_minutes < 1:
+            rotation_minutes = 1
+        if rotation_minutes > 24 * 60:
+            rotation_minutes = 24 * 60
+
+        # Only throttle the buy/rotation logic, not liquidation.
+        now_ts = time.time()
+        last = float(_plus_last_rotation_check_ts.get(int(user_id), 0.0) or 0.0)
+        if now_ts - last < float(rotation_minutes) * 60.0:
+            _log_engine_skip_rate_limited(
+                db,
+                user_id=int(user_id),
+                engine="plus",
+                reason="rotation",
+                message=f"tick skipped: rotation interval not reached (rotationCheckMinutes={rotation_minutes})",
+                now_ts=now_ts,
+            )
+            return
+        _plus_last_rotation_check_ts[int(user_id)] = now_ts
 
     if _should_daily_close_liquidate(now):
         open_pos = db.execute(
@@ -619,7 +780,7 @@ def _run_plus_engine_tick(db: Session, *, user_id: int, profile, now: datetime) 
         select(models.PlusAutoTradingPosition)
         .where(models.PlusAutoTradingPosition.user_id == user_id, models.PlusAutoTradingPosition.closed_at.is_(None))
     ).scalars().all()
-    if len(open_pos) >= 5:
+    if len(open_pos) >= max_positions:
         return
 
     held = {str(p.stock_code) for p in open_pos}
@@ -627,18 +788,62 @@ def _run_plus_engine_tick(db: Session, *, user_id: int, profile, now: datetime) 
     if not code:
         return
 
+    qty = 1
+    try:
+        per_budget = _parse_positive_int_like((cfg_obj or {}).get("perStockBudget"))
+        total_budget = _parse_positive_int_like((cfg_obj or {}).get("totalBudget"))
+        if per_budget is None and total_budget is not None and max_positions > 0:
+            per_budget = max(0, int(total_budget // max_positions))
+        if per_budget is not None and per_budget > 0:
+            price, _cr = _get_realtime_price_and_change(db, profile, code)
+            if float(price) <= 0:
+                _log_engine_skip_rate_limited(
+                    db,
+                    user_id=int(user_id),
+                    engine="plus",
+                    reason="price",
+                    message=f"buy skipped: price unavailable (code={code})",
+                    now_ts=time.time(),
+                )
+                return
+            qty = int(per_budget // float(price))
+            if qty < 1:
+                _log_engine_skip_rate_limited(
+                    db,
+                    user_id=int(user_id),
+                    engine="plus",
+                    reason="budget",
+                    message=f"buy skipped: budget too small (code={code}, perStockBudget={per_budget}, price={float(price):.2f})",
+                    now_ts=time.time(),
+                )
+                return
+            if qty > 1000:
+                qty = 1000
+    except Exception:
+        if _parse_positive_int_like((cfg_obj or {}).get("perStockBudget")) is not None or _parse_positive_int_like((cfg_obj or {}).get("totalBudget")) is not None:
+            _log_engine_skip_rate_limited(
+                db,
+                user_id=int(user_id),
+                engine="plus",
+                reason="sizing",
+                message=f"buy skipped: sizing failed (code={code})",
+                now_ts=time.time(),
+            )
+            return
+        qty = 1
+
     ok, msg = _place_market_order_and_log(
         db=db,
         user_id=user_id,
         engine="plus",
         side="buy",
         stock_code=code,
-        qty=1,
+        qty=qty,
         profile=profile,
     )
     db.add(models.AutomationEngineLog(user_id=user_id, engine="plus", event=("buy" if ok else "error"), message=msg))
     if ok:
-        db.add(models.PlusAutoTradingPosition(user_id=user_id, stock_code=code, qty=1, avg_buy=0.0))
+        db.add(models.PlusAutoTradingPosition(user_id=user_id, stock_code=code, qty=int(qty), avg_buy=0.0))
 
 
 def _autotrade_tick_loop() -> None:

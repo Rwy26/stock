@@ -1,3 +1,6 @@
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'RootPasswordText', Justification = 'Optional automation escape hatch; prefer SecureString params.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'AppPasswordText', Justification = 'Optional automation escape hatch; prefer SecureString params.')]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
   [string]$ServiceName = 'MySQL84',
   [int]$Port = 3306,
@@ -5,6 +8,8 @@ param(
   [string]$AppUser = 'apollo',
   [SecureString]$RootPassword,
   [SecureString]$AppPassword,
+  [string]$RootPasswordText,
+  [string]$AppPasswordText,
   [switch]$AddBinToPath = $true,
   [switch]$WriteBackendEnv = $true,
   [switch]$NoPrompt = $false,
@@ -31,12 +36,21 @@ function Resolve-Exe($name, $candidates) {
 }
 
 function Get-PlainText([Security.SecureString]$secure) {
+  if (-not $secure) { return '' }
   $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
   try {
     return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
   } finally {
     [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
   }
+}
+
+function Ensure-SecurePassword([SecureString]$secure, [string]$plainText) {
+  if ($secure) { return $secure }
+  if ($plainText) {
+    return (ConvertTo-SecureString -String $plainText -AsPlainText -Force)
+  }
+  return $null
 }
 
 function Get-PasswordOrPrompt([string]$label, [SecureString]$value, [switch]$noPrompt) {
@@ -52,10 +66,6 @@ function Get-PasswordOrPrompt([string]$label, [SecureString]$value, [switch]$noP
 
 function Escape-SqlString([string]$s) {
   return ($s -replace "'", "''")
-}
-
-function Escape-MySqlIdentifier([string]$s) {
-  return ($s -replace "`"", "``""")
 }
 
 function Invoke-MySqlQuery {
@@ -97,10 +107,16 @@ if (-not $DbOnly) {
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $logDir = Join-Path $repoRoot 'logs'
-New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+$transcriptStarted = $false
+if ($PSCmdlet.ShouldProcess($logDir, 'Create logs directory')) {
+  New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+}
 $logPath = Join-Path $logDir 'mysql-service-setup.log'
 
-Start-Transcript -Path $logPath -Append | Out-Null
+if ($PSCmdlet.ShouldProcess($logPath, 'Start transcript')) {
+  Start-Transcript -Path $logPath -Append | Out-Null
+  $transcriptStarted = $true
+}
 
 try {
   $baseDir = "$env:ProgramFiles\\MySQL\\MySQL Server 8.4"
@@ -134,11 +150,44 @@ try {
   Write-Output "mysqld: $mysqldExe"
   Write-Output "mysql:  $mysqlExe"
 
+  if ($WhatIfPreference) {
+    Write-Output ''
+    Write-Output 'WhatIf mode: no changes will be made.'
+    Write-Output "Would configure/start service: $ServiceName" 
+    Write-Output "Would use port: $Port"
+    Write-Output "Would create DB: $DbName"
+    Write-Output "Would create app user: $AppUser"
+    if (-not $DbOnly) {
+      $configDirPreview = Join-Path $env:ProgramData 'MySQL\MySQL Server 8.4'
+      $dataDirPreview = Join-Path $configDirPreview 'Data'
+      $iniPathPreview = Join-Path $configDirPreview 'my.ini'
+      Write-Output "Would write config: $iniPathPreview"
+      if ($ReinitDataDir) { Write-Output "Would reinitialize data dir: $dataDirPreview" }
+      Write-Output "Would ensure data dir: $dataDirPreview"
+      Write-Output 'Would initialize data directory if missing'
+      Write-Output 'Would install Windows service if missing'
+      Write-Output 'Would set StartupType=Automatic and start service'
+      if ($AddBinToPath) { Write-Output "Would add MySQL bin to Machine PATH: $binDir" }
+    } else {
+      Write-Output 'DbOnly mode: would skip service install/start.'
+    }
+    Write-Output 'Would apply DB/user setup via mysql.exe (passwords not shown)'
+    if ($WriteBackendEnv) {
+      $backendEnvPathPreview = Join-Path $repoRoot 'backend\.env'
+      Write-Output "Would write backend env: $backendEnvPathPreview (MYSQL_PASSWORD redacted)"
+    }
+    return
+  }
+
   if (-not $DbOnly) {
     $configDir = Join-Path $env:ProgramData 'MySQL\MySQL Server 8.4'
     $dataDir = Join-Path $configDir 'Data'
-    New-Item -ItemType Directory -Path $configDir -Force | Out-Null
-    New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+    if ($PSCmdlet.ShouldProcess($configDir, 'Create MySQL config directory')) {
+      New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+    }
+    if ($PSCmdlet.ShouldProcess($dataDir, 'Create MySQL data directory')) {
+      New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+    }
 
     $iniPath = Join-Path $configDir 'my.ini'
     $ini = @(
@@ -158,28 +207,38 @@ try {
       'host=127.0.0.1',
       'default-character-set=utf8mb4'
     )
-    $ini | Set-Content -Path $iniPath -Encoding ASCII
-    Write-Output "Wrote config: $iniPath"
+    if ($PSCmdlet.ShouldProcess($iniPath, 'Write my.ini')) {
+      $ini | Set-Content -Path $iniPath -Encoding ASCII
+      Write-Output "Wrote config: $iniPath"
+    }
 
     if ($ReinitDataDir) {
       Write-Output 'Reinitializing MySQL data directory (forced)...'
       $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
       if ($svc -and $svc.Status -ne 'Stopped') {
-        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
+        if ($PSCmdlet.ShouldProcess($ServiceName, 'Stop Windows service')) {
+          Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+        }
       }
 
       if (Test-Path $dataDir) {
-        Remove-Item -LiteralPath $dataDir -Recurse -Force
+        if ($PSCmdlet.ShouldProcess($dataDir, 'Remove data directory')) {
+          Remove-Item -LiteralPath $dataDir -Recurse -Force
+        }
       }
-      New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+      if ($PSCmdlet.ShouldProcess($dataDir, 'Create data directory')) {
+        New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+      }
     }
 
     $systemDbDir = Join-Path $dataDir 'mysql'
     if (-not (Test-Path $systemDbDir)) {
       Write-Output 'Initializing data directory...'
-      & $mysqldExe --defaults-file="$iniPath" --initialize-insecure
-      if ($LASTEXITCODE -ne 0) { throw "mysqld initialize failed (exit code $LASTEXITCODE)" }
+      if ($PSCmdlet.ShouldProcess($dataDir, 'mysqld --initialize-insecure')) {
+        & $mysqldExe --defaults-file="$iniPath" --initialize-insecure
+        if ($LASTEXITCODE -ne 0) { throw "mysqld initialize failed (exit code $LASTEXITCODE)" }
+      }
     } else {
       Write-Output 'Data directory already initialized.'
     }
@@ -187,14 +246,20 @@ try {
     $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if (-not $existing) {
       Write-Output "Installing Windows service '$ServiceName'..."
-      & $mysqldExe --install $ServiceName --defaults-file="$iniPath"
-      if ($LASTEXITCODE -ne 0) { throw "mysqld --install failed (exit code $LASTEXITCODE)" }
+      if ($PSCmdlet.ShouldProcess($ServiceName, 'mysqld --install')) {
+        & $mysqldExe --install $ServiceName --defaults-file="$iniPath"
+        if ($LASTEXITCODE -ne 0) { throw "mysqld --install failed (exit code $LASTEXITCODE)" }
+      }
     } else {
       Write-Output "Service '$ServiceName' already exists."
     }
 
-    Set-Service -Name $ServiceName -StartupType Automatic
-    Start-Service -Name $ServiceName
+    if ($PSCmdlet.ShouldProcess($ServiceName, 'Set service StartupType=Automatic')) {
+      Set-Service -Name $ServiceName -StartupType Automatic
+    }
+    if ($PSCmdlet.ShouldProcess($ServiceName, 'Start Windows service')) {
+      Start-Service -Name $ServiceName
+    }
   } else {
     Write-Output 'DbOnly mode: skipping config/service installation/start.'
   }
@@ -203,6 +268,11 @@ try {
   $deadline = (Get-Date).AddSeconds(90)
   $authMode = 'none'
   $connected = $false
+
+  # Ensure we have password material available for NoPrompt/automation.
+  $RootPassword = Ensure-SecurePassword $RootPassword $RootPasswordText
+  $AppPassword = Ensure-SecurePassword $AppPassword $AppPasswordText
+
   do {
     Start-Sleep -Milliseconds 500
     $code = (Invoke-MySqlQuery -MySqlExe $mysqlExe -Query 'SELECT 1;' -AuthMode 'none' -Quiet)
@@ -238,29 +308,38 @@ try {
   $rootPwSql = Escape-SqlString $rootPw
   $appPwSql = Escape-SqlString $appPw
   $appUserSql = Escape-SqlString $AppUser
-  $dbNameSql = Escape-MySqlIdentifier $DbName
+  if ($DbName -notmatch '^[A-Za-z0-9_]+$') {
+    throw "DbName must match ^[A-Za-z0-9_]+$ (got: $DbName)"
+  }
+  $dbNameSql = $DbName
 
   Write-Output 'Applying DB/user setup...'
-  $sql = @"
-ALTER USER IF EXISTS 'root'@'localhost' IDENTIFIED BY '$rootPwSql';
-CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '$rootPwSql';
-CREATE DATABASE IF NOT EXISTS `$dbNameSql` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '$appUserSql'@'127.0.0.1' IDENTIFIED BY '$appPwSql';
-CREATE USER IF NOT EXISTS '$appUserSql'@'localhost' IDENTIFIED BY '$appPwSql';
-GRANT ALL PRIVILEGES ON `$dbNameSql`.* TO '$appUserSql'@'127.0.0.1';
-GRANT ALL PRIVILEGES ON `$dbNameSql`.* TO '$appUserSql'@'localhost';
-FLUSH PRIVILEGES;
-"@
+  $sql = (
+    @(
+      "ALTER USER IF EXISTS 'root'@'localhost' IDENTIFIED BY '$rootPwSql';",
+      "CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '$rootPwSql';",
+      "CREATE DATABASE IF NOT EXISTS $dbNameSql CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
+      "CREATE USER IF NOT EXISTS '$appUserSql'@'127.0.0.1' IDENTIFIED BY '$appPwSql';",
+      "CREATE USER IF NOT EXISTS '$appUserSql'@'localhost' IDENTIFIED BY '$appPwSql';",
+      "GRANT ALL PRIVILEGES ON $dbNameSql.* TO '$appUserSql'@'127.0.0.1';",
+      "GRANT ALL PRIVILEGES ON $dbNameSql.* TO '$appUserSql'@'localhost';",
+      "FLUSH PRIVILEGES;"
+    ) -join "`n"
+  )
 
   # Apply setup using whichever auth mode worked for readiness.
-  $applyCode = (Invoke-MySqlQuery -MySqlExe $mysqlExe -Query $sql -AuthMode $authMode -Password $rootPw)
-  if ($applyCode -ne 0) { throw "Failed to apply SQL setup (exit code $applyCode)" }
+  if ($PSCmdlet.ShouldProcess("mysql.exe", 'Apply DB/user setup SQL')) {
+    $applyCode = (Invoke-MySqlQuery -MySqlExe $mysqlExe -Query $sql -AuthMode $authMode -Password $rootPw)
+    if ($applyCode -ne 0) { throw "Failed to apply SQL setup (exit code $applyCode)" }
+  }
 
   if (-not $DbOnly -and $AddBinToPath) {
     $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
     if ($machinePath -notmatch [Regex]::Escape($binDir)) {
-      [Environment]::SetEnvironmentVariable('Path', ($machinePath.TrimEnd(';') + ';' + $binDir), 'Machine')
-      Write-Output "Added to Machine PATH: $binDir"
+      if ($PSCmdlet.ShouldProcess('Machine Path', "Add $binDir")) {
+        [Environment]::SetEnvironmentVariable('Path', ($machinePath.TrimEnd(';') + ';' + $binDir), 'Machine')
+        Write-Output "Added to Machine PATH: $binDir"
+      }
     } else {
       Write-Output 'MySQL bin already in Machine PATH.'
     }
@@ -275,9 +354,15 @@ FLUSH PRIVILEGES;
       "MYSQL_USER=$AppUser",
       "MYSQL_PASSWORD=$appPw"
     )
-    $envLines | Set-Content -Path $backendEnvPath -Encoding UTF8
-    Write-Output "Wrote backend env: $backendEnvPath"
+    if ($PSCmdlet.ShouldProcess($backendEnvPath, 'Write backend .env (contains password)')) {
+      $envLines | Set-Content -Path $backendEnvPath -Encoding UTF8
+      Write-Output "Wrote backend env: $backendEnvPath"
+    }
   }
+
+  # Best-effort: clear plaintext password variables.
+  $rootPw = $null
+  $appPw = $null
 
   Write-Output ''
   Write-Output 'MySQL service setup complete.'
@@ -288,5 +373,7 @@ FLUSH PRIVILEGES;
   Write-Output "Log: $logPath"
 
 } finally {
-  Stop-Transcript | Out-Null
+  if ($transcriptStarted) {
+    Stop-Transcript | Out-Null
+  }
 }

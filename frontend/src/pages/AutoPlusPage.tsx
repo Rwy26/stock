@@ -43,6 +43,22 @@ type PlusConfigResponse = {
   updatedAt: string | null
 }
 
+type PlusConfigForm = {
+  totalBudget: string
+  perStockBudget: string
+  maxPositions: number
+  scanStartRank: number
+  scanEndRank: number
+  requireUptrend: boolean
+  minSaScore: number
+  stopLossPct: number
+  takeProfitPct: number
+  trailingStopPct: string
+  crashSellPct: string
+  minHoldMinutes: string
+  rotationCheckMinutes: string
+}
+
 function formatHm(value: string | null): string {
   if (!value) return '-'
   const d = new Date(value)
@@ -62,6 +78,24 @@ export function AutoPlusPage() {
   const [positions, setPositions] = useState<PlusPositionItem[] | null>(null)
   const [logs, setLogs] = useState<PlusLogItem[] | null>(null)
   const [config, setConfig] = useState<PlusConfigResponse | null>(null)
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const [form, setForm] = useState<PlusConfigForm>({
+    totalBudget: '',
+    perStockBudget: '',
+    maxPositions: 5,
+    scanStartRank: 1,
+    scanEndRank: 100,
+    requireUptrend: false,
+    minSaScore: 50,
+    stopLossPct: -5,
+    takeProfitPct: 10,
+    trailingStopPct: '',
+    crashSellPct: '',
+    minHoldMinutes: '',
+    rotationCheckMinutes: '',
+  })
 
   useEffect(() => {
     let cancelled = false
@@ -89,15 +123,75 @@ export function AutoPlusPage() {
     let cancelled = false
     fetchJson<PlusConfigResponse>('/api/automation/plus')
       .then((cfg) => {
-        if (!cancelled) setConfig(cfg)
+        if (cancelled) return
+        setConfig(cfg)
+        setEnabled(Boolean(cfg.enabled))
+
+        const cfgObj = cfg.config && typeof cfg.config === 'object' ? (cfg.config as Record<string, unknown>) : null
+        if (!cfgObj) return
+        setForm((prev) => ({
+          ...prev,
+          totalBudget: typeof cfgObj.totalBudget === 'string' ? cfgObj.totalBudget : prev.totalBudget,
+          perStockBudget: typeof cfgObj.perStockBudget === 'string' ? cfgObj.perStockBudget : prev.perStockBudget,
+          maxPositions: typeof cfgObj.maxPositions === 'number' && Number.isFinite(cfgObj.maxPositions) ? cfgObj.maxPositions : prev.maxPositions,
+          scanStartRank: typeof cfgObj.scanStartRank === 'number' && Number.isFinite(cfgObj.scanStartRank) ? cfgObj.scanStartRank : prev.scanStartRank,
+          scanEndRank: typeof cfgObj.scanEndRank === 'number' && Number.isFinite(cfgObj.scanEndRank) ? cfgObj.scanEndRank : prev.scanEndRank,
+          requireUptrend: typeof cfgObj.requireUptrend === 'boolean' ? cfgObj.requireUptrend : prev.requireUptrend,
+          minSaScore: typeof cfgObj.minSaScore === 'number' && Number.isFinite(cfgObj.minSaScore) ? cfgObj.minSaScore : prev.minSaScore,
+          stopLossPct: typeof cfgObj.stopLossPct === 'number' && Number.isFinite(cfgObj.stopLossPct) ? cfgObj.stopLossPct : prev.stopLossPct,
+          takeProfitPct:
+            typeof cfgObj.takeProfitPct === 'number' && Number.isFinite(cfgObj.takeProfitPct) ? cfgObj.takeProfitPct : prev.takeProfitPct,
+          trailingStopPct: typeof cfgObj.trailingStopPct === 'string' ? cfgObj.trailingStopPct : prev.trailingStopPct,
+          crashSellPct: typeof cfgObj.crashSellPct === 'string' ? cfgObj.crashSellPct : prev.crashSellPct,
+          minHoldMinutes: typeof cfgObj.minHoldMinutes === 'string' ? cfgObj.minHoldMinutes : prev.minHoldMinutes,
+          rotationCheckMinutes:
+            typeof cfgObj.rotationCheckMinutes === 'string' ? cfgObj.rotationCheckMinutes : prev.rotationCheckMinutes,
+        }))
       })
       .catch(() => {
-        if (!cancelled) setConfig({ enabled: false, config: null, updatedAt: null })
+        if (!cancelled) {
+          setConfig({ enabled: false, config: null, updatedAt: null })
+          setEnabled(false)
+        }
       })
     return () => {
       cancelled = true
     }
   }, [])
+
+  const save = () => {
+    if (busy) return
+    setBusy(true)
+
+    const payload = {
+      enabled: Boolean(enabled),
+      config: {
+        totalBudget: form.totalBudget,
+        perStockBudget: form.perStockBudget,
+        maxPositions: form.maxPositions,
+        scanStartRank: form.scanStartRank,
+        scanEndRank: form.scanEndRank,
+        requireUptrend: form.requireUptrend,
+        minSaScore: form.minSaScore,
+        stopLossPct: form.stopLossPct,
+        takeProfitPct: form.takeProfitPct,
+        trailingStopPct: form.trailingStopPct,
+        crashSellPct: form.crashSellPct,
+        minHoldMinutes: form.minHoldMinutes,
+        rotationCheckMinutes: form.rotationCheckMinutes,
+      },
+    }
+
+    fetchJson<{ ok: boolean }>('/api/automation/plus', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+      .catch(() => {
+        // Keep UX minimal: no extra modals/toasts.
+      })
+      .finally(() => setBusy(false))
+  }
 
   const positionRows = useMemo(() => positions ?? [], [positions])
   const logRows = useMemo(() => logs ?? [], [logs])
@@ -143,69 +237,92 @@ export function AutoPlusPage() {
         <div className="settings-grid">
           <label>
             상태
-            <select>
-              <option>Off</option>
-              <option>On</option>
+            <select
+              value={enabled ? 'On' : 'Off'}
+              onChange={(e) => {
+                const v = e.target.value
+                setEnabled(v === 'On')
+              }}
+            >
+              <option value="Off">Off</option>
+              <option value="On">On</option>
             </select>
           </label>
           <label>
             총 예산
-            <input placeholder="예: 10000000" />
+            <input
+              placeholder="예: 10000000"
+              inputMode="numeric"
+              value={form.totalBudget}
+              onChange={(e) => setForm((p) => ({ ...p, totalBudget: e.target.value.replace(/,/g, '') }))}
+            />
           </label>
           <label>
             종목당 예산
-            <input placeholder="예: 2000000" />
+            <input
+              placeholder="예: 2000000"
+              inputMode="numeric"
+              value={form.perStockBudget}
+              onChange={(e) => setForm((p) => ({ ...p, perStockBudget: e.target.value.replace(/,/g, '') }))}
+            />
           </label>
           <label>
             최대 종목 수
-            <input type="number" defaultValue={5} />
+            <input type="number" value={form.maxPositions} onChange={(e) => setForm((p) => ({ ...p, maxPositions: Number(e.target.value) }))} />
           </label>
           <label>
             탐색 시작 순위
-            <input type="number" defaultValue={1} />
+            <input type="number" value={form.scanStartRank} onChange={(e) => setForm((p) => ({ ...p, scanStartRank: Number(e.target.value) }))} />
           </label>
           <label>
             탐색 종료 순위
-            <input type="number" defaultValue={100} />
+            <input type="number" value={form.scanEndRank} onChange={(e) => setForm((p) => ({ ...p, scanEndRank: Number(e.target.value) }))} />
           </label>
           <label>
             상승 요구
-            <select>
-              <option>Off</option>
-              <option>On</option>
+            <select
+              value={form.requireUptrend ? 'On' : 'Off'}
+              onChange={(e) => setForm((p) => ({ ...p, requireUptrend: e.target.value === 'On' }))}
+            >
+              <option value="Off">Off</option>
+              <option value="On">On</option>
             </select>
           </label>
           <label>
             최소 SA 점수
-            <input type="number" defaultValue={50} />
+            <input type="number" value={form.minSaScore} onChange={(e) => setForm((p) => ({ ...p, minSaScore: Number(e.target.value) }))} />
           </label>
           <label>
             손절률(%)
-            <input type="number" defaultValue={-5} />
+            <input type="number" value={form.stopLossPct} onChange={(e) => setForm((p) => ({ ...p, stopLossPct: Number(e.target.value) }))} />
           </label>
           <label>
             익절률(%)
-            <input type="number" defaultValue={10} />
+            <input type="number" value={form.takeProfitPct} onChange={(e) => setForm((p) => ({ ...p, takeProfitPct: Number(e.target.value) }))} />
           </label>
           <label>
             트레일링 스탑률
-            <input placeholder="선택" />
+            <input placeholder="선택" value={form.trailingStopPct} onChange={(e) => setForm((p) => ({ ...p, trailingStopPct: e.target.value }))} />
           </label>
           <label>
             급락 매도률
-            <input placeholder="선택" />
+            <input placeholder="선택" value={form.crashSellPct} onChange={(e) => setForm((p) => ({ ...p, crashSellPct: e.target.value }))} />
           </label>
           <label>
             최소 보유 시간(분)
-            <input placeholder="선택" />
+            <input placeholder="선택" value={form.minHoldMinutes} onChange={(e) => setForm((p) => ({ ...p, minHoldMinutes: e.target.value }))} />
           </label>
           <label>
             순환 체크 주기(분)
-            <input placeholder="선택" />
+            <input
+              placeholder="선택"
+              value={form.rotationCheckMinutes}
+              onChange={(e) => setForm((p) => ({ ...p, rotationCheckMinutes: e.target.value }))}
+            />
           </label>
         </div>
         <div className="divider"></div>
-        <button className="btn" type="button">
+        <button className="btn" type="button" disabled={busy} onClick={save}>
           저장
         </button>
       </section>
