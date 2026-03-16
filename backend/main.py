@@ -1264,6 +1264,176 @@ def upsert_plus_config(payload: dict = Body(...), current_user=Depends(get_curre
     return {"ok": True}
 
 
+@app.get("/api/automation/sa/positions")
+def get_sa_positions(include_closed: bool = False, current_user=Depends(get_current_user)):
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    user_id = int(current_user.id)
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        stmt = (
+            select(models.SaAutoTradingPosition, models.Stock.name)
+            .outerjoin(models.Stock, models.Stock.code == models.SaAutoTradingPosition.stock_code)
+            .where(models.SaAutoTradingPosition.user_id == user_id)
+        )
+        if not include_closed:
+            stmt = stmt.where(models.SaAutoTradingPosition.closed_at.is_(None))
+        rows = db.execute(stmt.order_by(desc(models.SaAutoTradingPosition.opened_at))).all()
+
+        items: list[dict] = []
+        for pos, name in rows:
+            current, _change_rate = _get_latest_price_and_change(db, str(pos.stock_code))
+            avg_buy = float(pos.avg_buy or 0.0)
+            pnl_pct = None
+            if avg_buy > 0 and current > 0:
+                pnl_pct = round(((current - avg_buy) / avg_buy) * 100.0, 2)
+            items.append(
+                {
+                    "id": int(pos.id),
+                    "name": (name or str(pos.stock_code)),
+                    "code": str(pos.stock_code),
+                    "qty": int(pos.qty or 0),
+                    "avgBuy": avg_buy,
+                    "current": float(current),
+                    "pnlPct": pnl_pct,
+                    "openedAt": (pos.opened_at.isoformat() if pos.opened_at else None),
+                    "closedAt": (pos.closed_at.isoformat() if pos.closed_at else None),
+                }
+            )
+
+        return {"asOf": datetime.now().isoformat(), "items": items}
+    finally:
+        db.close()
+
+
+@app.get("/api/automation/sa/logs")
+def get_sa_logs(limit: int = 100, current_user=Depends(get_current_user)):
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    limit = int(limit or 100)
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    user_id = int(current_user.id)
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        rows = db.execute(
+            select(models.SaAutoTradingLog, models.Stock.name)
+            .outerjoin(models.Stock, models.Stock.code == models.SaAutoTradingLog.stock_code)
+            .where(models.SaAutoTradingLog.user_id == user_id)
+            .order_by(desc(models.SaAutoTradingLog.at))
+            .limit(limit)
+        ).all()
+
+        items: list[dict] = []
+        for log, name in rows:
+            items.append(
+                {
+                    "id": int(log.id),
+                    "at": (log.at.isoformat() if log.at else None),
+                    "action": str(log.action),
+                    "name": (name or str(log.stock_code)),
+                    "code": str(log.stock_code),
+                    "qty": (int(log.qty) if log.qty is not None else None),
+                    "price": (float(log.price) if log.price is not None else None),
+                    "message": (str(log.message) if log.message else None),
+                }
+            )
+
+        return {"asOf": datetime.now().isoformat(), "items": items}
+    finally:
+        db.close()
+
+
+@app.get("/api/automation/plus/positions")
+def get_plus_positions(include_closed: bool = False, current_user=Depends(get_current_user)):
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    user_id = int(current_user.id)
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        stmt = (
+            select(models.PlusAutoTradingPosition, models.Stock.name)
+            .outerjoin(models.Stock, models.Stock.code == models.PlusAutoTradingPosition.stock_code)
+            .where(models.PlusAutoTradingPosition.user_id == user_id)
+        )
+        if not include_closed:
+            stmt = stmt.where(models.PlusAutoTradingPosition.closed_at.is_(None))
+        rows = db.execute(stmt.order_by(desc(models.PlusAutoTradingPosition.opened_at))).all()
+
+        items: list[dict] = []
+        for pos, name in rows:
+            current, _change_rate = _get_latest_price_and_change(db, str(pos.stock_code))
+            avg_buy = float(pos.avg_buy or 0.0)
+            pnl_pct = None
+            if avg_buy > 0 and current > 0:
+                pnl_pct = round(((current - avg_buy) / avg_buy) * 100.0, 2)
+            items.append(
+                {
+                    "id": int(pos.id),
+                    "name": (name or str(pos.stock_code)),
+                    "code": str(pos.stock_code),
+                    "qty": int(pos.qty or 0),
+                    "avgBuy": avg_buy,
+                    "current": float(current),
+                    "pnlPct": pnl_pct,
+                    "openedAt": (pos.opened_at.isoformat() if pos.opened_at else None),
+                    "closedAt": (pos.closed_at.isoformat() if pos.closed_at else None),
+                }
+            )
+
+        return {"asOf": datetime.now().isoformat(), "items": items}
+    finally:
+        db.close()
+
+
+@app.get("/api/automation/plus/logs")
+def get_plus_logs(limit: int = 100, current_user=Depends(get_current_user)):
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    limit = int(limit or 100)
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    user_id = int(current_user.id)
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        rows = db.execute(
+            select(models.PlusAutoTradingLog, models.Stock.name)
+            .outerjoin(models.Stock, models.Stock.code == models.PlusAutoTradingLog.stock_code)
+            .where(models.PlusAutoTradingLog.user_id == user_id)
+            .order_by(desc(models.PlusAutoTradingLog.at))
+            .limit(limit)
+        ).all()
+
+        items: list[dict] = []
+        for log, name in rows:
+            items.append(
+                {
+                    "id": int(log.id),
+                    "at": (log.at.isoformat() if log.at else None),
+                    "action": str(log.action),
+                    "name": (name or str(log.stock_code)),
+                    "code": str(log.stock_code),
+                    "qty": (int(log.qty) if log.qty is not None else None),
+                    "price": (float(log.price) if log.price is not None else None),
+                    "message": (str(log.message) if log.message else None),
+                }
+            )
+
+        return {"asOf": datetime.now().isoformat(), "items": items}
+    finally:
+        db.close()
+
+
 @app.get("/api/automation/sv")
 def get_sv_config(current_user=Depends(get_current_user)):
     if apollo_db is None or models is None:

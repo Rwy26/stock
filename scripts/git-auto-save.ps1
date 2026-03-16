@@ -17,7 +17,8 @@ try {
   }
   if (-not $env:TEMP -or -not (Test-Path $env:TEMP)) { $env:TEMP = $fallbackTemp }
   if (-not $env:TMP -or -not (Test-Path $env:TMP)) { $env:TMP = $fallbackTemp }
-} catch { }
+}
+catch { }
 
 function Exec([string]$cmd) {
   $out = & pwsh -NoProfile -Command $cmd 2>&1
@@ -29,6 +30,21 @@ function Exec([string]$cmd) {
 
 Set-Location $RepoPath
 
+$logDir = Join-Path $RepoPath 'logs'
+$logPath = Join-Path $logDir 'git-auto-save.log'
+
+function Write-Log([string]$message) {
+  $line = "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $message
+  try {
+    if (-not (Test-Path $logDir)) {
+      New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    }
+    $line | Out-File -FilePath $logPath -Append -Encoding utf8
+  }
+  catch { }
+  Write-Host $line
+}
+
 # Ensure we are in a git work tree
 $inside = (git rev-parse --is-inside-work-tree 2>$null)
 if ($LASTEXITCODE -ne 0 -or $inside -ne 'true') {
@@ -39,15 +55,18 @@ if ($LASTEXITCODE -ne 0 -or $inside -ne 'true') {
 $lockPath = Join-Path $RepoPath '.git\auto-save.lock'
 try {
   $lock = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-} catch {
-  Write-Host 'Another auto-save is running; exiting.'
+}
+catch {
+  Write-Log 'Another auto-save is running; exiting.'
   exit 0
 }
 
 try {
+  Write-Log "Start (RepoPath=$RepoPath, Push=$Push, Remote=$Remote)"
+
   $changes = git status --porcelain=v1
   if (-not $changes) {
-    Write-Host 'No changes.'
+    Write-Log 'No changes.'
     exit 0
   }
 
@@ -60,13 +79,13 @@ try {
   $commitOut = git commit -m $msg 2>&1
   if ($LASTEXITCODE -ne 0) {
     if ($commitOut -match 'nothing to commit') {
-      Write-Host 'Nothing to commit.'
+      Write-Log 'Nothing to commit.'
       exit 0
     }
     throw "git commit failed: $commitOut"
   }
 
-  Write-Host $commitOut
+  Write-Log ($commitOut -join "`n")
 
   if ($Push) {
     $remoteUrl = (git remote get-url $Remote 2>$null)
@@ -78,13 +97,20 @@ try {
       $Branch = (git branch --show-current)
     }
 
-    git push $Remote $Branch
+    $pushOut = git push $Remote $Branch 2>&1
     if ($LASTEXITCODE -ne 0) {
+      Write-Log ($pushOut -join "`n")
       throw 'git push failed.'
     }
 
-    Write-Host "Pushed to $Remote/$Branch"
+    if ($pushOut) { Write-Log ($pushOut -join "`n") }
+    Write-Log "Pushed to $Remote/$Branch"
   }
-} finally {
+}
+catch {
+  Write-Log ("ERROR: {0}" -f $_)
+  exit 1
+}
+finally {
   if ($lock) { $lock.Dispose() }
 }

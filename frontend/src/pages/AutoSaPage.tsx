@@ -1,9 +1,124 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { fetchJson } from '../lib/api'
+import { formatNumber, formatPercent } from '../lib/format'
 
 type SaTab = 'status' | 'logs' | 'alerts' | 'signals' | 'daily' | 'snapshots'
 
+type SaPositionItem = {
+  id: number
+  name: string
+  code: string
+  qty: number
+  avgBuy: number
+  current: number
+  pnlPct: number | null
+  openedAt: string | null
+  closedAt: string | null
+}
+
+type SaPositionsResponse = {
+  asOf: string
+  items: SaPositionItem[]
+}
+
+type SaLogItem = {
+  id: number
+  at: string | null
+  action: string
+  name: string
+  code: string
+  qty: number | null
+  price: number | null
+  message: string | null
+}
+
+type SaLogsResponse = {
+  asOf: string
+  items: SaLogItem[]
+}
+
+type SaConfigResponse = {
+  enabled: boolean
+  config: unknown
+  updatedAt: string | null
+}
+
+function formatHm(value: string | null): string {
+  if (!value) return '-'
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return '-'
+  return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+function formatSaAction(action: string): string {
+  const a = (action || '').toLowerCase()
+  if (a === 'buy') return '매수'
+  if (a === 'sell') return '매도'
+  if (a === 'stoploss') return '손절'
+  if (a === 'takeprofit') return '익절'
+  return action
+}
+
+function isSameLocalDay(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+}
+
 export function AutoSaPage() {
   const [activeTab, setActiveTab] = useState<SaTab>('status')
+  const [positions, setPositions] = useState<SaPositionItem[] | null>(null)
+  const [logs, setLogs] = useState<SaLogItem[] | null>(null)
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const [posRes, logRes] = await Promise.all([
+          fetchJson<SaPositionsResponse>('/api/automation/sa/positions'),
+          fetchJson<SaLogsResponse>('/api/automation/sa/logs?limit=500'),
+        ])
+        if (cancelled) return
+        setPositions(posRes.items)
+        setLogs(logRes.items)
+      } catch {
+        if (cancelled) return
+        setPositions([])
+        setLogs([])
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    fetchJson<SaConfigResponse>('/api/automation/sa')
+      .then((cfg) => {
+        if (!cancelled) setEnabled(Boolean(cfg.enabled))
+      })
+      .catch(() => {
+        if (!cancelled) setEnabled(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const positionRows = useMemo(() => positions ?? [], [positions])
+  const logRows = useMemo(() => logs ?? [], [logs])
+  const todayTradeCount = useMemo(() => {
+    if (!logs) return null
+    const now = new Date()
+    let count = 0
+    for (const row of logs) {
+      if (!row.at) continue
+      const d = new Date(row.at)
+      if (Number.isNaN(d.getTime())) continue
+      if (isSameLocalDay(d, now)) count += 1
+    }
+    return count
+  }, [logs])
 
   return (
     <>
@@ -130,16 +245,32 @@ export function AutoSaPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      <tr>
-                        <td>SK하이닉스</td>
-                        <td>10</td>
-                        <td>198,500</td>
-                        <td>210,500</td>
-                        <td className="up">+6.05%</td>
-                        <td>
-                          <span className="chip on">달성</span>
-                        </td>
-                      </tr>
+                      {positions === null ? (
+                        <tr>
+                          <td colSpan={6} className="subtle">
+                            불러오는 중…
+                          </td>
+                        </tr>
+                      ) : positionRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="subtle">
+                            보유 포지션이 없습니다.
+                          </td>
+                        </tr>
+                      ) : (
+                        positionRows.map((row) => (
+                          <tr key={row.id}>
+                            <td>{row.name}</td>
+                            <td>{formatNumber(row.qty)}</td>
+                            <td>{row.avgBuy ? formatNumber(row.avgBuy) : '-'}</td>
+                            <td>{row.current ? formatNumber(row.current) : '-'}</td>
+                            <td className={row.pnlPct != null && row.pnlPct >= 0 ? 'up' : 'down'}>
+                              {row.pnlPct == null ? '-' : formatPercent(row.pnlPct)}
+                            </td>
+                            <td>-</td>
+                          </tr>
+                        ))
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -151,11 +282,11 @@ export function AutoSaPage() {
                 <ul className="engine-list">
                   <li>
                     <span>엔진</span>
-                    <span className="chip on">ON</span>
+                    <span className={`chip ${enabled ? 'on' : 'off'}`}>{enabled ? 'ON' : 'OFF'}</span>
                   </li>
                   <li>
                     <span>오늘 거래</span>
-                    <b>12</b>
+                    <b>{todayTradeCount == null ? '-' : formatNumber(todayTradeCount)}</b>
                   </li>
                   <li>
                     <span>손절</span>
@@ -185,24 +316,31 @@ export function AutoSaPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td>10:21</td>
-                    <td>매수</td>
-                    <td>SK하이닉스</td>
-                    <td>10</td>
-                    <td>198,500</td>
-                    <td>골든크로스 임박</td>
-                    <td>-</td>
-                  </tr>
-                  <tr>
-                    <td>14:32</td>
-                    <td>익절(1차)</td>
-                    <td>SK하이닉스</td>
-                    <td>5</td>
-                    <td>208,400</td>
-                    <td>+5% 도달</td>
-                    <td className="up">+247,500</td>
-                  </tr>
+                  {logs === null ? (
+                    <tr>
+                      <td colSpan={7} className="subtle">
+                        불러오는 중…
+                      </td>
+                    </tr>
+                  ) : logRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="subtle">
+                        매매 로그가 없습니다.
+                      </td>
+                    </tr>
+                  ) : (
+                    logRows.map((row) => (
+                      <tr key={row.id}>
+                        <td>{formatHm(row.at)}</td>
+                        <td>{formatSaAction(row.action)}</td>
+                        <td>{row.name}</td>
+                        <td>{row.qty == null ? '-' : formatNumber(row.qty)}</td>
+                        <td>{row.price == null ? '-' : formatNumber(row.price)}</td>
+                        <td>{row.message || '-'}</td>
+                        <td>-</td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>

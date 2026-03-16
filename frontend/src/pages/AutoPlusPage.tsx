@@ -1,9 +1,129 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { fetchJson } from '../lib/api'
+import { formatNumber, formatPercent } from '../lib/format'
 
 type PlusTab = 'status' | 'logs' | 'rotation' | 'performance'
 
+type PlusPositionItem = {
+  id: number
+  name: string
+  code: string
+  qty: number
+  avgBuy: number
+  current: number
+  pnlPct: number | null
+  openedAt: string | null
+  closedAt: string | null
+}
+
+type PlusPositionsResponse = {
+  asOf: string
+  items: PlusPositionItem[]
+}
+
+type PlusLogItem = {
+  id: number
+  at: string | null
+  action: string
+  name: string
+  code: string
+  qty: number | null
+  price: number | null
+  message: string | null
+}
+
+type PlusLogsResponse = {
+  asOf: string
+  items: PlusLogItem[]
+}
+
+type PlusConfigResponse = {
+  enabled: boolean
+  config: unknown
+  updatedAt: string | null
+}
+
+function formatHm(value: string | null): string {
+  if (!value) return '-'
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return '-'
+  return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+function formatPlusAction(action: string): string {
+  const a = (action || '').toLowerCase()
+  if (a === 'buy') return '매수'
+  if (a === 'sell') return '매도'
+  return action
+}
+
 export function AutoPlusPage() {
   const [activeTab, setActiveTab] = useState<PlusTab>('status')
+  const [positions, setPositions] = useState<PlusPositionItem[] | null>(null)
+  const [logs, setLogs] = useState<PlusLogItem[] | null>(null)
+  const [config, setConfig] = useState<PlusConfigResponse | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const [posRes, logRes] = await Promise.all([
+          fetchJson<PlusPositionsResponse>('/api/automation/plus/positions'),
+          fetchJson<PlusLogsResponse>('/api/automation/plus/logs?limit=200'),
+        ])
+        if (cancelled) return
+        setPositions(posRes.items)
+        setLogs(logRes.items)
+      } catch {
+        if (cancelled) return
+        setPositions([])
+        setLogs([])
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    fetchJson<PlusConfigResponse>('/api/automation/plus')
+      .then((cfg) => {
+        if (!cancelled) setConfig(cfg)
+      })
+      .catch(() => {
+        if (!cancelled) setConfig({ enabled: false, config: null, updatedAt: null })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const positionRows = useMemo(() => positions ?? [], [positions])
+  const logRows = useMemo(() => logs ?? [], [logs])
+
+  const stats = useMemo(() => {
+    if (!positions) return null
+    const invested = positions.reduce((acc, p) => acc + (p.qty || 0) * (p.avgBuy || 0), 0)
+    const evaluated = positions.reduce((acc, p) => acc + (p.qty || 0) * (p.current || 0), 0)
+    const avgReturnPct = invested > 0 ? ((evaluated - invested) / invested) * 100.0 : null
+
+    let maxPositions: number | null = null
+    const cfg = config?.config
+    if (cfg && typeof cfg === 'object') {
+      const obj = cfg as Record<string, unknown>
+      const candidates = [obj.maxPositions, obj.maxSymbols, obj.maxStocks, obj.maxCount]
+      for (const c of candidates) {
+        if (typeof c === 'number' && Number.isFinite(c) && c > 0) {
+          maxPositions = Math.floor(c)
+          break
+        }
+      }
+    }
+
+    const freeSlots = maxPositions == null ? null : Math.max(0, maxPositions - positions.length)
+    return { evaluated, avgReturnPct, freeSlots }
+  }, [config?.config, positions])
 
   return (
     <>
@@ -128,20 +248,31 @@ export function AutoPlusPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      <tr>
-                        <td>KB금융</td>
-                        <td>78,400</td>
-                        <td>79,600</td>
-                        <td>12</td>
-                        <td className="up">+1.53%</td>
-                      </tr>
-                      <tr>
-                        <td>POSCO홀딩스</td>
-                        <td>420,000</td>
-                        <td>418,000</td>
-                        <td>18</td>
-                        <td className="down">-0.48%</td>
-                      </tr>
+                      {positions === null ? (
+                        <tr>
+                          <td colSpan={5} className="subtle">
+                            불러오는 중…
+                          </td>
+                        </tr>
+                      ) : positionRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="subtle">
+                            보유 포지션이 없습니다.
+                          </td>
+                        </tr>
+                      ) : (
+                        positionRows.map((row) => (
+                          <tr key={row.id}>
+                            <td>{row.name}</td>
+                            <td>{row.avgBuy ? formatNumber(row.avgBuy) : '-'}</td>
+                            <td>{row.current ? formatNumber(row.current) : '-'}</td>
+                            <td>-</td>
+                            <td className={row.pnlPct != null && row.pnlPct >= 0 ? 'up' : 'down'}>
+                              {row.pnlPct == null ? '-' : formatPercent(row.pnlPct)}
+                            </td>
+                          </tr>
+                        ))
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -153,15 +284,17 @@ export function AutoPlusPage() {
                 <ul className="engine-list">
                   <li>
                     <span>총 평가액</span>
-                    <b>₩-</b>
+                    <b>{stats ? `₩${formatNumber(Math.round(stats.evaluated))}` : '₩-'}</b>
                   </li>
                   <li>
                     <span>평균 수익률</span>
-                    <b className="up">+0.52%</b>
+                    <b className={(stats?.avgReturnPct ?? 0) >= 0 ? 'up' : 'down'}>
+                      {stats?.avgReturnPct == null ? '-' : formatPercent(stats.avgReturnPct)}
+                    </b>
                   </li>
                   <li>
                     <span>여유 슬롯</span>
-                    <b>3</b>
+                    <b>{stats?.freeSlots == null ? '-' : formatNumber(stats.freeSlots)}</b>
                   </li>
                 </ul>
               </article>
@@ -183,15 +316,31 @@ export function AutoPlusPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td>09:10</td>
-                    <td>매수</td>
-                    <td>KB금융</td>
-                    <td>78,400</td>
-                    <td>20</td>
-                    <td>12</td>
-                    <td>추천 상위 편입</td>
-                  </tr>
+                  {logs === null ? (
+                    <tr>
+                      <td colSpan={7} className="subtle">
+                        불러오는 중…
+                      </td>
+                    </tr>
+                  ) : logRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="subtle">
+                        매매 로그가 없습니다.
+                      </td>
+                    </tr>
+                  ) : (
+                    logRows.map((row) => (
+                      <tr key={row.id}>
+                        <td>{formatHm(row.at)}</td>
+                        <td>{formatPlusAction(row.action)}</td>
+                        <td>{row.name}</td>
+                        <td>{row.price == null ? '-' : formatNumber(row.price)}</td>
+                        <td>{row.qty == null ? '-' : formatNumber(row.qty)}</td>
+                        <td>-</td>
+                        <td>{row.message || '-'}</td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
