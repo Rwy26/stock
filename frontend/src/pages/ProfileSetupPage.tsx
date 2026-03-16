@@ -1,6 +1,39 @@
-import { Link } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
+import { fetchJson } from '../lib/api'
 
 export function ProfileSetupPage() {
+  const navigate = useNavigate()
+
+  const [nickname, setNickname] = useState('')
+  const [appKey, setAppKey] = useState('')
+  const [appSecret, setAppSecret] = useState('')
+  const [accountPrefix, setAccountPrefix] = useState('')
+  const [tradeType, setTradeType] = useState<'실계좌' | '모의투자'>('실계좌')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    fetchJson<{
+      nickname: string | null
+      kis: {
+        appKey: string | null
+        appSecret: string | null
+        accountPrefix: string | null
+        tradeType: '실계좌' | '모의투자'
+      }
+    }>('/api/profile')
+      .then((data) => {
+        if (data.nickname != null) setNickname(data.nickname)
+        if (data.kis?.appKey != null) setAppKey(data.kis.appKey)
+        if (data.kis?.appSecret != null) setAppSecret(data.kis.appSecret)
+        if (data.kis?.accountPrefix != null) setAccountPrefix(data.kis.accountPrefix)
+        if (data.kis?.tradeType != null) setTradeType(data.kis.tradeType)
+      })
+      .catch(() => {
+        // Keep UX minimal: no extra modals/toasts.
+      })
+  }, [])
+
   return (
     <main className="auth-shell">
       <section className="auth-card glass reveal">
@@ -11,7 +44,7 @@ export function ProfileSetupPage() {
         <div className="settings-grid" style={{ gridTemplateColumns: '1fr' }}>
           <label>
             닉네임
-            <input placeholder="nickname" />
+            <input placeholder="nickname" value={nickname} onChange={(e) => setNickname(e.target.value)} />
           </label>
         </div>
 
@@ -24,19 +57,19 @@ export function ProfileSetupPage() {
         <div className="settings-grid" style={{ gridTemplateColumns: '1fr', marginTop: 10 }}>
           <label>
             KIS 앱키(App Key)
-            <input placeholder="app key" />
+            <input placeholder="app key" value={appKey} onChange={(e) => setAppKey(e.target.value)} />
           </label>
           <label>
             KIS 앱 시크릿(App Secret)
-            <input placeholder="app secret" />
+            <input placeholder="app secret" value={appSecret} onChange={(e) => setAppSecret(e.target.value)} />
           </label>
           <label>
             계좌번호(앞 8자리)
-            <input placeholder="12345678" />
+            <input placeholder="12345678" value={accountPrefix} onChange={(e) => setAccountPrefix(e.target.value)} />
           </label>
           <label>
             거래 구분
-            <select>
+            <select value={tradeType} onChange={(e) => setTradeType(e.target.value as '실계좌' | '모의투자')}>
               <option>실계좌</option>
               <option>모의투자</option>
             </select>
@@ -44,9 +77,26 @@ export function ProfileSetupPage() {
         </div>
 
         <div className="auth-actions">
-          <Link className="btn" to="/" style={{ display: 'inline-grid', placeItems: 'center', textDecoration: 'none' }}>
+          <button
+            className="btn"
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true)
+              fetchJson<{ ok: boolean }>('/api/profile', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ nickname, appKey, appSecret, accountPrefix, tradeType }),
+              })
+                .then(() => navigate('/'))
+                .catch(() => {
+                  // Keep UX minimal: no extra modals/toasts.
+                })
+                .finally(() => setBusy(false))
+            }}
+          >
             저장
-          </Link>
+          </button>
           <Link className="btn secondary" to="/login" style={{ display: 'inline-grid', placeItems: 'center', textDecoration: 'none' }}>
             뒤로
           </Link>

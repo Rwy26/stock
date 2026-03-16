@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { AppShell } from './layout/AppShell'
+import { RequireAuth } from './layout/RequireAuth'
 import { AdminPage } from './pages/AdminPage'
 import { AutoBasicPage } from './pages/AutoBasicPage'
 import { AutoPlusPage } from './pages/AutoPlusPage'
@@ -20,7 +21,13 @@ export default function App() {
       <div className="bg-orb orb-2"></div>
 
       <Routes>
-        <Route element={<AppShell />}>
+        <Route
+          element={
+            <RequireAuth>
+              <AppShell />
+            </RequireAuth>
+          }
+        >
           <Route index element={<DashboardPage />} />
           <Route path="portfolio" element={<PortfolioPage />} />
           <Route path="stock-search" element={<StockSearchPage />} />
@@ -34,7 +41,14 @@ export default function App() {
         </Route>
 
         <Route path="login" element={<LoginPage />} />
-        <Route path="profile-setup" element={<ProfileSetupPage />} />
+        <Route
+          path="profile-setup"
+          element={
+            <RequireAuth>
+              <ProfileSetupPage />
+            </RequireAuth>
+          }
+        />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

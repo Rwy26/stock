@@ -1,4 +1,7 @@
+import { useEffect } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { getAccessToken, getJwtExpMs, getUserRole } from '../lib/auth'
+import { refreshAccessToken } from '../lib/api'
 
 const menuItems = [
   { to: '/', slug: 'dashboard', label: '대시보드' },
@@ -21,6 +24,39 @@ function getPageSlug(pathname: string): string {
 export function AppShell() {
   const location = useLocation()
   const page = getPageSlug(location.pathname)
+
+  useEffect(() => {
+    // Requirement 14-3: admin JWT auto refresh every ~20h (prevent expiry without server restart).
+    const role = getUserRole()
+    if (role && role !== 'admin') return
+
+    let timerId: number | null = null
+    let cancelled = false
+
+    const scheduleNext = () => {
+      if (cancelled) return
+      const token = getAccessToken()
+      if (!token) return
+
+      const expMs = getJwtExpMs(token)
+      const bufferMs = 10 * 60 * 1000
+      const fallbackMs = 20 * 60 * 60 * 1000
+      const delayMs = expMs ? Math.max(60 * 1000, expMs - Date.now() - bufferMs) : fallbackMs
+
+      if (timerId != null) window.clearTimeout(timerId)
+      timerId = window.setTimeout(async () => {
+        await refreshAccessToken()
+        scheduleNext()
+      }, delayMs)
+    }
+
+    scheduleNext()
+
+    return () => {
+      cancelled = true
+      if (timerId != null) window.clearTimeout(timerId)
+    }
+  }, [])
 
   return (
     <div className="app-shell" data-page={page}>

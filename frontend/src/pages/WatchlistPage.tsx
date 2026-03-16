@@ -22,6 +22,7 @@ const fallbackItems: WatchItem[] = [
 
 export function WatchlistPage() {
   const [data, setData] = useState<WatchlistResponse | null>(null)
+  const [busyCode, setBusyCode] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -36,6 +37,12 @@ export function WatchlistPage() {
       cancelled = true
     }
   }, [])
+
+  const refresh = () => {
+    fetchJson<WatchlistResponse>('/api/watchlist')
+      .then((payload) => setData(payload))
+      .catch(() => setData(null))
+  }
 
   const items = useMemo(() => data?.items ?? fallbackItems, [data])
 
@@ -77,7 +84,22 @@ export function WatchlistPage() {
                     <b>{item.score}</b>
                   </td>
                   <td>
-                    <button className="btn secondary" type="button">
+                    <button
+                      className="btn secondary"
+                      type="button"
+                      disabled={busyCode === item.code}
+                      onClick={() => {
+                        setBusyCode(item.code)
+                        fetchJson<{ ok: boolean }>(`/api/watchlist/${encodeURIComponent(item.code)}`, {
+                          method: 'DELETE',
+                        })
+                          .then(() => refresh())
+                          .catch(() => {
+                            // Keep UX minimal: no extra toast; just re-enable.
+                          })
+                          .finally(() => setBusyCode(null))
+                      }}
+                    >
                       삭제
                     </button>
                   </td>

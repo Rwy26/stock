@@ -7,6 +7,7 @@ node_modules/
 __pycache__/
 *.py[cod]
 .venv/
+.venv-ai/
 venv/
 backend/.venv/
 .pytest_cache/
@@ -17,6 +18,8 @@ backend/.venv/
 .env
 *.env
 .env.*
+!.env.example
+!backend/.env.example
 
 # Logs
 logs/

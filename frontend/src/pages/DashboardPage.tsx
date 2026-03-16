@@ -1,4 +1,46 @@
+import { useEffect, useState } from 'react'
+import { fetchJson } from '../lib/api'
+import { formatKRW, formatPercent } from '../lib/format'
+
+type DashboardResponse = {
+  kpis: {
+    totalValue: { amount: number; deltaPct: number }
+    totalInvested: { amount: number; deltaPct: number }
+    pnl: { amount: number; deltaPct: number }
+    cash: { amount: number; label: string }
+  }
+  topRecommendations: Array<{ name: string; code: string; score: number }>
+  automation?: {
+    basic?: { on: boolean; label: string }
+    sa?: { on: boolean; label: string }
+    plus?: { on: boolean; label: string }
+    svAgent?: { on: boolean; label: string }
+  }
+  kis?: { connected: boolean; label: string }
+}
+
 export function DashboardPage() {
+  const [data, setData] = useState<DashboardResponse | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetchJson<DashboardResponse>('/api/dashboard')
+      .then((payload) => {
+        if (!cancelled) setData(payload)
+      })
+      .catch(() => {
+        if (!cancelled) setData(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const kpis = data?.kpis
+  const top = data?.topRecommendations
+  const automation = data?.automation
+  const kisLabel = data?.kis?.label ?? 'KIS 실시간 연결'
+
   return (
     <>
       <header className="topbar glass">
@@ -6,7 +48,7 @@ export function DashboardPage() {
           <p className="top-label">Production v1.0+</p>
           <h2>Apollo Stock Trading System</h2>
         </div>
-        <div className="status-pill">KIS 실시간 연결</div>
+        <div className="status-pill">{kisLabel}</div>
       </header>
 
       <section className="dashboard-grid">
@@ -17,23 +59,29 @@ export function DashboardPage() {
           <div className="kpi-grid" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
             <div className="card gradient-a" style={{ boxShadow: 'none' }}>
               <h3>총 평가금액</h3>
-              <p className="value">₩184,380,000</p>
-              <span className="delta up">+2.41%</span>
+              <p className="value">{kpis ? formatKRW(kpis.totalValue.amount) : '₩184,380,000'}</p>
+              <span className={kpis && kpis.totalValue.deltaPct < 0 ? 'delta down' : 'delta up'}>
+                {kpis ? formatPercent(kpis.totalValue.deltaPct) : '+2.41%'}
+              </span>
             </div>
             <div className="card gradient-b" style={{ boxShadow: 'none' }}>
               <h3>총 투자금액</h3>
-              <p className="value">₩161,000,000</p>
-              <span className="delta up">+1.04%</span>
+              <p className="value">{kpis ? formatKRW(kpis.totalInvested.amount) : '₩161,000,000'}</p>
+              <span className={kpis && kpis.totalInvested.deltaPct < 0 ? 'delta down' : 'delta up'}>
+                {kpis ? formatPercent(kpis.totalInvested.deltaPct) : '+1.04%'}
+              </span>
             </div>
             <div className="card gradient-c" style={{ boxShadow: 'none' }}>
               <h3>수익금</h3>
-              <p className="value">₩23,380,000</p>
-              <span className="delta up">+14.52%</span>
+              <p className="value">{kpis ? formatKRW(kpis.pnl.amount) : '₩23,380,000'}</p>
+              <span className={kpis && kpis.pnl.deltaPct < 0 ? 'delta down' : 'delta up'}>
+                {kpis ? formatPercent(kpis.pnl.deltaPct) : '+14.52%'}
+              </span>
             </div>
             <div className="card gradient-d" style={{ boxShadow: 'none' }}>
               <h3>예수금</h3>
-              <p className="value">₩39,640,000</p>
-              <span className="delta">가용 가능</span>
+              <p className="value">{kpis ? formatKRW(kpis.cash.amount) : '₩39,640,000'}</p>
+              <span className="delta">{kpis ? kpis.cash.label : '가용 가능'}</span>
             </div>
           </div>
         </article>
@@ -55,19 +103,21 @@ export function DashboardPage() {
           <ul className="engine-list">
             <li>
               <span>일반 자동매매</span>
-              <span className="chip off">OFF</span>
+              <span className={automation?.basic?.on ? 'chip on' : 'chip off'}>{automation?.basic?.label ?? 'OFF'}</span>
             </li>
             <li>
               <span>SA 자동매매</span>
-              <span className="chip on">ON / 12건</span>
+              <span className={automation?.sa?.on ? 'chip on' : 'chip off'}>{automation?.sa?.label ?? 'ON / 12건'}</span>
             </li>
             <li>
               <span>Plus 자동매매</span>
-              <span className="chip off">OFF</span>
+              <span className={automation?.plus?.on ? 'chip on' : 'chip off'}>{automation?.plus?.label ?? 'OFF'}</span>
             </li>
             <li>
               <span>SV Agent</span>
-              <span className="chip on">ON / ai_assisted</span>
+              <span className={automation?.svAgent?.on ? 'chip on' : 'chip off'}>
+                {automation?.svAgent?.label ?? 'ON / ai_assisted'}
+              </span>
             </li>
           </ul>
         </article>
@@ -77,26 +127,18 @@ export function DashboardPage() {
             <h3>Top 추천 종목</h3>
           </div>
           <ol className="ranking">
-            <li>
-              <span>삼성전자</span>
-              <b>91점</b>
-            </li>
-            <li>
-              <span>SK하이닉스</span>
-              <b>88점</b>
-            </li>
-            <li>
-              <span>현대차</span>
-              <b>85점</b>
-            </li>
-            <li>
-              <span>KB금융</span>
-              <b>84점</b>
-            </li>
-            <li>
-              <span>POSCO홀딩스</span>
-              <b>83점</b>
-            </li>
+            {(top ?? [
+              { name: '삼성전자', code: '005930', score: 91 },
+              { name: 'SK하이닉스', code: '000660', score: 88 },
+              { name: '현대차', code: '005380', score: 85 },
+              { name: 'KB금융', code: '105560', score: 84 },
+              { name: 'POSCO홀딩스', code: '005490', score: 83 },
+            ]).map((item) => (
+              <li key={item.code}>
+                <span>{item.name}</span>
+                <b>{item.score}점</b>
+              </li>
+            ))}
           </ol>
         </article>
 
