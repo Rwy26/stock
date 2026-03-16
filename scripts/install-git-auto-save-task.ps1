@@ -8,6 +8,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Ensure TEMP/TMP point to an existing directory (scheduled tasks and some tooling can fail otherwise).
+try {
+  $fallbackTemp = Join-Path $env:LOCALAPPDATA 'Temp'
+  if (-not (Test-Path $fallbackTemp)) {
+    New-Item -ItemType Directory -Force -Path $fallbackTemp | Out-Null
+  }
+  if (-not $env:TEMP -or -not (Test-Path $env:TEMP)) { $env:TEMP = $fallbackTemp }
+  if (-not $env:TMP -or -not (Test-Path $env:TMP)) { $env:TMP = $fallbackTemp }
+} catch { }
+
 if (-not (Test-Path $RepoPath)) {
   throw "RepoPath not found: $RepoPath"
 }
