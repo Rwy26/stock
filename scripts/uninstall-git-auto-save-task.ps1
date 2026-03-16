@@ -5,5 +5,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-Write-Host "Removed Scheduled Task: $TaskName"
+try {
+  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+  Write-Host "Removed Scheduled Task: $TaskName"
+}
+catch {
+  if ($_.Exception.Message -match 'cannot find the file specified|No mapping between account names|The system cannot find the file specified') {
+    Write-Host "Scheduled Task not found (nothing to remove): $TaskName"
+    exit 0
+  }
+  throw
+}
