@@ -29,6 +29,20 @@ type LoginHistoryResponse = {
   items: LoginHistoryItem[]
 }
 
+type EngineLogItem = {
+  id: number
+  userId: number
+  email?: string | null
+  engine: string
+  event: string
+  message: string | null
+  at: string | null
+}
+
+type EngineLogsResponse = {
+  items: EngineLogItem[]
+}
+
 type AdminKisProfile = {
   userId: number
   appKey: string | null
@@ -54,6 +68,7 @@ function formatDate(value: string | null | undefined): string {
 export function AdminPage() {
   const [users, setUsers] = useState<AdminUser[] | null>(null)
   const [loginHistory, setLoginHistory] = useState<LoginHistoryItem[] | null>(null)
+  const [engineLogs, setEngineLogs] = useState<EngineLogItem[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -95,17 +110,22 @@ export function AdminPage() {
     if (opts?.startDate) qs.set('startDate', opts.startDate)
     if (opts?.endDate) qs.set('endDate', opts.endDate)
 
+    const engineQs = new URLSearchParams({ limit: '200' })
+
     try {
-      const [usersRes, historyRes] = await Promise.all([
+      const [usersRes, historyRes, engineLogsRes] = await Promise.all([
         fetchJson<AdminUsersResponse>('/api/admin/users'),
         fetchJson<LoginHistoryResponse>(`/api/admin/login-history?${qs.toString()}`),
+        fetchJson<EngineLogsResponse>(`/api/admin/engine-logs?${engineQs.toString()}`),
       ])
       setUsers(usersRes.items)
       setLoginHistory(historyRes.items)
+      setEngineLogs(engineLogsRes.items)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setUsers(null)
       setLoginHistory(null)
+      setEngineLogs(null)
     } finally {
       setLoading(false)
     }
@@ -133,6 +153,13 @@ export function AdminPage() {
     const normalized = (event || '').toLowerCase()
     if (normalized === 'login') return { label: '로그인', cls: 'chip on' }
     if (normalized === 'logout') return { label: '로그아웃', cls: 'chip off' }
+    return { label: event || '-', cls: 'chip' }
+  }
+
+  const renderEngineEvent = (event: string) => {
+    const normalized = (event || '').toLowerCase()
+    if (normalized === 'tick') return { label: 'tick', cls: 'chip on' }
+    if (normalized === 'error') return { label: 'error', cls: 'chip off' }
     return { label: event || '-', cls: 'chip' }
   }
 
@@ -641,6 +668,50 @@ export function AdminPage() {
                 </tr>
               ))}
               {!loading && filteredLoginHistory.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="hint">
+                    데이터가 없습니다.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="panel glass reveal">
+        <div className="panel-head">
+          <h3>자동매매 엔진 로그</h3>
+          {loading ? <div className="hint">불러오는 중…</div> : null}
+        </div>
+        <p className="hint" style={{ marginTop: 8 }}>
+          dry-run tick 로그(평일 09:00~15:20). 서버에서 AUTOTRADING_KILL_SWITCH=1이면 기록되지 않습니다.
+        </p>
+
+        <div className="table-wrap" style={{ marginTop: 10 }}>
+          <table>
+            <thead>
+              <tr>
+                <th>시각</th>
+                <th>이메일</th>
+                <th>엔진</th>
+                <th>이벤트</th>
+                <th>메시지</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(engineLogs ?? []).map((r) => (
+                <tr key={r.id}>
+                  <td>{formatDate(r.at)}</td>
+                  <td>{r.email ?? (r.userId != null ? `user#${r.userId}` : '-')}</td>
+                  <td>{r.engine || '-'}</td>
+                  <td>
+                    <span className={renderEngineEvent(r.event).cls}>{renderEngineEvent(r.event).label}</span>
+                  </td>
+                  <td>{r.message ?? '-'}</td>
+                </tr>
+              ))}
+              {!loading && (engineLogs ?? []).length === 0 ? (
                 <tr>
                   <td colSpan={5} className="hint">
                     데이터가 없습니다.

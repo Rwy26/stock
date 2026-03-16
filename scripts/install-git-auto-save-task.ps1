@@ -29,16 +29,16 @@ if (-not (Test-Path $scriptPath)) {
 
 $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
 
-$args = @(
+$taskArgs = @(
   '-NoProfile',
   '-ExecutionPolicy', 'Bypass',
   '-File', "`"$scriptPath`"",
   '-RepoPath', "`"$RepoPath`"",
   '-MessagePrefix', 'auto-save'
 )
-if ($Push) { $args += '-Push' }
+if ($Push) { $taskArgs += '-Push' }
 
-$action = New-ScheduledTaskAction -Execute $pwsh -Argument ($args -join ' ') -WorkingDirectory $RepoPath
+$action = New-ScheduledTaskAction -Execute $pwsh -Argument ($taskArgs -join ' ') -WorkingDirectory $RepoPath
 
 # Start 1 minute from now, then repeat forever
 $start = (Get-Date).AddMinutes(1)
