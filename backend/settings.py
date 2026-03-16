@@ -40,6 +40,9 @@ class Settings:
     # If true, price endpoints will fail when KIS quote fails (no DB fallback).
     kis_strict_price: bool = os.getenv("KIS_STRICT_PRICE", "0").strip() in {"1", "true", "True", "YES", "yes"}
 
+    # Auto-trading engine safety kill switch (1 = disable all engine ticks/orders).
+    autotrading_kill_switch: bool = os.getenv("AUTOTRADING_KILL_SWITCH", "0").strip() in {"1", "true", "True", "YES", "yes"}
+
     def database_url(self) -> str:
         if self.mysql_url:
             return self.mysql_url

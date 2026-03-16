@@ -214,6 +214,17 @@ class PlusAutoTradingLog(Base):
     at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
 
 
+class AutomationEngineLog(Base):
+    __tablename__ = "automation_engine_logs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    engine: Mapped[str] = mapped_column(String(20), index=True)  # basic|sa|plus|sv
+    event: Mapped[str] = mapped_column(String(30), index=True)  # tick|start|stop|error
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+
 class SvAgentConfig(Base):
     __tablename__ = "sv_agent_configs"
 

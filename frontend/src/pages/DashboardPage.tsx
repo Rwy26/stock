@@ -19,17 +19,47 @@ type DashboardResponse = {
   kis?: { connected: boolean; label: string }
 }
 
+type KisTokenStatusResponse = {
+  ok: boolean
+  hasProfile: boolean
+  tradeType: '실계좌' | '모의투자' | string
+  expiresIn: number | null
+  asOf: string
+  error?: string
+}
+
 export function DashboardPage() {
   const [data, setData] = useState<DashboardResponse | null>(null)
+  const [kisTokenLine, setKisTokenLine] = useState<string>('KIS 토큰: -')
 
   useEffect(() => {
     let cancelled = false
-    fetchJson<DashboardResponse>('/api/dashboard')
-      .then((payload) => {
-        if (!cancelled) setData(payload)
+
+    Promise.all([
+      fetchJson<DashboardResponse>('/api/dashboard'),
+      fetchJson<KisTokenStatusResponse>('/api/kis/token-status'),
+    ])
+      .then(([dashboard, tokenStatus]) => {
+        if (cancelled) return
+        setData(dashboard)
+
+        if (!tokenStatus.hasProfile) {
+          setKisTokenLine('KIS 토큰: 설정 필요')
+          return
+        }
+
+        if (tokenStatus.ok && typeof tokenStatus.expiresIn === 'number') {
+          setKisTokenLine(tokenStatus.expiresIn <= 60 * 60 ? 'KIS 토큰: 만료 임박' : 'KIS 토큰: 정상')
+          return
+        }
+
+        setKisTokenLine('KIS 토큰: 오류')
       })
       .catch(() => {
-        if (!cancelled) setData(null)
+        if (!cancelled) {
+          setData(null)
+          setKisTokenLine('KIS 토큰: -')
+        }
       })
     return () => {
       cancelled = true
@@ -48,7 +78,12 @@ export function DashboardPage() {
           <p className="top-label">Production v1.0+</p>
           <h2>Apollo Stock Trading System</h2>
         </div>
-        <div className="status-pill">{kisLabel}</div>
+        <div style={{ display: 'grid', justifyItems: 'end', gap: 6 }}>
+          <div className="status-pill">{kisLabel}</div>
+          <p className="hint" style={{ margin: 0 }}>
+            {kisTokenLine}
+          </p>
+        </div>
       </header>
 
       <section className="dashboard-grid">

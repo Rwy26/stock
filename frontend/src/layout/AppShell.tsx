@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { getAccessToken, getJwtExpMs, getUserRole } from '../lib/auth'
-import { refreshAccessToken } from '../lib/api'
+import { clearAccessToken, clearUserRole, getAccessToken, getJwtExpMs, getUserRole } from '../lib/auth'
+import { fetchJson, refreshAccessToken } from '../lib/api'
 
 const menuItems = [
   { to: '/', slug: 'dashboard', label: '대시보드' },
@@ -77,6 +77,22 @@ export function AppShell() {
             </NavLink>
           ))}
         </nav>
+
+        <div className="divider" style={{ marginTop: 16 }}></div>
+        <button
+          className="btn secondary"
+          type="button"
+          onClick={() => {
+            fetchJson<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }).catch(() => {
+              // best-effort
+            })
+            clearAccessToken()
+            clearUserRole()
+            window.location.href = '/login'
+          }}
+        >
+          로그아웃
+        </button>
       </aside>
 
       <main className="main-panel">

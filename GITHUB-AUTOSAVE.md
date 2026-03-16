@@ -26,7 +26,7 @@ gh auth status
 
 ```powershell
 Set-Location c:\stock
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\publish-to-github.ps1 -Repo "OWNER/REPO"  # 예: moon/stock
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\publish-to-github.ps1 -Repo "OWNER/REPO"  # 예: rwy26/stock
 ```
 
 - 공개 repo로 만들려면 `-Public` 옵션을 추가합니다.

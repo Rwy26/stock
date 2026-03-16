@@ -66,6 +66,7 @@ export function AdminPage() {
 
   const [historyStartDate, setHistoryStartDate] = useState('')
   const [historyEndDate, setHistoryEndDate] = useState('')
+  const [historyEventFilter, setHistoryEventFilter] = useState<'all' | 'login' | 'logout'>('all')
 
   const [kisUserId, setKisUserId] = useState<number | null>(null)
   const [kisLoading, setKisLoading] = useState(false)
@@ -121,6 +122,19 @@ export function AdminPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const filteredLoginHistory = useMemo(() => {
+    const items = loginHistory ?? []
+    if (historyEventFilter === 'all') return items
+    return items.filter((r) => (r.event || '').toLowerCase() === historyEventFilter)
+  }, [loginHistory, historyEventFilter])
+
+  const renderEvent = (event: string) => {
+    const normalized = (event || '').toLowerCase()
+    if (normalized === 'login') return { label: '로그인', cls: 'chip on' }
+    if (normalized === 'logout') return { label: '로그아웃', cls: 'chip off' }
+    return { label: event || '-', cls: 'chip' }
+  }
 
   return (
     <>
@@ -578,6 +592,14 @@ export function AdminPage() {
             <input type="date" value={historyEndDate} onChange={(e) => setHistoryEndDate(e.target.value)} />
           </label>
           <label>
+            이벤트
+            <select value={historyEventFilter} onChange={(e) => setHistoryEventFilter(e.target.value as 'all' | 'login' | 'logout')}>
+              <option value="all">전체</option>
+              <option value="login">로그인</option>
+              <option value="logout">로그아웃</option>
+            </select>
+          </label>
+          <label>
             액션
             <button
               className="btn"
@@ -607,16 +629,18 @@ export function AdminPage() {
               </tr>
             </thead>
             <tbody>
-              {(loginHistory ?? []).map((r) => (
+              {filteredLoginHistory.map((r) => (
                 <tr key={r.id}>
                   <td>{formatDate(r.at)}</td>
                   <td>{r.email ?? (r.userId != null ? `user#${r.userId}` : '-')}</td>
-                  <td>{r.event}</td>
+                  <td>
+                    <span className={renderEvent(r.event).cls}>{renderEvent(r.event).label}</span>
+                  </td>
                   <td>{r.ip ?? '-'}</td>
                   <td>{r.userAgent ?? '-'}</td>
                 </tr>
               ))}
-              {!loading && (loginHistory ?? []).length === 0 ? (
+              {!loading && filteredLoginHistory.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="hint">
                     데이터가 없습니다.

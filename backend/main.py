@@ -94,6 +94,7 @@ app = FastAPI(title="Apollo Stock Trading System")
 
 
 _kis_refresh_stop = threading.Event()
+_autotrade_stop = threading.Event()
 
 
 def _kis_refresh_loop() -> None:
@@ -152,15 +153,90 @@ def _kis_refresh_loop() -> None:
         _kis_refresh_stop.wait(timeout=60 * 60)
 
 
+    def _is_market_open(now: datetime) -> bool:
+        if now.weekday() >= 5:
+            return False
+        t = now.time()
+        start = datetime(now.year, now.month, now.day, 9, 0, 0).time()
+        end = datetime(now.year, now.month, now.day, 15, 20, 0).time()
+        return start <= t <= end
+
+
+    def _autotrade_tick_loop() -> None:
+        """Dry-run engine scheduler.
+
+        - Runs every minute during market hours.
+        - Reads per-user enabled flags.
+        - Writes a simple tick log (no orders are placed).
+        """
+
+        time.sleep(2.0)
+
+        while not _autotrade_stop.is_set():
+            try:
+                if settings.autotrading_kill_switch:
+                    _autotrade_stop.wait(timeout=60)
+                    continue
+
+                if apollo_db is None or models is None:
+                    _autotrade_stop.wait(timeout=60)
+                    continue
+
+                now = datetime.now()
+                if not _is_market_open(now):
+                    _autotrade_stop.wait(timeout=60)
+                    continue
+
+                db: Session = apollo_db.get_session_factory()()
+                try:
+                    sa_users = db.execute(select(models.SaAutoTradingConfig.user_id).where(models.SaAutoTradingConfig.enabled.is_(True))).all()
+                    plus_users = db.execute(
+                        select(models.PlusAutoTradingConfig.user_id).where(models.PlusAutoTradingConfig.enabled.is_(True))
+                    ).all()
+                    sv_users = db.execute(select(models.SvAgentConfig.user_id).where(models.SvAgentConfig.enabled.is_(True))).all()
+
+                    seen: set[tuple[int, str]] = set()
+                    for (uid,) in sa_users:
+                        seen.add((int(uid), "sa"))
+                    for (uid,) in plus_users:
+                        seen.add((int(uid), "plus"))
+                    for (uid,) in sv_users:
+                        seen.add((int(uid), "sv"))
+
+                    for user_id, engine in seen:
+                        db.add(models.AutomationEngineLog(user_id=int(user_id), engine=str(engine), event="tick", message="dry-run"))
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                finally:
+                    db.close()
+            except Exception:
+                pass
+
+            _autotrade_stop.wait(timeout=60)
+
+
 @app.on_event("startup")
 def _startup_kis_refresh() -> None:
+    # Ensure any newly added tables exist (dev-friendly; idempotent).
+    try:
+        if apollo_db is not None and models is not None:
+            engine = apollo_db.get_engine()
+            models.AutomationEngineLog.__table__.create(bind=engine, checkfirst=True)
+    except Exception:
+        pass
+
     t = threading.Thread(target=_kis_refresh_loop, name="kis-token-refresh", daemon=True)
     t.start()
+
+    t2 = threading.Thread(target=_autotrade_tick_loop, name="autotrade-tick", daemon=True)
+    t2.start()
 
 
 @app.on_event("shutdown")
 def _shutdown_kis_refresh() -> None:
     _kis_refresh_stop.set()
+    _autotrade_stop.set()
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MOCK_DIR = REPO_ROOT / "frontend-prototype" / "mock"
@@ -849,6 +925,27 @@ def refresh_token(current_user=Depends(get_current_user_for_refresh)):
             "role": current_user.role,
         },
     }
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, current_user=Depends(get_current_user)):
+    """Record logout history (best-effort)."""
+
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        try:
+            ip = request.client.host if request.client else None
+            user_agent = request.headers.get("user-agent")
+            db.add(models.LoginHistory(user_id=int(current_user.id), event="logout", ip=ip, user_agent=user_agent))
+            db.commit()
+        except Exception:
+            db.rollback()
+        return {"ok": True}
+    finally:
+        db.close()
 
 
 @app.get("/api/admin/users")
