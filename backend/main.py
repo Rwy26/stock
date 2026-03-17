@@ -98,6 +98,17 @@ _autotrade_stop = threading.Event()
 _engine_skip_last_ts: dict[tuple[int, str, str], float] = {}
 _plus_last_rotation_check_ts: dict[int, float] = {}
 
+# Runtime override for kill switch (admin-only).
+# - None: use env-based settings.autotrading_kill_switch
+# - True/False: override at runtime (no restart)
+_runtime_kill_switch: bool | None = None
+
+
+def _is_kill_switch_on() -> bool:
+    if _runtime_kill_switch is None:
+        return bool(settings.autotrading_kill_switch)
+    return bool(_runtime_kill_switch)
+
 
 def _log_engine_skip_rate_limited(
     db: Session,
@@ -860,7 +871,7 @@ def _autotrade_tick_loop() -> None:
 
     while not _autotrade_stop.is_set():
         try:
-            if settings.autotrading_kill_switch:
+            if _is_kill_switch_on():
                 _autotrade_stop.wait(timeout=60)
                 continue
 
@@ -2275,6 +2286,51 @@ def admin_engine_logs(
         db.close()
 
 
+@app.post("/api/admin/engine/kill-switch")
+def admin_set_runtime_kill_switch(payload: dict = Body(...), _admin=Depends(require_admin)):
+    """Set a runtime kill switch override (no restart).
+
+    Payload:
+    - {"enabled": true}  -> force kill switch ON
+    - {"enabled": false} -> force kill switch OFF
+    - {"enabled": null}  -> reset to env-based settings
+    """
+
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    global _runtime_kill_switch
+    enabled = payload.get("enabled")
+    prev = _runtime_kill_switch
+    if enabled is None:
+        _runtime_kill_switch = None
+    else:
+        _runtime_kill_switch = bool(enabled)
+
+    try:
+        with apollo_db.session_scope() as session:
+            session.add(
+                models.AutomationEngineLog(
+                    user_id=int(_admin.id),
+                    engine="basic",
+                    event="kill_switch",
+                    message=(
+                        f"runtime kill switch changed: {prev} -> {_runtime_kill_switch}; "
+                        f"env={bool(settings.autotrading_kill_switch)}; effective={_is_kill_switch_on()}"
+                    ),
+                )
+            )
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "runtimeKillSwitch": _runtime_kill_switch,
+        "envKillSwitch": bool(settings.autotrading_kill_switch),
+        "effectiveKillSwitch": _is_kill_switch_on(),
+    }
+
+
 @app.post("/api/admin/engine/tick-once")
 def admin_engine_tick_once(payload: dict = Body(...), _admin=Depends(require_admin)):
     """Run a single engine tick for validation/debug.
@@ -2315,7 +2371,30 @@ def admin_engine_tick_once(payload: dict = Body(...), _admin=Depends(require_adm
     if settings.autotrading_live_orders:
         raise HTTPException(status_code=400, detail="Manual tick is disabled when AUTOTRADING_LIVE_ORDERS=1")
 
+    if _is_kill_switch_on():
+        raise HTTPException(status_code=400, detail="Manual tick is disabled when AUTOTRADING_KILL_SWITCH=1")
+
     now = datetime.now()
+
+    def _effective_max_positions(cfg_obj: dict | None) -> int:
+        max_positions = 5
+        try:
+            raw = (cfg_obj or {}).get("maxPositions")
+            if raw is not None:
+                max_positions = int(raw)
+        except Exception:
+            max_positions = 5
+        if max_positions < 1:
+            max_positions = 1
+        if max_positions > 50:
+            max_positions = 50
+        return int(max_positions)
+
+    def _effective_budgets(cfg_obj: dict | None) -> dict:
+        return {
+            "perStockBudget": _parse_positive_int_like((cfg_obj or {}).get("perStockBudget")),
+            "totalBudget": _parse_positive_int_like((cfg_obj or {}).get("totalBudget")),
+        }
 
     with apollo_db.session_scope() as session:
         user = session.execute(select(models.User).where(models.User.id == int(user_id))).scalar_one_or_none()
@@ -2330,11 +2409,21 @@ def admin_engine_tick_once(payload: dict = Body(...), _admin=Depends(require_adm
         try:
             sa_cfg = session.execute(select(models.SaAutoTradingConfig).where(models.SaAutoTradingConfig.user_id == int(user_id))).scalar_one_or_none()
             plus_cfg = session.execute(select(models.PlusAutoTradingConfig).where(models.PlusAutoTradingConfig.user_id == int(user_id))).scalar_one_or_none()
+
+            sa_cfg_obj = (sa_cfg.config if sa_cfg else None)
+            if not isinstance(sa_cfg_obj, dict):
+                sa_cfg_obj = None
+            plus_cfg_obj = (plus_cfg.config if plus_cfg else None)
+            if not isinstance(plus_cfg_obj, dict):
+                plus_cfg_obj = None
+
             snap = {
                 "saEnabled": bool(sa_cfg.enabled) if sa_cfg else False,
                 "plusEnabled": bool(plus_cfg.enabled) if plus_cfg else False,
                 "saConfig": (sa_cfg.config if sa_cfg else None),
                 "plusConfig": (plus_cfg.config if plus_cfg else None),
+                "saEffective": {"maxPositions": _effective_max_positions(sa_cfg_obj), **_effective_budgets(sa_cfg_obj)},
+                "plusEffective": {"maxPositions": _effective_max_positions(plus_cfg_obj), **_effective_budgets(plus_cfg_obj)},
             }
             session.add(
                 models.AutomationEngineLog(

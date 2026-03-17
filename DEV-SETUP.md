@@ -190,6 +190,105 @@ Windows PowerShell에서 워크스페이스 루트(`c:\stock`) 기준:
 - `http://127.0.0.1:5001/health`
 - `http://127.0.0.1:5001/api/recommendations`
 
+## 3.5) (중요) 실계좌 주문 허용 전 체크리스트 / 운영 절차
+
+> 이 프로젝트는 **실계좌 주문을 기본으로 차단**합니다.
+>
+> - 실계좌(live) 프로필(`tradeType=실계좌`)로 주문을 내기 위해서는 `AUTOTRADING_LIVE_ORDERS=1`이 필요합니다.
+> - 엔진 tick 자체를 즉시 멈추려면 `AUTOTRADING_KILL_SWITCH=1`을 사용합니다.
+>
+> 두 값은 서버 시작 시 로드되므로, 값을 바꾼 뒤에는 **백엔드 재시작**이 필요합니다.
+
+### 안전 모델(요약)
+
+- `AUTOTRADING_LIVE_ORDERS=0` (기본): 실계좌 주문은 거부됨(엔진 로그에 오류로 남음)
+- `AUTOTRADING_LIVE_ORDERS=1`: 실계좌 주문을 허용(= 위험 구간)
+- `AUTOTRADING_KILL_SWITCH=1`: 스케줄러 tick이 돌지 않음(긴급 정지)
+
+> 참고: 모의투자(`tradeType=모의투자`)는 `AUTOTRADING_LIVE_ORDERS`의 영향을 받지 않습니다.
+
+### (A) 실계좌 오픈 전 체크리스트
+
+- **계정/프로필 확인**
+	- 대상 유저의 `tradeType=실계좌`인지 확인(모의투자로 테스트 중이면 절대 전환하지 말 것)
+	- `KIS_ACCOUNT_PREFIX`/`KIS_ACCOUNT_PRODUCT_CODE`가 본인 계좌와 일치하는지 확인
+	- App Key/Secret이 올바르고 만료/폐기되지 않았는지 확인(프로필 저장 후 토큰 체크 API로 검증)
+
+- **안전 스위치 기본값 확인**
+	- `AUTOTRADING_KILL_SWITCH=1`로 시작(기본은 “멈춤”)
+	- `AUTOTRADING_LIVE_ORDERS=0` 유지(기본은 “실계좌 주문 차단”)
+
+- **엔진 설정(유저별) 확인**
+	- SA/Plus enabled가 의도치 않게 켜져 있지 않은지 확인(특히 실계좌 유저)
+	- 첫 오픈은 `maxPositions=1` 등 최소 위험 설정으로 시작
+
+- **관측/로그 확인**
+	- `GET /api/admin/engine-logs?userId=<id>&limit=...`가 정상 작동하는지 확인
+	- 장중 tick(09:00~15:30) 동안 `tick/skip/error` 이벤트가 쌓이는지 확인
+
+- **롤백 준비**
+	- 운영자가 즉시 실행할 수 있는 “긴급 정지” 명령(아래 (D))을 준비
+	- 실계좌 주문 허용을 켠 직후에는 모니터링 가능한 상태에서만 운용(원격 단독 운용 금지 권장)
+
+### (B) 단계적 오픈 절차(권장)
+
+1) **준비 단계(항상 여기서 시작)**
+
+`backend/.env`:
+```env
+AUTOTRADING_KILL_SWITCH=1
+AUTOTRADING_LIVE_ORDERS=0
+```
+
+2) **주문 허용 플래그만 먼저 준비(아직 멈춤 상태 유지)**
+
+```env
+AUTOTRADING_KILL_SWITCH=1
+AUTOTRADING_LIVE_ORDERS=1
+```
+
+- 이 상태는 “실계좌 주문 허용은 켜졌지만, tick이 돌지 않는 상태”입니다.
+- 이 시점부터는 실수로 KILL_SWITCH를 내리는 순간 주문이 나갈 수 있습니다.
+
+3) **최소 범위로 활성화(1명/1엔진/최소 예산)**
+
+- 유저별 SA/Plus 설정은 최소로 시작:
+	- `enabled=true`
+	- `maxPositions=1`
+	- (가능하면) 예산/회전 조건도 최소로
+
+4) **장중에만 짧게 KILL_SWITCH 해제 → 로그로 관측**
+
+```env
+AUTOTRADING_KILL_SWITCH=0
+AUTOTRADING_LIVE_ORDERS=1
+```
+
+- 1~2분 단위로 `engine-logs`에서 `buy/sell/skip/error`를 확인
+- 예상치 못한 주문 시도/에러가 보이면 즉시 (D) 수행
+
+### (C) 모니터링 포인트(운영 중)
+
+- `engine-logs`에서 userId/engine별로 아래 이벤트를 확인
+	- `tick`: 스케줄러가 돌고 있음
+	- `buy`/`sell`: 주문 시도 결과(실계좌에서는 특히 주의)
+	- `skip`: 조건 미충족/회전 간격 제한 등 정상적인 스킵
+	- `error`: KIS 오류/설정 오류/주문 차단 등
+
+### (D) 긴급 정지(롤백) 절차
+
+1) `backend/.env`에서 즉시:
+```env
+AUTOTRADING_KILL_SWITCH=1
+AUTOTRADING_LIVE_ORDERS=0
+```
+
+2) 백엔드 재시작(운영 형태면 `run-backend-prod.ps1` 프로세스 재시작)
+
+3) 재시작 후 `engine-logs`로 tick이 멈췄는지 확인
+
+> 추가로 안전하게 하려면: 유저별 SA/Plus enabled를 false로 내려두면(설정 API) “설정 레벨”에서도 재발 방지됩니다.
+
 ### 2) 프론트(React/Vite) 실행 (포트 3001)
 
 - `powershell -ExecutionPolicy Bypass -File .\scripts\run-frontend.ps1`

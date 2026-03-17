@@ -8,7 +8,10 @@ param(
 
   # Provide either NewPassword OR -GenerateRandom
   [securestring]$NewPassword,
-  [switch]$GenerateRandom
+  [switch]$GenerateRandom,
+
+  # If set, prints NEW_PASSWORD=... in output (use with caution).
+  [switch]$PrintPassword
 )
 
 $ErrorActionPreference = 'Stop'
@@ -82,4 +85,6 @@ $userId = [int]$target.id
 $resp = Invoke-Json -method 'Post' -path ("/api/admin/users/{0}/reset-password" -f $userId) -headers $adminAuth -body @{ password = $nextPlain }
 
 Write-Output ("OK: password updated for userId={0} email={1}" -f $userId, $TargetUserEmail)
-Write-Output ("NEW_PASSWORD={0}" -f $nextPlain)
+if ($PrintPassword) {
+  Write-Output ("NEW_PASSWORD={0}" -f $nextPlain)
+}
