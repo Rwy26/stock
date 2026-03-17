@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { fetchJson } from '../lib/api'
 import { formatNumber, formatPercent } from '../lib/format'
 
@@ -63,17 +63,7 @@ export function StockSearchPage() {
     return () => window.clearTimeout(handle)
   }, [q, market, sort])
 
-  const detailIndicators = useMemo(() => {
-    return (
-      selected?.indicators ?? {
-        value: 24,
-        flow: 22,
-        profit: 19,
-        growth: 5,
-        tech: 17,
-      }
-    )
-  }, [selected])
+  const detailIndicators = selected?.indicators
 
   return (
     <>
@@ -160,21 +150,21 @@ export function StockSearchPage() {
           <ul className="engine-list">
             <li>
               <span>종목</span>
-              <b>{selected ? `${selected.name} (${selected.code})` : '삼성전자 (005930)'}</b>
+              <b>{selected ? `${selected.name} (${selected.code})` : '—'}</b>
             </li>
             <li>
               <span>현재가</span>
-              <b>{selected ? formatNumber(selected.price) : '72,100'}</b>
+              <b>{selected ? formatNumber(selected.price) : '—'}</b>
             </li>
             <li>
               <span>등락률</span>
               <b className={selected && selected.changeRate < 0 ? 'down' : 'up'}>
-                {selected ? formatPercent(selected.changeRate) : '+1.02%'}
+                {selected ? formatPercent(selected.changeRate) : '—'}
               </b>
             </li>
             <li>
               <span>종합 점수</span>
-              <b>{selected ? `${selected.score}점` : '91점'}</b>
+              <b>{selected ? `${selected.score}점` : '—'}</b>
             </li>
           </ul>
           <div className="divider"></div>
@@ -186,23 +176,23 @@ export function StockSearchPage() {
               <ul className="engine-list" style={{ marginTop: 8 }}>
                 <li>
                   <span>가치(29)</span>
-                  <b>{detailIndicators.value}</b>
+                  <b>{detailIndicators ? detailIndicators.value : '—'}</b>
                 </li>
                 <li>
                   <span>수급(26)</span>
-                  <b>{detailIndicators.flow}</b>
+                  <b>{detailIndicators ? detailIndicators.flow : '—'}</b>
                 </li>
                 <li>
                   <span>수익(21)</span>
-                  <b>{detailIndicators.profit}</b>
+                  <b>{detailIndicators ? detailIndicators.profit : '—'}</b>
                 </li>
                 <li>
                   <span>성장(6)</span>
-                  <b>{detailIndicators.growth}</b>
+                  <b>{detailIndicators ? detailIndicators.growth : '—'}</b>
                 </li>
                 <li>
                   <span>기술(18)</span>
-                  <b>{detailIndicators.tech}</b>
+                  <b>{detailIndicators ? detailIndicators.tech : '—'}</b>
                 </li>
               </ul>
             </article>

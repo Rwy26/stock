@@ -473,20 +473,7 @@ export function AutoSaPage() {
           </div>
 
           <div className={`tab-panel${activeTab === 'alerts' ? ' active' : ''}`} data-tab-panel="alerts">
-            <ul className="engine-list">
-              <li>
-                <span>매수 실패</span>
-                <span className="chip off">읽지 않음</span>
-              </li>
-              <li>
-                <span>손절 발생</span>
-                <span className="chip on">읽음</span>
-              </li>
-              <li>
-                <span>예산 부족</span>
-                <span className="chip off">읽지 않음</span>
-              </li>
-            </ul>
+            <ul className="engine-list"></ul>
             <p className="hint" style={{ marginTop: 10 }}>
               이벤트: 매수 실패, 손절, 킬스위치 등
             </p>
@@ -505,24 +492,6 @@ export function AutoSaPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td>10:21</td>
-                    <td>SK하이닉스</td>
-                    <td>BUY</td>
-                    <td>
-                      <span className="chip on">성공</span>
-                    </td>
-                    <td>-</td>
-                  </tr>
-                  <tr>
-                    <td>11:10</td>
-                    <td>팬오션</td>
-                    <td>BUY</td>
-                    <td>
-                      <span className="chip off">실패</span>
-                    </td>
-                    <td>예산 부족</td>
-                  </tr>
                 </tbody>
               </table>
             </div>

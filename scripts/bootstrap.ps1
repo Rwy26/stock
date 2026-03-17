@@ -150,16 +150,10 @@ if (-not (Test-Path $mainPath)) {
   @'
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Apollo Stock Trading System")
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-MOCK_DIR = REPO_ROOT / "frontend-prototype" / "mock"
 
 app.add_middleware(
   CORSMiddleware,
@@ -180,74 +174,9 @@ def health():
   return {"ok": True}
 
 
-def _read_mock_json(filename: str) -> dict:
-  path = MOCK_DIR / filename
-  if not path.exists():
-    raise HTTPException(status_code=500, detail=f"Mock file missing: {path}")
-  try:
-    return json.loads(path.read_text(encoding="utf-8"))
-  except json.JSONDecodeError as exc:
-    raise HTTPException(status_code=500, detail=f"Invalid JSON in mock file: {filename}") from exc
-
-
-@app.get("/api/portfolio")
-def get_portfolio():
-  return _read_mock_json("portfolio.sample.json")
-
-
-@app.get("/api/recommendations")
-def get_recommendations():
-  return _read_mock_json("recommendations.sample.json")
-
-
-@app.get("/api/watchlist")
-def get_watchlist():
-  return _read_mock_json("watchlist.sample.json")
-
-
-@app.get("/api/stocks/search")
-def search_stocks(q: str | None = None, market: str | None = None, sort: str | None = None):
-  universe = [
-    {"name": "삼성전자", "code": "005930", "price": 72100, "changeRate": 1.02, "score": 91},
-    {"name": "SK하이닉스", "code": "000660", "price": 210500, "changeRate": 2.12, "score": 88},
-    {"name": "현대차", "code": "005380", "price": 221500, "changeRate": -0.35, "score": 85},
-    {"name": "팬오션", "code": "028670", "price": 6180, "changeRate": -0.64, "score": 62},
-  ]
-
-  filtered = universe
-  if q:
-    q_norm = q.strip().lower()
-    if q_norm:
-      filtered = [
-        item
-        for item in filtered
-        if q_norm in item["name"].lower() or q_norm in item["code"].lower()
-      ]
-
-  return {"items": filtered, "q": q or "", "market": market or "", "sort": sort or ""}
-
-
-@app.get("/api/stocks/{code}")
-def stock_detail(code: str):
-  items = search_stocks(q=code)["items"]
-  if not items:
-    raise HTTPException(status_code=404, detail="Stock not found")
-  item = items[0]
-  return {
-    **item,
-    "indicators": {
-      "value": 24,
-      "flow": 22,
-      "profit": 19,
-      "growth": 5,
-      "tech": 17,
-    },
-  }
-
-
 @app.get("/api/version")
 def get_version():
-  return {"service": "apollo-backend", "mock": True}
+  return {"service": "apollo-backend"}
 '@ | Set-Content -Encoding UTF8 $mainPath
 }
 

@@ -476,13 +476,6 @@ export function AutoPlusPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td>13:05</td>
-                    <td>POSCO홀딩스</td>
-                    <td className="down">-0.48%</td>
-                    <td>현대차</td>
-                    <td>3</td>
-                  </tr>
                 </tbody>
               </table>
             </div>

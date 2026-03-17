@@ -180,7 +180,7 @@ export function DashboardPage() {
         <article className="panel glass reveal">
           <div className="panel-head">
             <h3>일봉 캔들 차트</h3>
-            <p className="subtle">선택 종목: 삼성전자 (005930)</p>
+            <p className="subtle">선택 종목: —</p>
           </div>
           <div className="chart-placeholder">Daily Candle Chart Placeholder</div>
         </article>

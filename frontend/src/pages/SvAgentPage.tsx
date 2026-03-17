@@ -142,13 +142,6 @@ export function SvAgentPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td>삼성전자</td>
-                    <td>20</td>
-                    <td>69,400</td>
-                    <td>72,100</td>
-                    <td className="up">+3.89%</td>
-                  </tr>
                 </tbody>
               </table>
             </div>
@@ -169,16 +162,6 @@ export function SvAgentPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td>현대차</td>
-                    <td>
-                      <b>0.82</b>
-                    </td>
-                    <td>리스크/수익 균형</td>
-                    <td>
-                      <span className="chip off">대기</span>
-                    </td>
-                  </tr>
                 </tbody>
               </table>
             </div>
@@ -197,24 +180,6 @@ export function SvAgentPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td>11:12</td>
-                    <td>현대차</td>
-                    <td>BUY</td>
-                    <td>
-                      <span className="chip on">승인</span>
-                    </td>
-                    <td>규칙 충족</td>
-                  </tr>
-                  <tr>
-                    <td>12:03</td>
-                    <td>팬오션</td>
-                    <td>BUY</td>
-                    <td>
-                      <span className="chip off">거절</span>
-                    </td>
-                    <td>리스크 과다</td>
-                  </tr>
                 </tbody>
               </table>
             </div>

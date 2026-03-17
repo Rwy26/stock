@@ -1135,7 +1135,6 @@ def _shutdown_kis_refresh() -> None:
     _recommendations_stop.set()
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MOCK_DIR = REPO_ROOT / "frontend-prototype" / "mock"
 
 app.add_middleware(
     CORSMiddleware,
@@ -1155,20 +1154,10 @@ def health():
     return {"ok": True}
 
 
-def _read_mock_json(filename: str) -> dict:
-    path = MOCK_DIR / filename
-    if not path.exists():
-        raise HTTPException(status_code=500, detail=f"Mock file missing: {path}")
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=500, detail=f"Invalid JSON in mock file: {filename}") from exc
-
-
 @app.get("/api/portfolio")
 def get_portfolio(current_user=Depends(get_current_user)):
     if apollo_db is None or models is None:
-        return _read_mock_json("portfolio.sample.json")
+        raise HTTPException(status_code=500, detail="DB module not available")
 
     user_id = int(current_user.id)
     db: Session = apollo_db.get_session_factory()()
@@ -1492,6 +1481,7 @@ def get_dashboard(current_user=Depends(get_current_user)):
     sv_trades_today = 0
 
     balance = None
+    has_kis_profile = False
     top_recommendations: list[dict] = []
     if apollo_db is not None and models is not None:
         db: Session = apollo_db.get_session_factory()()
@@ -1543,6 +1533,7 @@ def get_dashboard(current_user=Depends(get_current_user)):
 
             profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
             if profile and profile.app_key and profile.app_secret:
+                has_kis_profile = True
                 # Prefer full balance inquiry for the dashboard KPIs.
                 try:
                     balance = _fetch_kis_balance(profile, timeout_seconds=5.0)
@@ -1593,37 +1584,27 @@ def get_dashboard(current_user=Depends(get_current_user)):
         finally:
             db.close()
 
-    # Strict real-data mode: do not serve sample KPIs.
-    if settings.kis_strict_balance:
-        if apollo_db is None or models is None:
-            raise HTTPException(status_code=500, detail="DB module not available")
-        if not kis_connected:
-            raise HTTPException(status_code=400, detail="KIS 연결 필요")
-        if not balance:
-            raise HTTPException(status_code=503, detail="KIS 잔고 조회 실패")
+    # Real-data only: do not serve any sample KPIs.
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    if not has_kis_profile:
+        raise HTTPException(status_code=400, detail="KIS 연결 필요")
+    if not balance:
+        raise HTTPException(status_code=503, detail="KIS 잔고 조회 실패")
 
-    # Default (dev-only sample) KPIs.
-    kpis = {
-        "totalValue": {"amount": 184_380_000, "deltaPct": 2.41},
-        "totalInvested": {"amount": 161_000_000, "deltaPct": 1.04},
-        "pnl": {"amount": 23_380_000, "deltaPct": 14.52},
-        "cash": {"amount": 39_640_000, "label": "가용 가능"},
-    }
-
-    if balance:
-        try:
-            total_value, total_invested, pnl, cash_amt = _extract_kis_balance_kpis(balance)
-            pnl_pct = 0.0
-            if total_invested:
-                pnl_pct = round((float(pnl) / float(total_invested)) * 100.0, 2)
-            kpis = {
-                "totalValue": {"amount": int(total_value), "deltaPct": pnl_pct},
-                "totalInvested": {"amount": int(total_invested), "deltaPct": 0.0},
-                "pnl": {"amount": int(pnl), "deltaPct": pnl_pct},
-                "cash": {"amount": int(cash_amt), "label": "가용 가능"},
-            }
-        except Exception:
-            pass
+    try:
+        total_value, total_invested, pnl, cash_amt = _extract_kis_balance_kpis(balance)
+        pnl_pct = 0.0
+        if total_invested:
+            pnl_pct = round((float(pnl) / float(total_invested)) * 100.0, 2)
+        kpis = {
+            "totalValue": {"amount": int(total_value), "deltaPct": pnl_pct},
+            "totalInvested": {"amount": int(total_invested), "deltaPct": 0.0},
+            "pnl": {"amount": int(pnl), "deltaPct": pnl_pct},
+            "cash": {"amount": int(cash_amt), "label": "가용 가능"},
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"KIS 잔고 파싱 실패: {exc}") from exc
 
     return {
         "asOf": datetime.now().isoformat(),
@@ -1984,50 +1965,132 @@ def upsert_sv_config(payload: dict = Body(...), current_user=Depends(get_current
 
 
 @app.get("/api/stocks/search")
-def search_stocks(q: str | None = None, market: str | None = None, sort: str | None = None):
-    # Minimal mock for wiring the Stock Search screen.
-    universe = [
-        {"name": "삼성전자", "code": "005930", "price": 72100, "changeRate": 1.02, "score": 91},
-        {"name": "SK하이닉스", "code": "000660", "price": 210500, "changeRate": 2.12, "score": 88},
-        {"name": "현대차", "code": "005380", "price": 221500, "changeRate": -0.35, "score": 85},
-        {"name": "팬오션", "code": "028670", "price": 6180, "changeRate": -0.64, "score": 62},
-    ]
+def search_stocks(q: str | None = None, market: str | None = None, sort: str | None = None, current_user=Depends(get_current_user)):
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
 
-    filtered = universe
-    if q:
-        q_norm = q.strip().lower()
+    user_id = int(current_user.id)
+    q_norm = (q or "").strip()
+    market_norm = (market or "").strip().upper()
+    _sort_norm = (sort or "").strip()
+
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
+        if not (profile and getattr(profile, "app_key", None) and getattr(profile, "app_secret", None)):
+            raise HTTPException(status_code=400, detail="KIS 연결 필요")
+
+        score_date = db.execute(select(func.max(models.IndicatorScore.scoring_date))).scalar_one_or_none()
+        if not score_date:
+            raise HTTPException(status_code=503, detail="지표 점수 데이터가 없습니다")
+
+        stmt = (
+            select(models.Stock.code, models.Stock.name, models.IndicatorScore.score_total)
+            .join(models.IndicatorScore, models.IndicatorScore.stock_code == models.Stock.code)
+            .where(models.IndicatorScore.scoring_date == score_date)
+        )
+
+        if market_norm in {"KOSPI", "KOSDAQ"}:
+            stmt = stmt.where(models.Stock.market == market_norm)
+
         if q_norm:
-            filtered = [
-                item
-                for item in filtered
-                if q_norm in item["name"].lower() or q_norm in item["code"].lower()
-            ]
+            like_code = f"{q_norm}%"
+            like_name = f"%{q_norm}%"
+            stmt = stmt.where((models.Stock.code.like(like_code)) | (models.Stock.name.like(like_name)))
 
-    # market/sort are accepted to match UI controls; not applied in mock.
-    return {"items": filtered, "q": q or "", "market": market or "", "sort": sort or ""}
+        rows = db.execute(stmt.order_by(desc(models.IndicatorScore.score_total), models.Stock.code).limit(30)).all()
+
+        items: list[dict] = []
+        for code, name, score_total in rows:
+            try:
+                quote = kis_client.inquire_price(
+                    app_key=str(profile.app_key),
+                    app_secret=str(profile.app_secret),
+                    is_paper=bool(getattr(profile, "is_paper", False)),
+                    code=str(code),
+                    live_base_url=settings.kis_live_base_url,
+                    paper_base_url=settings.kis_paper_base_url,
+                    timeout_seconds=5.0,
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"KIS 시세 조회 실패: {exc}") from exc
+
+            items.append(
+                {
+                    "name": str(name),
+                    "code": str(code),
+                    "price": float(quote.price),
+                    "changeRate": float(quote.change_rate),
+                    "score": int(score_total or 0),
+                }
+            )
+
+        return {"items": items}
+    finally:
+        db.close()
 
 
 @app.get("/api/stocks/{code}")
-def stock_detail(code: str):
-    items = search_stocks(q=code)["items"]
-    if not items:
-        raise HTTPException(status_code=404, detail="Stock not found")
-    item = items[0]
-    return {
-        **item,
-        "indicators": {
-            "value": 24,
-            "flow": 22,
-            "profit": 19,
-            "growth": 5,
-            "tech": 17,
-        },
-    }
+def stock_detail(code: str, current_user=Depends(get_current_user)):
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    stock_code = (code or "").strip()
+    if not stock_code:
+        raise HTTPException(status_code=400, detail="code is required")
+
+    user_id = int(current_user.id)
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
+        if not (profile and getattr(profile, "app_key", None) and getattr(profile, "app_secret", None)):
+            raise HTTPException(status_code=400, detail="KIS 연결 필요")
+
+        stock = db.execute(select(models.Stock).where(models.Stock.code == stock_code)).scalar_one_or_none()
+        if stock is None:
+            raise HTTPException(status_code=404, detail="Stock not found")
+
+        score_row = db.execute(
+            select(models.IndicatorScore)
+            .where(models.IndicatorScore.stock_code == stock_code)
+            .order_by(desc(models.IndicatorScore.scoring_date), desc(models.IndicatorScore.created_at))
+            .limit(1)
+        ).scalar_one_or_none()
+
+        try:
+            quote = kis_client.inquire_price(
+                app_key=str(profile.app_key),
+                app_secret=str(profile.app_secret),
+                is_paper=bool(getattr(profile, "is_paper", False)),
+                code=stock_code,
+                live_base_url=settings.kis_live_base_url,
+                paper_base_url=settings.kis_paper_base_url,
+                timeout_seconds=5.0,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"KIS 시세 조회 실패: {exc}") from exc
+
+        score_total = int(getattr(score_row, "score_total", 0) or 0)
+        return {
+            "name": str(stock.name),
+            "code": stock_code,
+            "price": float(quote.price),
+            "changeRate": float(quote.change_rate),
+            "score": score_total,
+            "indicators": {
+                "value": int(getattr(score_row, "score_value", 0) or 0),
+                "flow": int(getattr(score_row, "score_flow", 0) or 0),
+                "profit": int(getattr(score_row, "score_profit", 0) or 0),
+                "growth": int(getattr(score_row, "score_growth", 0) or 0),
+                "tech": int(getattr(score_row, "score_tech", 0) or 0),
+            },
+        }
+    finally:
+        db.close()
 
 
 @app.get("/api/version")
 def get_version():
-    return {"service": "apollo-backend", "mock": True}
+    return {"service": "apollo-backend"}
 
 
 @app.get("/api/db/health")
