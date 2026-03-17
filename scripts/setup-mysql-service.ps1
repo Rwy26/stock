@@ -40,7 +40,8 @@ function Get-PlainText([Security.SecureString]$secure) {
   $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
   try {
     return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-  } finally {
+  }
+  finally {
     [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
   }
 }
@@ -84,18 +85,21 @@ function Invoke-MySqlQuery {
       $env:MYSQL_PWD = $Password
       if ($Quiet) {
         & $MySqlExe -u root --protocol=pipe --socket=MySQL -e $Query *> $null
-      } else {
+      }
+      else {
         & $MySqlExe -u root --protocol=pipe --socket=MySQL -e $Query
       }
       return $LASTEXITCODE
-    } finally {
+    }
+    finally {
       $env:MYSQL_PWD = $prev
     }
   }
 
   if ($Quiet) {
     & $MySqlExe -u root --protocol=pipe --socket=MySQL -e $Query *> $null
-  } else {
+  }
+  else {
     & $MySqlExe -u root --protocol=pipe --socket=MySQL -e $Query
   }
   return $LASTEXITCODE
@@ -141,7 +145,8 @@ try {
     if (-not $mysqlExe) {
       throw 'MySQL client (mysql.exe) not found. Install MySQL first (winget id: Oracle.MySQL).'
     }
-  } else {
+  }
+  else {
     if (-not $mysqldExe -or -not $mysqlExe) {
       throw 'MySQL Server binaries not found. Install MySQL first (winget id: Oracle.MySQL).'
     }
@@ -168,7 +173,8 @@ try {
       Write-Output 'Would install Windows service if missing'
       Write-Output 'Would set StartupType=Automatic and start service'
       if ($AddBinToPath) { Write-Output "Would add MySQL bin to Machine PATH: $binDir" }
-    } else {
+    }
+    else {
       Write-Output 'DbOnly mode: would skip service install/start.'
     }
     Write-Output 'Would apply DB/user setup via mysql.exe (passwords not shown)'
@@ -239,7 +245,8 @@ try {
         & $mysqldExe --defaults-file="$iniPath" --initialize-insecure
         if ($LASTEXITCODE -ne 0) { throw "mysqld initialize failed (exit code $LASTEXITCODE)" }
       }
-    } else {
+    }
+    else {
       Write-Output 'Data directory already initialized.'
     }
 
@@ -250,7 +257,8 @@ try {
         & $mysqldExe --install $ServiceName --defaults-file="$iniPath"
         if ($LASTEXITCODE -ne 0) { throw "mysqld --install failed (exit code $LASTEXITCODE)" }
       }
-    } else {
+    }
+    else {
       Write-Output "Service '$ServiceName' already exists."
     }
 
@@ -260,7 +268,8 @@ try {
     if ($PSCmdlet.ShouldProcess($ServiceName, 'Start Windows service')) {
       Start-Service -Name $ServiceName
     }
-  } else {
+  }
+  else {
     Write-Output 'DbOnly mode: skipping config/service installation/start.'
   }
 
@@ -340,7 +349,8 @@ try {
         [Environment]::SetEnvironmentVariable('Path', ($machinePath.TrimEnd(';') + ';' + $binDir), 'Machine')
         Write-Output "Added to Machine PATH: $binDir"
       }
-    } else {
+    }
+    else {
       Write-Output 'MySQL bin already in Machine PATH.'
     }
   }
@@ -372,7 +382,8 @@ try {
   Write-Output "Port: $Port"
   Write-Output "Log: $logPath"
 
-} finally {
+}
+finally {
   if ($transcriptStarted) {
     Stop-Transcript | Out-Null
   }

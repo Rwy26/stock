@@ -2275,6 +2275,98 @@ def admin_engine_logs(
         db.close()
 
 
+@app.post("/api/admin/engine/tick-once")
+def admin_engine_tick_once(payload: dict = Body(...), _admin=Depends(require_admin)):
+    """Run a single engine tick for validation/debug.
+
+    Safety:
+    - Block when paper trading profile is used (would place paper orders).
+    - Block when AUTOTRADING_LIVE_ORDERS=1 (would allow real orders).
+
+    Intended for confirming that config changes are picked up by the engine loop.
+    """
+
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    raw_user_id = payload.get("userId")
+    if raw_user_id is None:
+        raise HTTPException(status_code=400, detail="userId is required")
+    try:
+        user_id = int(raw_user_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="userId must be an integer") from exc
+
+    engines_raw = payload.get("engines")
+    if engines_raw is None:
+        engines = ["sa", "plus"]
+    elif isinstance(engines_raw, str):
+        engines = [engines_raw]
+    elif isinstance(engines_raw, list):
+        engines = [str(x) for x in engines_raw]
+    else:
+        raise HTTPException(status_code=400, detail="engines must be a string or list")
+
+    allowed = {"sa", "plus"}
+    engines = [e for e in engines if e in allowed]
+    if not engines:
+        raise HTTPException(status_code=400, detail="engines must include 'sa' and/or 'plus'")
+
+    if settings.autotrading_live_orders:
+        raise HTTPException(status_code=400, detail="Manual tick is disabled when AUTOTRADING_LIVE_ORDERS=1")
+
+    now = datetime.now()
+
+    with apollo_db.session_scope() as session:
+        user = session.execute(select(models.User).where(models.User.id == int(user_id))).scalar_one_or_none()
+        if user is None:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        profile = session.execute(select(models.KisProfile).where(models.KisProfile.user_id == int(user_id))).scalar_one_or_none()
+        if profile is not None and bool(getattr(profile, "is_paper", False)):
+            raise HTTPException(status_code=400, detail="Manual tick is disabled for paper trading profiles")
+
+        # Log a marker so we can correlate config->tick outside market hours.
+        try:
+            sa_cfg = session.execute(select(models.SaAutoTradingConfig).where(models.SaAutoTradingConfig.user_id == int(user_id))).scalar_one_or_none()
+            plus_cfg = session.execute(select(models.PlusAutoTradingConfig).where(models.PlusAutoTradingConfig.user_id == int(user_id))).scalar_one_or_none()
+            snap = {
+                "saEnabled": bool(sa_cfg.enabled) if sa_cfg else False,
+                "plusEnabled": bool(plus_cfg.enabled) if plus_cfg else False,
+                "saConfig": (sa_cfg.config if sa_cfg else None),
+                "plusConfig": (plus_cfg.config if plus_cfg else None),
+            }
+            session.add(
+                models.AutomationEngineLog(
+                    user_id=int(user_id),
+                    engine="basic",
+                    event="manual_tick",
+                    message=f"manual tick requested; engines={engines}; snapshot={snap}",
+                )
+            )
+        except Exception:
+            pass
+
+        ran: list[str] = []
+        for e in engines:
+            if e == "sa":
+                try:
+                    session.add(models.AutomationEngineLog(user_id=int(user_id), engine="sa", event="manual_tick", message=None))
+                    _run_sa_engine_tick(session, user_id=int(user_id), profile=profile, now=now)
+                    ran.append("sa")
+                except Exception as exc:
+                    session.add(models.AutomationEngineLog(user_id=int(user_id), engine="sa", event="error", message=str(exc)))
+            elif e == "plus":
+                try:
+                    session.add(models.AutomationEngineLog(user_id=int(user_id), engine="plus", event="manual_tick", message=None))
+                    _run_plus_engine_tick(session, user_id=int(user_id), profile=profile, now=now)
+                    ran.append("plus")
+                except Exception as exc:
+                    session.add(models.AutomationEngineLog(user_id=int(user_id), engine="plus", event="error", message=str(exc)))
+
+    return {"ok": True, "userId": int(user_id), "engines": ran, "at": now.isoformat()}
+
+
 @app.get("/api/profile")
 def get_profile(current_user=Depends(get_current_user)):
     if apollo_db is None or models is None:

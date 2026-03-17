@@ -30,6 +30,21 @@ $plain = Get-PlainText $Password
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $backendEnvPath = Join-Path $repoRoot 'backend\.env'
 
+$preserved = @()
+if (Test-Path $backendEnvPath) {
+  foreach ($line in (Get-Content -LiteralPath $backendEnvPath)) {
+    $t = ($line ?? '').Trim()
+    if (-not $t -or $t.StartsWith('#')) {
+      $preserved += $line
+      continue
+    }
+    if ($t -match '^MYSQL_[A-Za-z0-9_]+\s*=') {
+      continue
+    }
+    $preserved += $line
+  }
+}
+
 $lines = @(
   "MYSQL_HOST=$MysqlHost",
   "MYSQL_PORT=$Port",
@@ -38,5 +53,12 @@ $lines = @(
   "MYSQL_PASSWORD=$plain"
 )
 
-$lines | Set-Content -Path $backendEnvPath -Encoding UTF8
+$out = @()
+if ($preserved.Count -gt 0) {
+  $out += $preserved
+  if ($out[-1].Trim().Length -ne 0) { $out += '' }
+}
+$out += $lines
+
+$out | Set-Content -Path $backendEnvPath -Encoding UTF8
 Write-Output "Wrote: $backendEnvPath"
