@@ -247,7 +247,10 @@ export function DashboardPage() {
                   <tr>
                     <th>종목</th>
                     <th>수량</th>
+                    <th>평단</th>
                     <th>현재가</th>
+                    <th>평가금액</th>
+                    <th>손익금</th>
                     <th>수익률</th>
                   </tr>
                 </thead>
@@ -255,12 +258,21 @@ export function DashboardPage() {
                   {positions.map((p) => {
                     const avg = Number(p.avgBuy || 0)
                     const cur = Number(p.current || 0)
+                    const qty = Number(p.qty || 0)
+                    const marketValue = cur > 0 && qty > 0 ? cur * qty : null
+                    const costValue = avg > 0 && qty > 0 ? avg * qty : null
+                    const pnlAmt = marketValue != null && costValue != null ? marketValue - costValue : null
                     const pnlPct = avg > 0 && cur > 0 ? ((cur - avg) / avg) * 100 : null
                     return (
                       <tr key={p.code}>
                         <td>{p.name}</td>
                         <td>{formatNumber(p.qty)}</td>
+                        <td>{avg > 0 ? formatKRW(avg) : '—'}</td>
                         <td>{cur > 0 ? formatKRW(cur) : '—'}</td>
+                        <td>{marketValue == null ? '—' : formatKRW(marketValue)}</td>
+                        <td className={pnlAmt != null && pnlAmt < 0 ? 'down' : 'up'}>
+                          {pnlAmt == null ? '—' : formatKRW(pnlAmt)}
+                        </td>
                         <td className={pnlPct != null && pnlPct < 0 ? 'down' : 'up'}>
                           {pnlPct == null ? '—' : formatPercent(pnlPct)}
                         </td>

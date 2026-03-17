@@ -7,6 +7,7 @@ param(
     [securestring]$TargetUserPassword,
     [switch]$PromptTargetUserPassword = $false,
     [switch]$ResetTargetUserPassword = $false,
+    [switch]$PrintTempPassword = $false,
     [switch]$SkipGenerateRecommendations = $false,
     [switch]$SkipRecommendationsCheck = $false
 )
@@ -165,6 +166,14 @@ elseif ($userId -and $ResetTargetUserPassword) {
         $reset = Invoke-Json -method 'Post' -path ("/api/admin/users/{0}/reset-password" -f $userId) -headers $adminAuth -body @{} -timeoutSec 20
         $tmp = $reset.tempPassword
         if (-not $tmp) { throw 'tempPassword missing' }
+
+        if ($PrintTempPassword) {
+            Warn "Printing temp password because -PrintTempPassword was specified (handle carefully)."
+            Write-Output ("TEMP_PASSWORD=" + $tmp)
+        }
+        else {
+            Warn "Target user password was reset; temp password is not printed by default. Use -PrintTempPassword if you need it for UI login."
+        }
 
         $u = Invoke-Json -method 'Post' -path '/api/auth/login' -body @{ email = $TargetUserEmail; password = $tmp } -timeoutSec 15
         $userToken = $u.accessToken

@@ -157,7 +157,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 
 ## 실행 방법
 
-## (권장) 로컬 운영형 세팅 한방에
+### (권장) 로컬 운영형 세팅 한방에
 
 DB(.env 포함) + 스키마 + 프론트 빌드 + 백엔드(5001) 상주까지 한 번에 수행:
 
@@ -175,6 +175,23 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-local-prod.ps1 -Fo
 - 이미 `backend/.env`가 있으면 `JWT_SECRET`, `JWT_EXPIRE_MINUTES`가 없을 때만 자동으로 추가합니다.
 - 백엔드는 `run-backend-prod.ps1 -Detach`로 상주 실행됩니다.
 
+### 0) 로컬 접속 URL
+
+이 레포의 “로컬 운영형(prod-like)” 실행은 **백엔드(FastAPI)가 프론트 빌드 산출물(`frontend/dist`)을 정적 서빙**합니다.
+
+- 접속: `http://127.0.0.1:5001/`
+- API: `http://127.0.0.1:5001/api/...`
+
+따라서 별도의 프론트 개발 서버(예: 3001)를 띄우지 않아도 화면이 뜹니다.
+
+### 0.5) (중요) 실데이터 only 모드
+
+현재 구성은 “mock/sample 없이 실데이터만” 원칙으로 동작합니다. 실데이터를 못 가져오면 조용히 대체하지 않고 **에러(예: 401/503)를 그대로 노출**하는 것이 정상입니다.
+
+- `backend/.env`에서 다음 값이 1인지 확인:
+	- `KIS_STRICT_PRICE=1`
+	- `KIS_STRICT_BALANCE=1`
+
 ### 1) 백엔드(FastAPI) 실행 (포트 5001)
 
 Windows PowerShell에서 워크스페이스 루트(`c:\stock`) 기준:
@@ -189,6 +206,43 @@ Windows PowerShell에서 워크스페이스 루트(`c:\stock`) 기준:
 
 - `http://127.0.0.1:5001/health`
 - `http://127.0.0.1:5001/api/recommendations`
+
+### (권장) 실데이터 모드 자동 검증
+
+백엔드/DB/권한/KIS 프로필/대시보드/포트폴리오까지 한 번에 점검하려면 아래를 실행합니다.
+
+### A) 안전 모드(비밀번호 리셋 없음)
+
+타겟 유저 비밀번호를 알고 있다면, 프롬프트로 입력받아(안전하게 SecureString) 검증할 수 있습니다:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-real-data-mode.ps1 -PromptTargetUserPassword
+```
+
+- 이 모드는 타겟 유저의 `/api/kis/token-status`, `/api/dashboard`, `/api/portfolio`까지 확인합니다.
+
+### B) 관리자 리셋 허용(부작용 있음)
+
+타겟 유저 비밀번호를 모를 때(또는 운영 계정 초기화가 필요할 때) 관리자가 임시 비밀번호로 리셋 후 로그인까지 진행합니다:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-real-data-mode.ps1 -ResetTargetUserPassword
+```
+
+- **부작용**: 타겟 유저 비밀번호가 변경됩니다.
+- UI 로그인까지 필요하면(운영자 로컬 콘솔에서만) 아래 옵션으로 임시 비밀번호를 출력할 수 있습니다:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-real-data-mode.ps1 -ResetTargetUserPassword -PrintTempPassword
+```
+
+### C) 추천 조회는 스킵(선택)
+
+추천 API는 KIS 시세(strict price)까지 물기 때문에, 점검 범위를 줄이려면 다음 옵션을 사용합니다:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-real-data-mode.ps1 -SkipRecommendationsCheck
+```
 
 ## 3.5) (중요) 실계좌 주문 허용 전 체크리스트 / 운영 절차
 
