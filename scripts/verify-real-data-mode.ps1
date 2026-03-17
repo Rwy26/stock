@@ -5,6 +5,7 @@ param(
     [securestring]$AdminPassword,
     [string]$TargetUserEmail = 'wind2500@gmail.com',
     [securestring]$TargetUserPassword,
+    [switch]$PromptTargetUserPassword = $false,
     [switch]$ResetTargetUserPassword = $false,
     [switch]$SkipGenerateRecommendations = $false,
     [switch]$SkipRecommendationsCheck = $false
@@ -164,7 +165,21 @@ elseif ($userId -and $ResetTargetUserPassword) {
     }
 }
 else {
-    Warn "Skipping user-authenticated checks (provide -TargetUserPassword or set -ResetTargetUserPassword)."
+    if ($userId -and $PromptTargetUserPassword) {
+        try {
+            $TargetUserPassword = Read-Host -AsSecureString "Enter password for target user '$TargetUserEmail'"
+            $u = Invoke-Json -method 'Post' -path '/api/auth/login' -body @{ email = $TargetUserEmail; password = (ConvertFrom-SecureStringToPlain $TargetUserPassword) } -timeoutSec 15
+            $userToken = $u.accessToken
+            if (-not $userToken) { throw 'accessToken missing' }
+            Ok "User login (prompted)"
+        }
+        catch {
+            Fail ("User login (prompted) failed: " + $_.Exception.Message)
+        }
+    }
+    else {
+        Warn "Skipping user-authenticated checks (provide -TargetUserPassword, use -PromptTargetUserPassword, or set -ResetTargetUserPassword)."
+    }
 }
 
 if ($userToken) {

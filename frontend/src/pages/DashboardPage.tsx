@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchJson } from '../lib/api'
-import { formatKRW, formatPercent } from '../lib/format'
+import { formatKRW, formatNumber, formatPercent } from '../lib/format'
 
 type DashboardResponse = {
   kpis: {
@@ -28,40 +28,60 @@ type KisTokenStatusResponse = {
   error?: string
 }
 
+type PortfolioResponse = {
+  asOf: string
+  cash: number | null
+  positions: Array<{
+    name: string
+    code: string
+    qty: number
+    avgBuy: number
+    current: number
+    buyDate: string
+  }>
+}
+
 export function DashboardPage() {
   const [data, setData] = useState<DashboardResponse | null>(null)
   const [kisTokenLine, setKisTokenLine] = useState<string>('KIS 토큰: -')
+  const [portfolio, setPortfolio] = useState<PortfolioResponse | null>(null)
 
   useEffect(() => {
     let cancelled = false
 
     const refresh = () => {
-      Promise.all([
+      Promise.allSettled([
         fetchJson<DashboardResponse>('/api/dashboard'),
         fetchJson<KisTokenStatusResponse>('/api/kis/token-status'),
-      ])
-        .then(([dashboard, tokenStatus]) => {
-          if (cancelled) return
-          setData(dashboard)
+        fetchJson<PortfolioResponse>('/api/portfolio'),
+      ]).then(([dashRes, tokenRes, pfRes]) => {
+        if (cancelled) return
 
+        if (dashRes.status === 'fulfilled') {
+          setData(dashRes.value)
+        } else {
+          setData(null)
+        }
+
+        if (tokenRes.status === 'fulfilled') {
+          const tokenStatus = tokenRes.value
           if (!tokenStatus.hasProfile) {
             setKisTokenLine('KIS 토큰: 설정 필요')
-            return
-          }
-
-          if (tokenStatus.ok && typeof tokenStatus.expiresIn === 'number') {
+          } else if (tokenStatus.ok && typeof tokenStatus.expiresIn === 'number') {
             setKisTokenLine(tokenStatus.expiresIn <= 60 * 60 ? 'KIS 토큰: 만료 임박' : 'KIS 토큰: 정상')
-            return
+          } else {
+            setKisTokenLine('KIS 토큰: 오류')
           }
+        } else {
+          setKisTokenLine('KIS 토큰: -')
+        }
 
-          setKisTokenLine('KIS 토큰: 오류')
-        })
-        .catch(() => {
-          if (!cancelled) {
-            setData(null)
-            setKisTokenLine('KIS 토큰: -')
-          }
-        })
+        if (pfRes.status === 'fulfilled') {
+          setPortfolio(pfRes.value)
+        } else {
+          setPortfolio(null)
+        }
+      })
     }
 
     refresh()
@@ -76,6 +96,7 @@ export function DashboardPage() {
   const top = data?.topRecommendations
   const automation = data?.automation
   const kisLabel = data?.kis?.label ?? 'KIS 연결 필요'
+  const positions = portfolio?.positions ?? []
 
   return (
     <>
@@ -207,6 +228,49 @@ export function DashboardPage() {
             <p className="subtle">USD/KRW 최근 30일</p>
           </div>
           <div className="chart-placeholder">FX Chart Placeholder</div>
+        </article>
+
+        <article className="panel glass reveal">
+          <div className="panel-head">
+            <h3>보유 종목</h3>
+            <p className="subtle">총 {formatNumber(positions.length)}종목</p>
+          </div>
+
+          {positions.length === 0 ? (
+            <p className="subtle" style={{ marginTop: 10 }}>
+              —
+            </p>
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>종목</th>
+                    <th>수량</th>
+                    <th>현재가</th>
+                    <th>수익률</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {positions.map((p) => {
+                    const avg = Number(p.avgBuy || 0)
+                    const cur = Number(p.current || 0)
+                    const pnlPct = avg > 0 && cur > 0 ? ((cur - avg) / avg) * 100 : null
+                    return (
+                      <tr key={p.code}>
+                        <td>{p.name}</td>
+                        <td>{formatNumber(p.qty)}</td>
+                        <td>{cur > 0 ? formatKRW(cur) : '—'}</td>
+                        <td className={pnlPct != null && pnlPct < 0 ? 'down' : 'up'}>
+                          {pnlPct == null ? '—' : formatPercent(pnlPct)}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </article>
       </section>
     </>
