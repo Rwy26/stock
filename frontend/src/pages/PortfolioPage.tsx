@@ -14,26 +14,40 @@ type PortfolioPosition = {
 type PortfolioResponse = {
   asOf: string
   positions: PortfolioPosition[]
+  cash?: number | null
 }
 
 export function PortfolioPage() {
   const [data, setData] = useState<PortfolioResponse | null>(null)
+  const [syncStatus, setSyncStatus] = useState<string>('동기화 준비')
 
   useEffect(() => {
     let cancelled = false
-    fetchJson<PortfolioResponse>('/api/portfolio')
-      .then((payload) => {
-        if (!cancelled) setData(payload)
-      })
-      .catch(() => {
-        if (!cancelled) setData(null)
-      })
+
+    const refresh = () => {
+      setSyncStatus('동기화 중')
+      fetchJson<PortfolioResponse>('/api/portfolio')
+        .then((payload) => {
+          if (cancelled) return
+          setData(payload)
+          setSyncStatus('동기화됨')
+        })
+        .catch(() => {
+          if (cancelled) return
+          setSyncStatus('동기화 실패')
+        })
+    }
+
+    refresh()
+    const intervalId = window.setInterval(refresh, 30_000)
     return () => {
       cancelled = true
+      window.clearInterval(intervalId)
     }
   }, [])
 
   const positions = data?.positions
+  const cash = data?.cash
 
   const summary = useMemo(() => {
     if (!positions || positions.length === 0) return null
@@ -53,10 +67,24 @@ export function PortfolioPage() {
           <p className="subtle">현재가는 반드시 KIS 실시간 API 기준</p>
         </div>
         <div className="auth-actions">
-          <button className="btn secondary" type="button">
+          <button
+            className="btn secondary"
+            type="button"
+            onClick={() => {
+              setSyncStatus('동기화 중')
+              fetchJson<PortfolioResponse>('/api/portfolio')
+                .then((payload) => {
+                  setData(payload)
+                  setSyncStatus('동기화됨')
+                })
+                .catch(() => {
+                  setSyncStatus('동기화 실패')
+                })
+            }}
+          >
             새로고침
           </button>
-          <div className="status-pill">동기화 준비</div>
+          <div className="status-pill">{syncStatus}</div>
         </div>
       </header>
 
@@ -116,21 +144,21 @@ export function PortfolioPage() {
           <ul className="engine-list">
             <li>
               <span>총 평가금액</span>
-              <b>{summary ? formatKRW(summary.evaluated) : '₩184,380,000'}</b>
+              <b>{summary ? formatKRW(summary.evaluated) : '—'}</b>
             </li>
             <li>
               <span>총 투자금액</span>
-              <b>{summary ? formatKRW(summary.invested) : '₩161,000,000'}</b>
+              <b>{summary ? formatKRW(summary.invested) : '—'}</b>
             </li>
             <li>
               <span>평가손익</span>
               <b className={summary && summary.pnl < 0 ? 'down' : 'up'}>
-                {summary ? `${summary.pnl >= 0 ? '+' : ''}${formatKRW(summary.pnl)}` : '+₩23,380,000'}
+                {summary ? `${summary.pnl >= 0 ? '+' : ''}${formatKRW(summary.pnl)}` : '—'}
               </b>
             </li>
             <li>
               <span>예수금</span>
-              <b>₩39,640,000</b>
+              <b>{typeof cash === 'number' ? formatKRW(cash) : '—'}</b>
             </li>
           </ul>
         </article>

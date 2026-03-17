@@ -40,6 +40,9 @@ class Settings:
     # If true, price endpoints will fail when KIS quote fails (no DB fallback).
     kis_strict_price: bool = os.getenv("KIS_STRICT_PRICE", "0").strip() in {"1", "true", "True", "YES", "yes"}
 
+    # If true, balance/KPI endpoints will fail when KIS balance inquiry fails (no sample fallback).
+    kis_strict_balance: bool = os.getenv("KIS_STRICT_BALANCE", "0").strip() in {"1", "true", "True", "YES", "yes"}
+
     # Auto-trading engine safety kill switch (1 = disable all engine ticks/orders).
     autotrading_kill_switch: bool = os.getenv("AUTOTRADING_KILL_SWITCH", "0").strip() in {"1", "true", "True", "YES", "yes"}
 

@@ -80,10 +80,10 @@ if (-not $SkipFrontendBuild) {
 if (-not $SkipStartBackend) {
   Write-Output "[setup] Starting backend (detached)"
   if ($ForceRestartBackend) {
-    $c = Get-NetTCPConnection -LocalPort 5001 -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($c) {
+    $c = Get-NetTCPConnection -LocalPort 5001 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($c -and ([int]$c.OwningProcess -gt 0)) {
       Write-Output "[setup] Stopping existing 5001 listener PID=$($c.OwningProcess)"
-      Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
+      Stop-Process -Id ([int]$c.OwningProcess) -Force -ErrorAction SilentlyContinue
       Start-Sleep -Milliseconds 300
     }
   }

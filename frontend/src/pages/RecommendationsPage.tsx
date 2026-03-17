@@ -16,32 +16,32 @@ type RecommendationsResponse = {
   items: RecommendationItem[]
 }
 
-const fallbackItems: RecommendationItem[] = [
-  { rank: 1, name: '삼성전자', code: '005930', score: 91, price: 72100, changeRate: 1.02 },
-  { rank: 2, name: 'SK하이닉스', code: '000660', score: 88, price: 210500, changeRate: 2.12 },
-  { rank: 3, name: '현대차', code: '005380', score: 85, price: 221500, changeRate: -0.35 },
-  { rank: 4, name: 'KB금융', code: '105560', score: 84, price: 79600, changeRate: 0.48 },
-  { rank: 5, name: 'POSCO홀딩스', code: '005490', score: 83, price: 418000, changeRate: 0.9 },
-]
-
 export function RecommendationsPage() {
   const [data, setData] = useState<RecommendationsResponse | null>(null)
+  const [busyCode, setBusyCode] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    fetchJson<RecommendationsResponse>('/api/recommendations')
-      .then((payload) => {
-        if (!cancelled) setData(payload)
-      })
-      .catch(() => {
-        if (!cancelled) setData(null)
-      })
+
+    const refresh = () => {
+      fetchJson<RecommendationsResponse>('/api/recommendations')
+        .then((payload) => {
+          if (!cancelled) setData(payload)
+        })
+        .catch(() => {
+          if (!cancelled) setData(null)
+        })
+    }
+
+    refresh()
+    const intervalId = window.setInterval(refresh, 30_000)
     return () => {
       cancelled = true
+      window.clearInterval(intervalId)
     }
   }, [])
 
-  const items = useMemo(() => data?.items ?? fallbackItems, [data])
+  const items = useMemo(() => data?.items ?? [], [data])
 
   return (
     <>
@@ -144,7 +144,23 @@ export function RecommendationsPage() {
                   <td>{formatNumber(item.price)}</td>
                   <td className={item.changeRate >= 0 ? 'up' : 'down'}>{formatPercent(item.changeRate)}</td>
                   <td>
-                    <button className="btn secondary" type="button">
+                    <button
+                      className="btn secondary"
+                      type="button"
+                      disabled={busyCode === item.code}
+                      onClick={() => {
+                        setBusyCode(item.code)
+                        fetchJson<{ ok: boolean }>('/api/watchlist', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ code: item.code }),
+                        })
+                          .catch(() => {
+                            // Keep UX minimal: no extra toast.
+                          })
+                          .finally(() => setBusyCode(null))
+                      }}
+                    >
                       [+]
                     </button>
                   </td>

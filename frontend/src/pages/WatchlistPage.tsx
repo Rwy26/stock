@@ -14,27 +14,28 @@ type WatchlistResponse = {
   items: WatchItem[]
 }
 
-const fallbackItems: WatchItem[] = [
-  { name: '삼성전자', code: '005930', price: 72100, changeRate: 1.02, score: 91 },
-  { name: 'SK하이닉스', code: '000660', price: 210500, changeRate: 2.12, score: 88 },
-  { name: '현대차', code: '005380', price: 221500, changeRate: -0.35, score: 85 },
-]
-
 export function WatchlistPage() {
   const [data, setData] = useState<WatchlistResponse | null>(null)
   const [busyCode, setBusyCode] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    fetchJson<WatchlistResponse>('/api/watchlist')
-      .then((payload) => {
-        if (!cancelled) setData(payload)
-      })
-      .catch(() => {
-        if (!cancelled) setData(null)
-      })
+
+    const refresh = () => {
+      fetchJson<WatchlistResponse>('/api/watchlist')
+        .then((payload) => {
+          if (!cancelled) setData(payload)
+        })
+        .catch(() => {
+          if (!cancelled) setData(null)
+        })
+    }
+
+    refresh()
+    const intervalId = window.setInterval(refresh, 30_000)
     return () => {
       cancelled = true
+      window.clearInterval(intervalId)
     }
   }, [])
 
@@ -44,7 +45,7 @@ export function WatchlistPage() {
       .catch(() => setData(null))
   }
 
-  const items = useMemo(() => data?.items ?? fallbackItems, [data])
+  const items = useMemo(() => data?.items ?? [], [data])
 
   return (
     <>

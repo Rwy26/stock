@@ -15,8 +15,9 @@ $args = @('-m', 'uvicorn', 'main:app', '--app-dir', 'backend', '--host', '127.0.
 
 if ($Detach) {
   function Get-ListenerProcessInfo {
-    $c = Get-NetTCPConnection -LocalPort 5001 -ErrorAction SilentlyContinue | Select-Object -First 1
+    $c = Get-NetTCPConnection -LocalPort 5001 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $c) { return $null }
+    if ([int]$c.OwningProcess -le 0) { return $null }
     $w = Get-CimInstance Win32_Process -Filter "ProcessId=$($c.OwningProcess)" -ErrorAction SilentlyContinue
     if (-not $w) { return $null }
     return [PSCustomObject]@{ Pid = $c.OwningProcess; ParentPid = $w.ParentProcessId; CommandLine = $w.CommandLine }

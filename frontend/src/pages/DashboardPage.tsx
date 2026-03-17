@@ -35,41 +35,47 @@ export function DashboardPage() {
   useEffect(() => {
     let cancelled = false
 
-    Promise.all([
-      fetchJson<DashboardResponse>('/api/dashboard'),
-      fetchJson<KisTokenStatusResponse>('/api/kis/token-status'),
-    ])
-      .then(([dashboard, tokenStatus]) => {
-        if (cancelled) return
-        setData(dashboard)
+    const refresh = () => {
+      Promise.all([
+        fetchJson<DashboardResponse>('/api/dashboard'),
+        fetchJson<KisTokenStatusResponse>('/api/kis/token-status'),
+      ])
+        .then(([dashboard, tokenStatus]) => {
+          if (cancelled) return
+          setData(dashboard)
 
-        if (!tokenStatus.hasProfile) {
-          setKisTokenLine('KIS 토큰: 설정 필요')
-          return
-        }
+          if (!tokenStatus.hasProfile) {
+            setKisTokenLine('KIS 토큰: 설정 필요')
+            return
+          }
 
-        if (tokenStatus.ok && typeof tokenStatus.expiresIn === 'number') {
-          setKisTokenLine(tokenStatus.expiresIn <= 60 * 60 ? 'KIS 토큰: 만료 임박' : 'KIS 토큰: 정상')
-          return
-        }
+          if (tokenStatus.ok && typeof tokenStatus.expiresIn === 'number') {
+            setKisTokenLine(tokenStatus.expiresIn <= 60 * 60 ? 'KIS 토큰: 만료 임박' : 'KIS 토큰: 정상')
+            return
+          }
 
-        setKisTokenLine('KIS 토큰: 오류')
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setData(null)
-          setKisTokenLine('KIS 토큰: -')
-        }
-      })
+          setKisTokenLine('KIS 토큰: 오류')
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setData(null)
+            setKisTokenLine('KIS 토큰: -')
+          }
+        })
+    }
+
+    refresh()
+    const intervalId = window.setInterval(refresh, 30_000)
     return () => {
       cancelled = true
+      window.clearInterval(intervalId)
     }
   }, [])
 
   const kpis = data?.kpis
   const top = data?.topRecommendations
   const automation = data?.automation
-  const kisLabel = data?.kis?.label ?? 'KIS 실시간 연결'
+  const kisLabel = data?.kis?.label ?? 'KIS 연결 필요'
 
   return (
     <>
@@ -94,29 +100,29 @@ export function DashboardPage() {
           <div className="kpi-grid" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
             <div className="card gradient-a" style={{ boxShadow: 'none' }}>
               <h3>총 평가금액</h3>
-              <p className="value">{kpis ? formatKRW(kpis.totalValue.amount) : '₩184,380,000'}</p>
+              <p className="value">{kpis ? formatKRW(kpis.totalValue.amount) : '—'}</p>
               <span className={kpis && kpis.totalValue.deltaPct < 0 ? 'delta down' : 'delta up'}>
-                {kpis ? formatPercent(kpis.totalValue.deltaPct) : '+2.41%'}
+                {kpis ? formatPercent(kpis.totalValue.deltaPct) : '—'}
               </span>
             </div>
             <div className="card gradient-b" style={{ boxShadow: 'none' }}>
               <h3>총 투자금액</h3>
-              <p className="value">{kpis ? formatKRW(kpis.totalInvested.amount) : '₩161,000,000'}</p>
+              <p className="value">{kpis ? formatKRW(kpis.totalInvested.amount) : '—'}</p>
               <span className={kpis && kpis.totalInvested.deltaPct < 0 ? 'delta down' : 'delta up'}>
-                {kpis ? formatPercent(kpis.totalInvested.deltaPct) : '+1.04%'}
+                {kpis ? formatPercent(kpis.totalInvested.deltaPct) : '—'}
               </span>
             </div>
             <div className="card gradient-c" style={{ boxShadow: 'none' }}>
               <h3>수익금</h3>
-              <p className="value">{kpis ? formatKRW(kpis.pnl.amount) : '₩23,380,000'}</p>
+              <p className="value">{kpis ? formatKRW(kpis.pnl.amount) : '—'}</p>
               <span className={kpis && kpis.pnl.deltaPct < 0 ? 'delta down' : 'delta up'}>
-                {kpis ? formatPercent(kpis.pnl.deltaPct) : '+14.52%'}
+                {kpis ? formatPercent(kpis.pnl.deltaPct) : '—'}
               </span>
             </div>
             <div className="card gradient-d" style={{ boxShadow: 'none' }}>
               <h3>예수금</h3>
-              <p className="value">{kpis ? formatKRW(kpis.cash.amount) : '₩39,640,000'}</p>
-              <span className="delta">{kpis ? kpis.cash.label : '가용 가능'}</span>
+              <p className="value">{kpis ? formatKRW(kpis.cash.amount) : '—'}</p>
+              <span className="delta">{kpis ? kpis.cash.label : '—'}</span>
             </div>
           </div>
         </article>
@@ -138,20 +144,20 @@ export function DashboardPage() {
           <ul className="engine-list">
             <li>
               <span>일반 자동매매</span>
-              <span className={automation?.basic?.on ? 'chip on' : 'chip off'}>{automation?.basic?.label ?? 'OFF'}</span>
+              <span className={automation?.basic?.on ? 'chip on' : 'chip off'}>{automation?.basic?.label ?? '—'}</span>
             </li>
             <li>
               <span>SA 자동매매</span>
-              <span className={automation?.sa?.on ? 'chip on' : 'chip off'}>{automation?.sa?.label ?? 'ON / 12건'}</span>
+              <span className={automation?.sa?.on ? 'chip on' : 'chip off'}>{automation?.sa?.label ?? '—'}</span>
             </li>
             <li>
               <span>Plus 자동매매</span>
-              <span className={automation?.plus?.on ? 'chip on' : 'chip off'}>{automation?.plus?.label ?? 'OFF'}</span>
+              <span className={automation?.plus?.on ? 'chip on' : 'chip off'}>{automation?.plus?.label ?? '—'}</span>
             </li>
             <li>
               <span>SV Agent</span>
               <span className={automation?.svAgent?.on ? 'chip on' : 'chip off'}>
-                {automation?.svAgent?.label ?? 'ON / ai_assisted'}
+                {automation?.svAgent?.label ?? '—'}
               </span>
             </li>
           </ul>
@@ -162,13 +168,7 @@ export function DashboardPage() {
             <h3>Top 추천 종목</h3>
           </div>
           <ol className="ranking">
-            {(top ?? [
-              { name: '삼성전자', code: '005930', score: 91 },
-              { name: 'SK하이닉스', code: '000660', score: 88 },
-              { name: '현대차', code: '005380', score: 85 },
-              { name: 'KB금융', code: '105560', score: 84 },
-              { name: 'POSCO홀딩스', code: '005490', score: 83 },
-            ]).map((item) => (
+            {(top ?? []).map((item) => (
               <li key={item.code}>
                 <span>{item.name}</span>
                 <b>{item.score}점</b>

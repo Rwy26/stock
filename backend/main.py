@@ -95,6 +95,7 @@ app = FastAPI(title="Apollo Stock Trading System")
 
 _kis_refresh_stop = threading.Event()
 _autotrade_stop = threading.Event()
+_recommendations_stop = threading.Event()
 _engine_skip_last_ts: dict[tuple[int, str, str], float] = {}
 _plus_last_rotation_check_ts: dict[int, float] = {}
 
@@ -187,6 +188,80 @@ def _kis_refresh_loop() -> None:
         _kis_refresh_stop.wait(timeout=60 * 60)
 
 
+def _generate_recommendations_for_date(
+    db: Session,
+    *,
+    rec_date: date,
+    limit: int = 200,
+) -> tuple[int, str | None]:
+    """Populate Recommendation rows for rec_date using latest available IndicatorScore.
+
+    Returns (upserted_count, score_date_used_iso).
+    """
+
+    assert models is not None
+
+    score_date = db.execute(
+        select(func.max(models.IndicatorScore.scoring_date)).where(models.IndicatorScore.scoring_date <= rec_date)
+    ).scalar_one_or_none()
+    if not score_date:
+        return 0, None
+
+    rows = db.execute(
+        select(models.IndicatorScore.stock_code, models.IndicatorScore.score_total)
+        .where(models.IndicatorScore.scoring_date == score_date)
+        .order_by(desc(models.IndicatorScore.score_total), desc(models.IndicatorScore.created_at))
+        .limit(int(limit))
+    ).all()
+
+    if not rows:
+        return 0, str(score_date)
+
+    upserted = 0
+    for rank, (stock_code, score_total) in enumerate(rows, start=1):
+        code = str(stock_code)
+        score = int(score_total or 0)
+
+        existing = db.execute(
+            select(models.Recommendation)
+            .where(models.Recommendation.rec_date == rec_date, models.Recommendation.stock_code == code)
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing is None:
+            db.add(models.Recommendation(rec_date=rec_date, stock_code=code, score_total=score, rank=int(rank)))
+        else:
+            existing.score_total = score
+            existing.rank = int(rank)
+        upserted += 1
+
+    return upserted, str(score_date)
+
+
+def _recommendations_loop() -> None:
+    """Periodic recommendations refresh.
+
+    Keeps today's Recommendation rows populated from latest IndicatorScore.
+    """
+
+    time.sleep(3.0)
+    while not _recommendations_stop.is_set():
+        try:
+            if apollo_db is not None and models is not None:
+                db: Session = apollo_db.get_session_factory()()
+                try:
+                    today = date.today()
+                    count, _score_date = _generate_recommendations_for_date(db, rec_date=today, limit=200)
+                    if count:
+                        db.commit()
+                finally:
+                    db.close()
+        except Exception:
+            pass
+
+        # Refresh every 6 hours.
+        _recommendations_stop.wait(timeout=60 * 60 * 6)
+
+
 def _is_market_open(now: datetime) -> bool:
     if now.weekday() >= 5:
         return False
@@ -271,13 +346,26 @@ def _format_kis_account(cano: str | None, prdt: str | None) -> str | None:
     return f"{c}-{p}"
 
 
-def _sync_portfolio_from_kis(db: Session, *, user_id: int, profile) -> tuple[int, int]:
-    """Best-effort sync: KIS holdings -> portfolio table.
+def _to_float_amount(v) -> float:
+    try:
+        return float(str(v).replace(",", "").strip() or 0)
+    except Exception:
+        return 0.0
 
-    Returns (upserted_count, deleted_count).
+
+def _to_int_amount(v) -> int:
+    try:
+        return int(float(str(v).replace(",", "").strip() or 0))
+    except Exception:
+        return 0
+
+
+def _fetch_kis_balance(profile, *, timeout_seconds: float = 10.0) -> dict | None:
+    """Fetch KIS balance/holdings for the given profile (read-only).
+
+    This is safe for both paper and live profiles because it performs inquiry only.
+    Ordering APIs remain guarded by AUTOTRADING_LIVE_ORDERS.
     """
-
-    assert models is not None
 
     app_key = (str(getattr(profile, "app_key", "") or "").strip())
     app_secret = (str(getattr(profile, "app_secret", "") or "").strip())
@@ -288,12 +376,9 @@ def _sync_portfolio_from_kis(db: Session, *, user_id: int, profile) -> tuple[int
         prdt_cd = "01"
 
     if not app_key or not app_secret or not cano:
-        return 0, 0
-    if (not is_paper) and (not settings.autotrading_live_orders):
-        # Don't touch live accounts unless explicitly enabled.
-        return 0, 0
+        return None
 
-    bal = kis_client.inquire_balance(
+    return kis_client.inquire_balance(
         app_key=app_key,
         app_secret=app_secret,
         is_paper=is_paper,
@@ -301,34 +386,70 @@ def _sync_portfolio_from_kis(db: Session, *, user_id: int, profile) -> tuple[int
         account_product_code=prdt_cd,
         live_base_url=settings.kis_live_base_url,
         paper_base_url=settings.kis_paper_base_url,
-        timeout_seconds=10.0,
+        timeout_seconds=float(timeout_seconds),
     )
 
-    holdings = bal.get("output1") or []
 
-    def _to_int(v) -> int:
-        try:
-            return int(float(str(v).replace(",", "").strip() or 0))
-        except Exception:
-            return 0
+def _extract_kis_balance_kpis(balance: dict) -> tuple[int, int, int, int]:
+    """Return (total_value, total_invested, pnl, cash) from inquire_balance payload."""
 
-    def _to_float(v) -> float:
-        try:
-            return float(str(v).replace(",", "").strip() or 0)
-        except Exception:
-            return 0.0
+    out2 = balance.get("output2")
+    if isinstance(out2, list):
+        out2 = out2[0] if out2 else {}
+    if not isinstance(out2, dict):
+        out2 = {}
+
+    total_value = _to_int_amount(out2.get("tot_evlu_amt") or out2.get("TOT_EVLU_AMT") or out2.get("tot_evlu_amt") or 0)
+    total_invested = _to_int_amount(out2.get("pchs_amt_smtl") or out2.get("PCHS_AMT_SMTL") or out2.get("pchs_amt") or 0)
+    pnl = _to_int_amount(out2.get("evlu_pfls_smtl") or out2.get("EVLU_PFLS_SMTL") or out2.get("evlu_pfls") or 0)
+    cash = _to_int_amount(out2.get("dnca_tot_amt") or out2.get("DNCA_TOT_AMT") or out2.get("dnca_tot_amt") or 0)
+
+    # Fallback if certain fields are missing.
+    if pnl == 0 and total_value and total_invested:
+        pnl = int(total_value - total_invested)
+
+    return int(total_value), int(total_invested), int(pnl), int(cash)
+
+
+def _sync_portfolio_from_kis(db: Session, *, user_id: int, profile, balance: dict | None = None) -> tuple[int, int]:
+    """Best-effort sync: KIS holdings -> portfolio table.
+
+    Returns (upserted_count, deleted_count).
+    """
+
+    assert models is not None
+
+    if balance is None:
+        balance = _fetch_kis_balance(profile, timeout_seconds=10.0)
+
+    if not balance:
+        return 0, 0
+
+    holdings = balance.get("output1") or []
 
     desired: dict[str, tuple[int, float]] = {}
+    stock_names: dict[str, str] = {}
     for item in holdings:
         try:
             code = str(item.get("pdno") or item.get("PDNO") or "").strip()
             if not code:
                 continue
-            qty = _to_int(item.get("hldg_qty") or item.get("HLDG_QTY") or 0)
+            name = str(
+                item.get("prdt_name")
+                or item.get("PRDT_NAME")
+                or item.get("prdt_abrv_name")
+                or item.get("PRDT_ABRV_NAME")
+                or item.get("hts_kor_isnm")
+                or item.get("HTS_KOR_ISNM")
+                or ""
+            ).strip()
+            qty = _to_int_amount(item.get("hldg_qty") or item.get("HLDG_QTY") or 0)
             if qty <= 0:
                 continue
-            avg = _to_float(item.get("pchs_avg_pric") or item.get("PCHS_AVG_PRIC") or 0)
+            avg = _to_float_amount(item.get("pchs_avg_pric") or item.get("PCHS_AVG_PRIC") or 0)
             desired[code] = (qty, avg)
+            if name:
+                stock_names.setdefault(code, name)
         except Exception:
             continue
 
@@ -341,13 +462,48 @@ def _sync_portfolio_from_kis(db: Session, *, user_id: int, profile) -> tuple[int
             deleted += 1
         return 0, deleted
 
-    # Filter to codes that exist in stocks table (FK safety).
+    # If we already have Stock rows but they were inserted with placeholder names (code),
+    # upgrade them to real names from KIS holdings when available.
+    if stock_names:
+        try:
+            existing_stocks = (
+                db.execute(select(models.Stock).where(models.Stock.code.in_(list(stock_names.keys())))).scalars().all()
+            )
+            for s in existing_stocks:
+                try:
+                    code = str(getattr(s, "code"))
+                    new_name = (stock_names.get(code) or "").strip()
+                    if not new_name:
+                        continue
+                    cur_name = str(getattr(s, "name", "") or "").strip()
+                    if (not cur_name) or (cur_name == code):
+                        s.name = new_name
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    # Ensure stocks rows exist (FK safety).
+    # KIS can return holdings for codes we have never seen before;
+    # without a corresponding stocks row, portfolio upserts will fail.
     codes = sorted(desired.keys())
-    existing_stock_codes = set(
-        c
-        for (c,) in db.execute(select(models.Stock.code).where(models.Stock.code.in_(codes))).all()
-    )
+    existing_stock_codes = set(c for (c,) in db.execute(select(models.Stock.code).where(models.Stock.code.in_(codes))).all())
+    missing_codes = [c for c in codes if c not in existing_stock_codes]
+    if missing_codes:
+        try:
+            from sqlalchemy.dialects.mysql import insert as mysql_insert
+
+            rows = [{"code": c, "name": (stock_names.get(c) or c), "market": None} for c in missing_codes]
+            db.execute(mysql_insert(models.Stock.__table__).values(rows).prefix_with("IGNORE"))
+        except Exception:
+            # Best-effort only; fall back to filtering if insert fails.
+            pass
+
+    existing_stock_codes = set(c for (c,) in db.execute(select(models.Stock.code).where(models.Stock.code.in_(codes))).all())
     desired = {c: v for c, v in desired.items() if c in existing_stock_codes}
+    if not desired:
+        # Don't delete/clear if the only issue is missing stock master rows.
+        return 0, 0
 
     existing = {
         str(p.stock_code): p
@@ -968,11 +1124,15 @@ def _startup_kis_refresh() -> None:
     t2 = threading.Thread(target=_autotrade_tick_loop, name="autotrade-tick", daemon=True)
     t2.start()
 
+    t3 = threading.Thread(target=_recommendations_loop, name="recommendations-refresh", daemon=True)
+    t3.start()
+
 
 @app.on_event("shutdown")
 def _shutdown_kis_refresh() -> None:
     _kis_refresh_stop.set()
     _autotrade_stop.set()
+    _recommendations_stop.set()
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MOCK_DIR = REPO_ROOT / "frontend-prototype" / "mock"
@@ -1013,6 +1173,27 @@ def get_portfolio(current_user=Depends(get_current_user)):
     user_id = int(current_user.id)
     db: Session = apollo_db.get_session_factory()()
     try:
+        profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
+
+        # Read-only best-effort sync from KIS so portfolio reflects manual trades.
+        balance = None
+        has_kis = bool(profile and profile.app_key and profile.app_secret)
+        try:
+            if profile is not None:
+                balance = _fetch_kis_balance(profile, timeout_seconds=8.0)
+                if balance:
+                    upserted, deleted = _sync_portfolio_from_kis(db, user_id=user_id, profile=profile, balance=balance)
+                    if upserted or deleted:
+                        db.commit()
+        except Exception:
+            balance = None
+
+        if settings.kis_strict_balance:
+            if not has_kis:
+                raise HTTPException(status_code=400, detail="KIS 연결 필요")
+            if not balance:
+                raise HTTPException(status_code=503, detail="KIS 잔고 조회 실패")
+
         positions = db.execute(
             select(
                 models.PortfolioPosition.stock_code,
@@ -1025,8 +1206,6 @@ def get_portfolio(current_user=Depends(get_current_user)):
             .where(models.PortfolioPosition.user_id == user_id)
             .order_by(models.PortfolioPosition.stock_code)
         ).all()
-
-        profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
 
         payload_positions: list[dict] = []
         for stock_code, qty, avg_buy, buy_date, name in positions:
@@ -1042,7 +1221,15 @@ def get_portfolio(current_user=Depends(get_current_user)):
                 }
             )
 
-        return {"asOf": datetime.now().isoformat(), "positions": payload_positions}
+        cash = None
+        if balance:
+            try:
+                _total_value, _total_invested, _pnl, cash_amt = _extract_kis_balance_kpis(balance)
+                cash = int(cash_amt)
+            except Exception:
+                cash = None
+
+        return {"asOf": datetime.now().isoformat(), "positions": payload_positions, "cash": cash}
     finally:
         db.close()
 
@@ -1050,15 +1237,13 @@ def get_portfolio(current_user=Depends(get_current_user)):
 @app.get("/api/recommendations")
 def get_recommendations(_current_user=Depends(get_current_user)):
     if apollo_db is None or models is None:
-        return _read_mock_json("recommendations.sample.json")
+        raise HTTPException(status_code=500, detail="DB module not available")
 
     today = date.today()
     db: Session = apollo_db.get_session_factory()()
     try:
         # Realtime prices are per-user (KIS credentials).
-        # We don't require them for recommendations list, but if the user is logged in
-        # and has profile set (required by UX), we prefer KIS.
-        # For safety, failures fall back to DB unless KIS_STRICT_PRICE=1.
+        # In strict mode, require KIS profile and do not fall back to DB prices.
         user_profile = None
         try:
             # _current_user is required by auth; keep mypy happy.
@@ -1066,6 +1251,10 @@ def get_recommendations(_current_user=Depends(get_current_user)):
             user_profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
         except Exception:
             user_profile = None
+
+        if settings.kis_strict_price:
+            if not (user_profile and getattr(user_profile, "app_key", None) and getattr(user_profile, "app_secret", None)):
+                raise HTTPException(status_code=400, detail="KIS 연결 필요")
 
         rows = db.execute(
             select(
@@ -1079,9 +1268,27 @@ def get_recommendations(_current_user=Depends(get_current_user)):
             .order_by(models.Recommendation.rank.is_(None), models.Recommendation.rank, desc(models.Recommendation.score_total))
         ).all()
 
+        # Fallback: if recommendations table is empty for today, use indicator scores.
+        if not rows:
+            rows = db.execute(
+                select(
+                    func.null().label("rank"),
+                    models.IndicatorScore.score_total,
+                    models.IndicatorScore.stock_code,
+                    models.Stock.name,
+                )
+                .join(models.Stock, models.Stock.code == models.IndicatorScore.stock_code)
+                .where(models.IndicatorScore.scoring_date == today)
+                .order_by(desc(models.IndicatorScore.score_total), desc(models.IndicatorScore.created_at))
+                .limit(30)
+            ).all()
+
         items: list[dict] = []
         for rank, score_total, stock_code, name in rows:
-            price, change_rate = _get_realtime_price_and_change(db, user_profile, stock_code)
+            try:
+                price, change_rate = _get_realtime_price_and_change(db, user_profile, stock_code)
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"KIS 시세 조회 실패: {exc}") from exc
             items.append(
                 {
                     "rank": int(rank or 0),
@@ -1093,10 +1300,6 @@ def get_recommendations(_current_user=Depends(get_current_user)):
                 }
             )
 
-        # Keep the API stable even when DB is empty.
-        if not items:
-            return _read_mock_json("recommendations.sample.json")
-
         return {"date": today.isoformat(), "items": items}
     finally:
         db.close()
@@ -1105,12 +1308,16 @@ def get_recommendations(_current_user=Depends(get_current_user)):
 @app.get("/api/watchlist")
 def get_watchlist(current_user=Depends(get_current_user)):
     if apollo_db is None or models is None:
-        return _read_mock_json("watchlist.sample.json")
+        raise HTTPException(status_code=500, detail="DB module not available")
 
     user_id = int(current_user.id)
     db: Session = apollo_db.get_session_factory()()
     try:
         profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
+
+        if settings.kis_strict_price:
+            if not (profile and getattr(profile, "app_key", None) and getattr(profile, "app_secret", None)):
+                raise HTTPException(status_code=400, detail="KIS 연결 필요")
 
         rows = db.execute(
             select(models.Watchlist.stock_code, models.Stock.name)
@@ -1121,7 +1328,10 @@ def get_watchlist(current_user=Depends(get_current_user)):
 
         items: list[dict] = []
         for stock_code, name in rows:
-            price, change_rate = _get_realtime_price_and_change(db, profile, stock_code)
+            try:
+                price, change_rate = _get_realtime_price_and_change(db, profile, stock_code)
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"KIS 시세 조회 실패: {exc}") from exc
             score = _get_latest_score_total(db, stock_code)
             items.append(
                 {
@@ -1132,10 +1342,6 @@ def get_watchlist(current_user=Depends(get_current_user)):
                     "score": int(score),
                 }
             )
-
-        # Keep stable behavior for empty DB.
-        if not items:
-            return _read_mock_json("watchlist.sample.json")
 
         return {"items": items}
     finally:
@@ -1152,9 +1358,28 @@ def add_watchlist_item(payload: dict = Body(...), current_user=Depends(get_curre
 
     user_id = int(current_user.id)
     with apollo_db.session_scope() as session:
+        # In strict mode, validate code via KIS quote to ensure this is a real instrument.
+        if settings.kis_strict_price:
+            profile = session.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
+            if not (profile and getattr(profile, "app_key", None) and getattr(profile, "app_secret", None)):
+                raise HTTPException(status_code=400, detail="KIS 연결 필요")
+            try:
+                kis_client.inquire_price(
+                    app_key=str(profile.app_key),
+                    app_secret=str(profile.app_secret),
+                    is_paper=bool(getattr(profile, "is_paper", False)),
+                    code=code,
+                    live_base_url=settings.kis_live_base_url,
+                    paper_base_url=settings.kis_paper_base_url,
+                    timeout_seconds=5.0,
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"유효하지 않은 종목코드 또는 시세 조회 실패: {exc}") from exc
+
         stock = session.execute(select(models.Stock).where(models.Stock.code == code)).scalar_one_or_none()
         if stock is None:
-            raise HTTPException(status_code=404, detail="Stock not found")
+            # Allow adding new codes; create a placeholder stock row.
+            session.add(models.Stock(code=code, name=code, market=None))
 
         exists = session.execute(
             select(models.Watchlist.id).where(models.Watchlist.user_id == user_id, models.Watchlist.stock_code == code)
@@ -1266,6 +1491,8 @@ def get_dashboard(current_user=Depends(get_current_user)):
     plus_trades_today = 0
     sv_trades_today = 0
 
+    balance = None
+    top_recommendations: list[dict] = []
     if apollo_db is not None and models is not None:
         db: Session = apollo_db.get_session_factory()()
         try:
@@ -1316,37 +1543,92 @@ def get_dashboard(current_user=Depends(get_current_user)):
 
             profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
             if profile and profile.app_key and profile.app_secret:
-                # Don't expose token, just validate we can obtain one quickly.
+                # Prefer full balance inquiry for the dashboard KPIs.
                 try:
-                    kis_client.get_access_token(
-                        app_key=str(profile.app_key),
-                        app_secret=str(profile.app_secret),
-                        is_paper=bool(profile.is_paper),
-                        live_base_url=settings.kis_live_base_url,
-                        paper_base_url=settings.kis_paper_base_url,
-                        timeout_seconds=3.0,
-                    )
+                    balance = _fetch_kis_balance(profile, timeout_seconds=5.0)
                     kis_connected = True
                 except Exception:
                     kis_connected = False
+
+            # Prefer real recommendations from DB.
+            try:
+                today = date.today()
+                rec_rows = db.execute(
+                    select(
+                        models.Recommendation.rank,
+                        models.Recommendation.score_total,
+                        models.Recommendation.stock_code,
+                        models.Stock.name,
+                    )
+                    .join(models.Stock, models.Stock.code == models.Recommendation.stock_code)
+                    .where(models.Recommendation.rec_date == today)
+                    .order_by(models.Recommendation.rank.is_(None), models.Recommendation.rank, desc(models.Recommendation.score_total))
+                    .limit(5)
+                ).all()
+
+                if not rec_rows:
+                    rec_rows = db.execute(
+                        select(
+                            func.null().label("rank"),
+                            models.IndicatorScore.score_total,
+                            models.IndicatorScore.stock_code,
+                            models.Stock.name,
+                        )
+                        .join(models.Stock, models.Stock.code == models.IndicatorScore.stock_code)
+                        .where(models.IndicatorScore.scoring_date == today)
+                        .order_by(desc(models.IndicatorScore.score_total), desc(models.IndicatorScore.created_at))
+                        .limit(5)
+                    ).all()
+
+                for rank, score_total, stock_code, name in rec_rows:
+                    top_recommendations.append(
+                        {
+                            "name": str(name),
+                            "code": str(stock_code),
+                            "score": int(score_total or 0),
+                        }
+                    )
+            except Exception:
+                top_recommendations = []
         finally:
             db.close()
 
+    # Strict real-data mode: do not serve sample KPIs.
+    if settings.kis_strict_balance:
+        if apollo_db is None or models is None:
+            raise HTTPException(status_code=500, detail="DB module not available")
+        if not kis_connected:
+            raise HTTPException(status_code=400, detail="KIS 연결 필요")
+        if not balance:
+            raise HTTPException(status_code=503, detail="KIS 잔고 조회 실패")
+
+    # Default (dev-only sample) KPIs.
+    kpis = {
+        "totalValue": {"amount": 184_380_000, "deltaPct": 2.41},
+        "totalInvested": {"amount": 161_000_000, "deltaPct": 1.04},
+        "pnl": {"amount": 23_380_000, "deltaPct": 14.52},
+        "cash": {"amount": 39_640_000, "label": "가용 가능"},
+    }
+
+    if balance:
+        try:
+            total_value, total_invested, pnl, cash_amt = _extract_kis_balance_kpis(balance)
+            pnl_pct = 0.0
+            if total_invested:
+                pnl_pct = round((float(pnl) / float(total_invested)) * 100.0, 2)
+            kpis = {
+                "totalValue": {"amount": int(total_value), "deltaPct": pnl_pct},
+                "totalInvested": {"amount": int(total_invested), "deltaPct": 0.0},
+                "pnl": {"amount": int(pnl), "deltaPct": pnl_pct},
+                "cash": {"amount": int(cash_amt), "label": "가용 가능"},
+            }
+        except Exception:
+            pass
+
     return {
         "asOf": datetime.now().isoformat(),
-        "kpis": {
-            "totalValue": {"amount": 184_380_000, "deltaPct": 2.41},
-            "totalInvested": {"amount": 161_000_000, "deltaPct": 1.04},
-            "pnl": {"amount": 23_380_000, "deltaPct": 14.52},
-            "cash": {"amount": 39_640_000, "label": "가용 가능"},
-        },
-        "topRecommendations": [
-            {"name": "삼성전자", "code": "005930", "score": 91},
-            {"name": "SK하이닉스", "code": "000660", "score": 88},
-            {"name": "현대차", "code": "005380", "score": 85},
-            {"name": "KB금융", "code": "105560", "score": 84},
-            {"name": "POSCO홀딩스", "code": "005490", "score": 83},
-        ],
+        "kpis": kpis,
+        "topRecommendations": top_recommendations,
         "automation": {
             "basic": {"on": False, "label": "OFF / 0건"},
             "sa": {"on": sa_on, "label": ("ON" if sa_on else "OFF") + f" / {sa_trades_today}건"},
@@ -1404,6 +1686,21 @@ def kis_token_status(current_user=Depends(get_current_user)):
                 "error": str(exc),
                 "asOf": datetime.now().isoformat(),
             }
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/recommendations/generate-today")
+def admin_generate_recommendations_today(_admin=Depends(require_admin)):
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        today = date.today()
+        count, score_date = _generate_recommendations_for_date(db, rec_date=today, limit=200)
+        db.commit()
+        return {"ok": True, "date": today.isoformat(), "scoreDate": score_date, "upserted": int(count)}
     finally:
         db.close()
 
