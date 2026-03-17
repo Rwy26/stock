@@ -9,6 +9,7 @@ const menuItems = [
   { to: '/stock-search', slug: 'stock-search', label: '종목 탐색' },
   { to: '/recommendations', slug: 'recommendations', label: '추천 종목' },
   { to: '/watchlist', slug: 'watchlist', label: '관심 종목' },
+  { to: '/strategy', slug: 'strategy', label: '전략' },
   { to: '/auto-basic', slug: 'auto-basic', label: '일반 자동매매' },
   { to: '/auto-sa', slug: 'auto-sa', label: 'SA 자동매매' },
   { to: '/auto-plus', slug: 'auto-plus', label: 'Plus 자동매매' },

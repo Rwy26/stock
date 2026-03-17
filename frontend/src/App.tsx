@@ -5,6 +5,7 @@ import { AdminPage } from './pages/AdminPage'
 import { AutoBasicPage } from './pages/AutoBasicPage'
 import { AutoPlusPage } from './pages/AutoPlusPage'
 import { AutoSaPage } from './pages/AutoSaPage'
+import { StrategyPage } from './pages/StrategyPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { LoginPage } from './pages/LoginPage'
 import { PortfolioPage } from './pages/PortfolioPage'
@@ -33,6 +34,7 @@ export default function App() {
           <Route path="stock-search" element={<StockSearchPage />} />
           <Route path="recommendations" element={<RecommendationsPage />} />
           <Route path="watchlist" element={<WatchlistPage />} />
+          <Route path="strategy" element={<StrategyPage />} />
           <Route path="auto-basic" element={<AutoBasicPage />} />
           <Route path="auto-sa" element={<AutoSaPage />} />
           <Route path="auto-plus" element={<AutoPlusPage />} />
