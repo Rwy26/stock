@@ -50,6 +50,11 @@ class Settings:
     # Paper (VTS) orders are allowed without this flag.
     autotrading_live_orders: bool = os.getenv("AUTOTRADING_LIVE_ORDERS", "0").strip() in {"1", "true", "True", "YES", "yes"}
 
+    # Local-only convenience: issue an access token without password.
+    # This MUST remain opt-in and restricted to loopback clients.
+    allow_local_auto_login: bool = os.getenv("ALLOW_LOCAL_AUTO_LOGIN", "0").strip() in {"1", "true", "True", "YES", "yes"}
+    local_auto_login_email: str = os.getenv("LOCAL_AUTO_LOGIN_EMAIL", "administrator").strip() or "administrator"
+
     def database_url(self) -> str:
         if self.mysql_url:
             return self.mysql_url

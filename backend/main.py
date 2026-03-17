@@ -2213,6 +2213,61 @@ def login(request: Request, payload: dict = Body(...)):
         db.close()
 
 
+@app.post("/api/dev/auto-login")
+def dev_auto_login(request: Request):
+    """Local-only convenience endpoint to skip the login screen.
+
+    Guardrails:
+    - Disabled by default; requires ALLOW_LOCAL_AUTO_LOGIN=1
+    - Only accepts loopback clients (127.0.0.1 / ::1)
+    - Issues a normal JWT for an existing, active user (LOCAL_AUTO_LOGIN_EMAIL)
+
+    This endpoint must never be enabled on publicly reachable hosts.
+    """
+
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    if not getattr(settings, "allow_local_auto_login", False):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    client_ip = request.client.host if request.client else None
+    if client_ip not in {"127.0.0.1", "::1"}:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    email = (getattr(settings, "local_auto_login_email", "administrator") or "administrator").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="LOCAL_AUTO_LOGIN_EMAIL is empty")
+
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        user = db.execute(select(models.User).where(models.User.email == email)).scalar_one_or_none()
+        if user is None or not user.is_active:
+            raise HTTPException(status_code=404, detail="Auto-login user not found or inactive")
+
+        # Record login history (best-effort).
+        try:
+            user_agent = request.headers.get("user-agent")
+            db.add(models.LoginHistory(user_id=int(user.id), event="login", ip=client_ip, user_agent=user_agent))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        token = auth.create_access_token(subject=str(user.id), secret=settings.jwt_secret, expires_minutes=settings.jwt_expire_minutes)
+        return {
+            "accessToken": token,
+            "tokenType": "bearer",
+            "user": {
+                "id": int(user.id),
+                "email": user.email,
+                "nickname": user.nickname,
+                "role": user.role,
+            },
+        }
+    finally:
+        db.close()
+
+
 @app.post("/api/auth/refresh")
 def refresh_token(current_user=Depends(get_current_user_for_refresh)):
     """Issue a new access token for the current user.

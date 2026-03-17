@@ -1,13 +1,58 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { fetchJson } from '../lib/api'
-import { setAccessToken, setUserRole } from '../lib/auth'
+import { getAccessToken, setAccessToken, setUserRole } from '../lib/auth'
 
 export function LoginPage() {
   const navigate = useNavigate()
   const [email, setEmail] = useState('administrator')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    // Local-only convenience: if backend enables ALLOW_LOCAL_AUTO_LOGIN, skip the login form.
+    // Guardrails:
+    // - Only try on localhost
+    // - Only when we don't already have a token
+    // - Best-effort: if it fails, keep showing the login form
+    const token = getAccessToken()
+    if (token) return
+    if (typeof window === 'undefined') return
+    const host = window.location.hostname
+    if (host !== '127.0.0.1' && host !== 'localhost') return
+
+    let cancelled = false
+    setBusy(true)
+    fetchJson<{ accessToken: string; user?: { role?: string } }>('/api/dev/auto-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+      .then((res) => {
+        if (cancelled) return
+        setAccessToken(res.accessToken)
+        if (res.user?.role) setUserRole(res.user.role)
+        return fetchJson<{
+          nickname: string | null
+          kis: { appKey: string | null; accountPrefix: string | null; hasAppSecret: boolean }
+        }>('/api/profile')
+      })
+      .then((profile) => {
+        if (cancelled || !profile) return
+        const needsSetup = !profile.nickname || !profile.kis?.appKey || !profile.kis?.accountPrefix || !profile.kis?.hasAppSecret
+        navigate(needsSetup ? '/profile-setup' : '/', { replace: true })
+      })
+      .catch(() => {
+        // Keep UX minimal: no extra modals/toasts.
+      })
+      .finally(() => {
+        if (!cancelled) setBusy(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [navigate])
 
   return (
     <main className="auth-shell">
