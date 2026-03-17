@@ -46,7 +46,29 @@ winget install -e --id Oracle.MySQL --source winget --accept-package-agreements 
 
 로컬 운영환경(DB `apollo_db`) 초기화/생성(관리자 권한 없이 로컬 인스턴스 실행):
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-mysql.ps1 -RootPassword "<root비번>" -AppPassword "<apollo비번>"
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-mysql.ps1
+```
+
+- 위 명령은 비밀번호를 **SecureString 프롬프트**로 받습니다.
+- 비대화식 실행이 필요하면(프롬프트 없이) 아래 중 하나를 사용하세요:
+
+SecureString 전달(권장):
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-mysql.ps1 `
+	-RootPassword (ConvertTo-SecureString "<root비번>" -AsPlainText -Force) `
+	-AppPassword (ConvertTo-SecureString "<apollo비번>" -AsPlainText -Force) `
+	-NoPrompt
+```
+
+Plaintext escape hatch(자동화 용도, 주의):
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-mysql.ps1 `
+	-RootPasswordText "<root비번>" -AppPasswordText "<apollo비번>" -NoPrompt
+```
+
+Dry-run(변경 없이 계획만 출력):
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-mysql.ps1 -WhatIf -NoPrompt
 ```
 
 - 운영 서버처럼 Windows 서비스로 상시 실행하려면 관리자 권한(관리자 터미널/VS Code)이 필요합니다.
@@ -73,6 +95,11 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-mysql-service.ps1 
 
 ```powershell
 .\scripts\setup-mysql-service.ps1 -RootPassword (ConvertTo-SecureString "<root비번>" -AsPlainText -Force) -AppPassword (ConvertTo-SecureString "<apollo비번>" -AsPlainText -Force) -NoPrompt
+```
+
+Dry-run(변경 없이 계획만 출력):
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-mysql-service.ps1 -WhatIf
 ```
 
 또는 (권장) 서비스 설치 + 스키마 생성까지 한 번에(관리자 권한 필요):

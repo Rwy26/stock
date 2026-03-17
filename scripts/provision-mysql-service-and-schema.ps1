@@ -1,3 +1,4 @@
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
   [string]$ServiceName = 'MySQL84',
   [int]$Port = 3306,
@@ -22,9 +23,17 @@ function Resolve-Exe($name, $candidates) {
   return $null
 }
 
-Assert-Admin
-
 Set-Location (Split-Path $PSScriptRoot -Parent)
+
+if ($WhatIfPreference) {
+  Write-Output 'WhatIf mode: no changes will be made.'
+  Write-Output "Would ensure MySQL binaries are installed (AutoInstallMySQL=$AutoInstallMySQL)"
+  Write-Output "Would run setup-mysql-service.ps1 for service=$ServiceName port=$Port db=$DbName user=$AppUser (with -ReinitDataDir)"
+  Write-Output 'Would run init-db.ps1 to create tables'
+  return
+}
+
+Assert-Admin
 
 # Check if MySQL is installed (mysqld.exe present)
 $mysqldExe = Resolve-Exe 'mysqld' @(
@@ -46,16 +55,26 @@ if (-not $mysqldExe) {
   }
 
   Write-Output 'Installing MySQL via winget...'
-  winget install -e --id Oracle.MySQL --source winget --accept-package-agreements --accept-source-agreements
-  if ($LASTEXITCODE -ne 0) {
-    throw "winget install failed (exit code $LASTEXITCODE)"
+  if (-not $PSCmdlet.ShouldProcess('winget', 'Install Oracle.MySQL')) {
+    Write-Output 'Cancelled.'
+    return
   }
+  winget install -e --id Oracle.MySQL --source winget --accept-package-agreements --accept-source-agreements
+  if ($LASTEXITCODE -ne 0) { throw "winget install failed (exit code $LASTEXITCODE)" }
 }
 
 Write-Output 'Provisioning MySQL Windows service + backend env...'
+if (-not $PSCmdlet.ShouldProcess('setup-mysql-service.ps1', 'Provision MySQL service + backend env')) {
+  Write-Output 'Cancelled.'
+  return
+}
 & .\scripts\setup-mysql-service.ps1 -ServiceName $ServiceName -Port $Port -DbName $DbName -AppUser $AppUser -ReinitDataDir
 
 Write-Output 'Initializing DB schema (create tables)...'
+if (-not $PSCmdlet.ShouldProcess('init-db.ps1', 'Initialize DB schema')) {
+  Write-Output 'Cancelled.'
+  return
+}
 & .\scripts\init-db.ps1
 
 Write-Output ''
