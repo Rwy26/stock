@@ -18,6 +18,14 @@ function Sync-ProcessPath {
 
 Sync-ProcessPath
 
+# Ensure Python tooling never touches an inaccessible pip cache path
+# (Some environments set PIP_CACHE_DIR to a locked BitLocker drive like D:\...)
+$workspaceCacheRoot = Join-Path $PWD ".cache"
+$pipCacheDir = Join-Path $workspaceCacheRoot "pip"
+New-Item -ItemType Directory -Force -Path $pipCacheDir | Out-Null
+$env:PIP_CACHE_DIR = $pipCacheDir
+$env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
+
 function Resolve-Exe($name, $candidates) {
   $cmd = Get-Command $name -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }

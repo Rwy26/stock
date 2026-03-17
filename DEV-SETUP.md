@@ -192,6 +192,24 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-local-prod.ps1 -Fo
 	- `KIS_STRICT_PRICE=1`
 	- `KIS_STRICT_BALANCE=1`
 
+### 0.6) (선택) 로컬 자동 로그인(혼자 쓰는 로컬 편의)
+
+로그인 화면을 건너뛰고 자동으로 토큰을 발급받아 접속하고 싶다면, **로컬에서만** 아래 설정을 켭니다.
+
+- `backend/.env`:
+	- `ALLOW_LOCAL_AUTO_LOGIN=1`
+	- (선택) `LOCAL_AUTO_LOGIN_EMAIL=<자동로그인 대상 이메일>`
+
+가드레일:
+
+- 백엔드가 **loopback(127.0.0.1 / ::1) 요청만** 허용합니다.
+- 프론트도 `localhost`/`127.0.0.1`에서만 자동 시도를 합니다.
+- 외부에서 접근 가능한 서버에서는 절대 켜지 마세요.
+
+끄기:
+
+- `ALLOW_LOCAL_AUTO_LOGIN=0` 으로 바꾸고 백엔드를 재시작하세요.
+
 ### 1) 백엔드(FastAPI) 실행 (포트 5001)
 
 Windows PowerShell에서 워크스페이스 루트(`c:\stock`) 기준:
