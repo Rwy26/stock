@@ -13,6 +13,17 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Ensure-ValidTemp {
+    $fallbackTemp = Join-Path $env:LOCALAPPDATA 'Temp'
+    if (-not (Test-Path $fallbackTemp)) {
+        New-Item -ItemType Directory -Force -Path $fallbackTemp | Out-Null
+    }
+    if (-not $env:TEMP -or -not (Test-Path $env:TEMP)) { $env:TEMP = $fallbackTemp }
+    if (-not $env:TMP -or -not (Test-Path $env:TMP)) { $env:TMP = $fallbackTemp }
+}
+
+Ensure-ValidTemp
+
 function ConvertFrom-SecureStringToPlain([securestring]$sec) {
     if ($null -eq $sec) { return '' }
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
@@ -174,7 +185,13 @@ else {
             Ok "User login (prompted)"
         }
         catch {
-            Fail ("User login (prompted) failed: " + $_.Exception.Message)
+            $msg = $_.Exception.Message
+            if ($msg -match '\b401\b' -or $msg -match 'Unauthorized') {
+                Fail "User login (prompted) failed: 401 Unauthorized (wrong password?) — re-run with the correct password or use -ResetTargetUserPassword if you want an admin reset."
+            }
+            else {
+                Fail ("User login (prompted) failed: " + $msg)
+            }
         }
     }
     else {

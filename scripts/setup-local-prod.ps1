@@ -17,6 +17,17 @@ $ErrorActionPreference = 'Stop'
 
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
+function Ensure-ValidTemp {
+  $fallbackTemp = Join-Path $env:LOCALAPPDATA 'Temp'
+  if (-not (Test-Path $fallbackTemp)) {
+    New-Item -ItemType Directory -Force -Path $fallbackTemp | Out-Null
+  }
+  if (-not $env:TEMP -or -not (Test-Path $env:TEMP)) { $env:TEMP = $fallbackTemp }
+  if (-not $env:TMP -or -not (Test-Path $env:TMP)) { $env:TMP = $fallbackTemp }
+}
+
+Ensure-ValidTemp
+
 function New-RandomHex([int]$numBytes) {
   $bytes = New-Object byte[] $numBytes
   $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
