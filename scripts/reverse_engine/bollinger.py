@@ -59,17 +59,23 @@ def _compute_bands(
     length: int,
     k: float,
     mid_kind: Literal["identity", "sma", "ema", "rma"],
-    sd_method: Literal["rolling", "ewm"],
+    mid_adjust: bool,
+    sd_method: Literal["rolling", "rolling_dev", "ewm"],
+    sd_adjust: bool,
     ddof: int | None,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
-    mid = compute_ma(mid_source, kind=mid_kind, length=length)
+    mid = compute_ma(mid_source, kind=mid_kind, length=length, adjust=mid_adjust)
 
     if sd_method == "rolling":
         if ddof is None:
             ddof = 0
         sd = rolling_std(sd_source, length=length, ddof=ddof)
+    elif sd_method == "rolling_dev":
+        if ddof is None:
+            ddof = 0
+        sd = rolling_std(sd_source - mid, length=length, ddof=ddof)
     elif sd_method == "ewm":
-        sd = ewm_std_from_mid(sd_source, mid=mid, length=length)
+        sd = ewm_std_from_mid(sd_source, mid=mid, length=length, adjust=sd_adjust)
     else:
         raise ValueError(f"Unknown sd_method: {sd_method}")
 
@@ -96,7 +102,7 @@ def infer_bollinger(
         return BollingerInferenceResult(best_tag="(no match)", upper_stats=None, lower_stats=None, top=[])
 
     mid_kinds: list[Literal["identity", "sma", "ema", "rma"]] = ["identity", "sma", "ema", "rma"]
-    sd_methods: list[Literal["rolling", "ewm"]] = ["rolling", "ewm"]
+    sd_methods: list[Literal["rolling", "rolling_dev", "ewm"]] = ["rolling", "rolling_dev", "ewm"]
     ddofs: list[int | None] = [0, 1]
 
     k_start, k_end, k_step = k_range
@@ -107,38 +113,54 @@ def infer_bollinger(
     for mid_name, mid_source in sources.items():
         for sd_name, sd_source in sources.items():
             for mid_kind in mid_kinds:
+                mid_adjusts = [False, True] if mid_kind in ("ema", "rma") else [False]
                 for sd_method in sd_methods:
                     for L in lengths:
                         for k in ks:
-                            if sd_method == "rolling":
-                                for ddof in ddofs:
-                                    _mid, up, lo = _compute_bands(
-                                        mid_source=mid_source,
-                                        sd_source=sd_source,
-                                        length=L,
-                                        k=k,
-                                        mid_kind=mid_kind,
-                                        sd_method=sd_method,
-                                        ddof=ddof,
-                                    )
-                                    tag = f"mid={mid_name}:{mid_kind}{L},sd={sd_name},{sd_method}(ddof={ddof}),k={k:g}"
-                                    cs = _score_upper_lower(tag, up, lo, target_upper, target_lower)
-                                    if cs is not None:
-                                        scored.append(cs)
-                            else:
-                                _mid, up, lo = _compute_bands(
-                                    mid_source=mid_source,
-                                    sd_source=sd_source,
-                                    length=L,
-                                    k=k,
-                                    mid_kind=mid_kind,
-                                    sd_method=sd_method,
-                                    ddof=None,
-                                )
-                                tag = f"mid={mid_name}:{mid_kind}{L},sd={sd_name},{sd_method},k={k:g}"
-                                cs = _score_upper_lower(tag, up, lo, target_upper, target_lower)
-                                if cs is not None:
-                                    scored.append(cs)
+                            for mid_adjust in mid_adjusts:
+                                adj_tag = "T" if mid_adjust else "F"
+                                sd_adjusts = [False, True] if sd_method == "ewm" else [False]
+                                for sd_adjust in sd_adjusts:
+                                    sd_adj_tag = "T" if sd_adjust else "F"
+                                    if sd_method in ("rolling", "rolling_dev"):
+                                        for ddof in ddofs:
+                                            _mid, up, lo = _compute_bands(
+                                                mid_source=mid_source,
+                                                sd_source=sd_source,
+                                                length=L,
+                                                k=k,
+                                                mid_kind=mid_kind,
+                                                mid_adjust=mid_adjust,
+                                                sd_method=sd_method,
+                                                sd_adjust=sd_adjust,
+                                                ddof=ddof,
+                                            )
+                                            tag = (
+                                                f"mid={mid_name}:{mid_kind}{L}(adj={adj_tag}),"
+                                                f"sd={sd_name},{sd_method}(ddof={ddof}),k={k:g}"
+                                            )
+                                            cs = _score_upper_lower(tag, up, lo, target_upper, target_lower)
+                                            if cs is not None:
+                                                scored.append(cs)
+                                    else:
+                                        _mid, up, lo = _compute_bands(
+                                            mid_source=mid_source,
+                                            sd_source=sd_source,
+                                            length=L,
+                                            k=k,
+                                            mid_kind=mid_kind,
+                                            mid_adjust=mid_adjust,
+                                            sd_method=sd_method,
+                                            sd_adjust=sd_adjust,
+                                            ddof=None,
+                                        )
+                                        tag = (
+                                            f"mid={mid_name}:{mid_kind}{L}(adj={adj_tag}),"
+                                            f"sd={sd_name},{sd_method}(adj={sd_adj_tag}),k={k:g}"
+                                        )
+                                        cs = _score_upper_lower(tag, up, lo, target_upper, target_lower)
+                                        if cs is not None:
+                                            scored.append(cs)
 
     if not scored:
         return BollingerInferenceResult(best_tag="(no match)", upper_stats=None, lower_stats=None, top=[])
@@ -149,13 +171,21 @@ def infer_bollinger(
     # Fine search around top candidates.
     fine_scored: list[CandidateScore] = []
 
-    def _parse(tag: str) -> tuple[str, str, int, str, str, int | None, float]:
+    def _parse(tag: str) -> tuple[str, str, int, bool, str, str, bool, int | None, float]:
         left, k_part = tag.split(",k=")
         k_val = float(k_part)
 
         mid_part, sd_part = left.split(",sd=")
         mid_name_kind = mid_part.replace("mid=", "")
-        mid_name, kind_len = mid_name_kind.split(":")
+        mid_name, kind_len_adj = mid_name_kind.split(":")
+
+        if "(adj=" in kind_len_adj:
+            kind_len, adj_part = kind_len_adj.split("(adj=", 1)
+            adj_str = adj_part.split(")")[0]
+            mid_adjust = adj_str.strip().upper().startswith("T")
+        else:
+            kind_len = kind_len_adj
+            mid_adjust = False
 
         mid_kind = "sma"
         length = 20
@@ -165,20 +195,30 @@ def infer_bollinger(
                 length = int(kind_len[len(kind) :])
                 break
 
-        if ",rolling(" in sd_part:
+        sd_adjust = False
+        if ",rolling_dev(" in sd_part:
+            sd_name, rest = sd_part.split(",rolling_dev(")
+            sd_method = "rolling_dev"
+            ddof_str = rest.split("ddof=")[1].split(")")[0]
+            ddof = int(ddof_str)
+        elif ",rolling(" in sd_part:
             sd_name, rest = sd_part.split(",rolling(")
             sd_method = "rolling"
             ddof_str = rest.split("ddof=")[1].split(")")[0]
             ddof = int(ddof_str)
         else:
-            sd_name, _rest = sd_part.split(",ewm")
+            # ewm(adj=T|F)
+            sd_name, rest = sd_part.split(",ewm", 1)
             sd_method = "ewm"
             ddof = None
+            if "(adj=" in rest:
+                adj_str = rest.split("(adj=")[1].split(")")[0]
+                sd_adjust = adj_str.strip().upper().startswith("T")
 
-        return mid_name, mid_kind, length, sd_name, sd_method, ddof, k_val
+        return mid_name, mid_kind, length, mid_adjust, sd_name, sd_method, sd_adjust, ddof, k_val
 
     for cand in coarse_top[:5]:
-        mid_name, mid_kind, length, sd_name, sd_method, ddof, k_val = _parse(cand.tag)
+        mid_name, mid_kind, length, mid_adjust, sd_name, sd_method, sd_adjust, ddof, k_val = _parse(cand.tag)
         if mid_name not in sources or sd_name not in sources:
             continue
 
@@ -198,10 +238,31 @@ def infer_bollinger(
                             length=L,
                             k=k,
                             mid_kind=mid_kind,  # type: ignore[arg-type]
+                            mid_adjust=mid_adjust,
                             sd_method=sd_method,  # type: ignore[arg-type]
+                            sd_adjust=sd_adjust,
                             ddof=dd,
                         )
-                        tag = f"mid={mid_name}:{mid_kind}{L},sd={sd_name},{sd_method}(ddof={dd}),k={k:g}"
+                        adj_tag = "T" if mid_adjust else "F"
+                        tag = f"mid={mid_name}:{mid_kind}{L}(adj={adj_tag}),sd={sd_name},{sd_method}(ddof={dd}),k={k:g}"
+                        cs = _score_upper_lower(tag, up, lo, target_upper, target_lower)
+                        if cs is not None:
+                            fine_scored.append(cs)
+                elif sd_method == "rolling_dev":
+                    for dd in ([ddof] if ddof is not None else [0, 1]):
+                        _mid, up, lo = _compute_bands(
+                            mid_source=mid_source,
+                            sd_source=sd_source,
+                            length=L,
+                            k=k,
+                            mid_kind=mid_kind,  # type: ignore[arg-type]
+                            mid_adjust=mid_adjust,
+                            sd_method=sd_method,  # type: ignore[arg-type]
+                            sd_adjust=sd_adjust,
+                            ddof=dd,
+                        )
+                        adj_tag = "T" if mid_adjust else "F"
+                        tag = f"mid={mid_name}:{mid_kind}{L}(adj={adj_tag}),sd={sd_name},{sd_method}(ddof={dd}),k={k:g}"
                         cs = _score_upper_lower(tag, up, lo, target_upper, target_lower)
                         if cs is not None:
                             fine_scored.append(cs)
@@ -212,10 +273,14 @@ def infer_bollinger(
                         length=L,
                         k=k,
                         mid_kind=mid_kind,  # type: ignore[arg-type]
+                        mid_adjust=mid_adjust,
                         sd_method=sd_method,  # type: ignore[arg-type]
+                        sd_adjust=sd_adjust,
                         ddof=None,
                     )
-                    tag = f"mid={mid_name}:{mid_kind}{L},sd={sd_name},{sd_method},k={k:g}"
+                    adj_tag = "T" if mid_adjust else "F"
+                    sd_adj_tag = "T" if sd_adjust else "F"
+                    tag = f"mid={mid_name}:{mid_kind}{L}(adj={adj_tag}),sd={sd_name},{sd_method}(adj={sd_adj_tag}),k={k:g}"
                     cs = _score_upper_lower(tag, up, lo, target_upper, target_lower)
                     if cs is not None:
                         fine_scored.append(cs)

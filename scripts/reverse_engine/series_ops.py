@@ -20,16 +20,21 @@ def compute_rsi_wilder(close: pd.Series, length: int = 14) -> pd.Series:
     return rsi
 
 
-def compute_ma(series: pd.Series, kind: Literal["identity", "sma", "ema", "rma"], length: int) -> pd.Series:
+def compute_ma(
+    series: pd.Series,
+    kind: Literal["identity", "sma", "ema", "rma"],
+    length: int,
+    adjust: bool = False,
+) -> pd.Series:
     series = pd.to_numeric(series, errors="coerce")
     if kind == "identity":
         return series
     if kind == "sma":
         return series.rolling(length, min_periods=length).mean()
     if kind == "ema":
-        return series.ewm(span=length, adjust=False, min_periods=length).mean()
+        return series.ewm(span=length, adjust=adjust, min_periods=length).mean()
     if kind == "rma":
-        return series.ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
+        return series.ewm(alpha=1 / length, adjust=adjust, min_periods=length).mean()
     raise ValueError(f"Unknown MA kind: {kind}")
 
 
@@ -38,9 +43,9 @@ def rolling_std(series: pd.Series, length: int, ddof: int) -> pd.Series:
     return series.rolling(length, min_periods=length).std(ddof=ddof)
 
 
-def ewm_std_from_mid(series: pd.Series, mid: pd.Series, length: int) -> pd.Series:
+def ewm_std_from_mid(series: pd.Series, mid: pd.Series, length: int, adjust: bool = False) -> pd.Series:
     series = pd.to_numeric(series, errors="coerce")
     mid = pd.to_numeric(mid, errors="coerce")
     dev = (series - mid).astype(float)
-    var = (dev * dev).ewm(span=length, adjust=False, min_periods=length).mean()
+    var = (dev * dev).ewm(span=length, adjust=adjust, min_periods=length).mean()
     return np.sqrt(var)
