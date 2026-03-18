@@ -29,6 +29,7 @@ except Exception:  # pragma: no cover
     models = None
 
 import auth
+from pipeline_paths import get_pipeline_paths
 from settings import settings
 
 
@@ -1110,6 +1111,15 @@ def _autotrade_tick_loop() -> None:
 
 @app.on_event("startup")
 def _startup_kis_refresh() -> None:
+    # Ensure pipeline directories exist (data/artifacts/runs/logs/tmp) under PIPELINE_ROOT.
+    # This is idempotent and keeps path usage centralized.
+    try:
+        get_pipeline_paths().ensure_dirs()
+    except Exception as exc:
+        # Avoid crashing the whole API if the pipeline disk is unavailable.
+        # Call sites that write to these paths will still surface errors.
+        print(f"[pipeline] failed to ensure pipeline dirs under {settings.pipeline_root}: {exc}")
+
     # Ensure any newly added tables exist (dev-friendly; idempotent).
     try:
         if apollo_db is not None and models is not None:
