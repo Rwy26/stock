@@ -20,6 +20,21 @@ else:
         load_dotenv(root_env)
 
 
+def _default_pipeline_root() -> Path:
+    env = os.getenv("PIPELINE_ROOT", "").strip()
+    if env:
+        return Path(env)
+
+    # Windows-first default. Prefer D: (data) when present, else fall back to C:.
+    # This is intentionally simple: callers can override via PIPELINE_ROOT.
+    try:
+        if Path("D:/").exists():
+            return Path("D:/AI/pipeline")
+    except Exception:
+        pass
+    return Path("C:/AI/pipeline")
+
+
 @dataclass(frozen=True)
 class Settings:
     mysql_host: str = os.getenv("MYSQL_HOST", "127.0.0.1")
@@ -54,6 +69,10 @@ class Settings:
     # This MUST remain opt-in and restricted to loopback clients.
     allow_local_auto_login: bool = os.getenv("ALLOW_LOCAL_AUTO_LOGIN", "0").strip() in {"1", "true", "True", "YES", "yes"}
     local_auto_login_email: str = os.getenv("LOCAL_AUTO_LOGIN_EMAIL", "administrator").strip() or "administrator"
+
+    # Pipeline output root (datasets/artifacts/runs/logs/tmp).
+    # Override by setting PIPELINE_ROOT in backend/.env.
+    pipeline_root: Path = _default_pipeline_root()
 
     def database_url(self) -> str:
         if self.mysql_url:
