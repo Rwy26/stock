@@ -1,29 +1,29 @@
 [CmdletBinding()]
 param(
-  [string]$RepoPath = 'C:\stock',
-  [string]$TaskName = 'stock-bitlocker-watch',
-  [string]$DriveLetter = 'D'
+    [string]$RepoPath = 'C:\stock',
+    [string]$TaskName = 'stock-bitlocker-watch',
+    [string]$DriveLetter = 'D'
 )
 
 $ErrorActionPreference = 'Stop'
 
 if (-not (Test-Path $RepoPath)) {
-  throw "RepoPath not found: $RepoPath"
+    throw "RepoPath not found: $RepoPath"
 }
 
 $scriptPath = Join-Path $RepoPath 'scripts\bitlocker-watch.ps1'
 if (-not (Test-Path $scriptPath)) {
-  throw "Missing script: $scriptPath"
+    throw "Missing script: $scriptPath"
 }
 
 $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
 
 $argList = @(
-  '-NoProfile',
-  '-ExecutionPolicy', 'Bypass',
-  '-File', "`"$scriptPath`"",
-  '-RepoPath', "`"$RepoPath`"",
-  '-DriveLetter', $DriveLetter
+    '-NoProfile',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', "`"$scriptPath`"",
+    '-RepoPath', "`"$RepoPath`"",
+    '-DriveLetter', $DriveLetter
 )
 
 $action = New-ScheduledTaskAction -Execute $pwsh -Argument ($argList -join ' ') -WorkingDirectory $RepoPath
@@ -40,8 +40,9 @@ $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccou
 $task = New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings -Principal $principal
 
 try {
-  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-} catch { }
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+}
+catch { }
 
 Register-ScheduledTask -TaskName $TaskName -InputObject $task | Out-Null
 
