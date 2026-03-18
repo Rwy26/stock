@@ -2098,6 +2098,61 @@ def stock_detail(code: str, current_user=Depends(get_current_user)):
         db.close()
 
 
+@app.get("/api/stocks/{code}/daily")
+def stock_daily_prices(code: str, limit: int = 400, current_user=Depends(get_current_user)):
+    """DB-backed daily OHLCV for fast in-app charts.
+
+    This endpoint intentionally does NOT call KIS, so the UI can render charts
+    even when real-time quote/token is temporarily unavailable.
+    """
+
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    stock_code = (code or "").strip()
+    if not stock_code:
+        raise HTTPException(status_code=400, detail="code is required")
+
+    lim = int(limit or 0)
+    if lim <= 0:
+        lim = 400
+    lim = min(max(lim, 50), 2000)
+
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        rows = db.execute(
+            select(
+                models.DailyPrice.trading_date,
+                models.DailyPrice.open_price,
+                models.DailyPrice.high_price,
+                models.DailyPrice.low_price,
+                models.DailyPrice.close_price,
+                models.DailyPrice.volume,
+            )
+            .where(models.DailyPrice.stock_code == stock_code)
+            .order_by(desc(models.DailyPrice.trading_date))
+            .limit(lim)
+        ).all()
+
+        # Return ascending time order for chart libraries.
+        items: list[dict] = []
+        for trading_date, o, h, l, c, v in reversed(rows):
+            items.append(
+                {
+                    "time": (trading_date.isoformat() if trading_date else None),
+                    "open": float(o),
+                    "high": float(h),
+                    "low": float(l),
+                    "close": float(c),
+                    "volume": int(v or 0),
+                }
+            )
+
+        return {"code": stock_code, "items": items}
+    finally:
+        db.close()
+
+
 @app.get("/api/version")
 def get_version():
     return {"service": "apollo-backend"}

@@ -1,6 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJson } from '../lib/api'
 import { formatNumber, formatPercent } from '../lib/format'
+import type { IChartApi, ISeriesApi } from 'lightweight-charts'
+
+type LightweightChartsModule = typeof import('lightweight-charts')
 
 type WatchItem = {
   name: string
@@ -26,6 +29,15 @@ type SearchResponse = {
   items: StockRow[]
 }
 
+type DailyCandle = {
+  time: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+}
+
 export function WatchlistPage() {
   const [data, setData] = useState<WatchlistResponse | null>(null)
   const [busyCode, setBusyCode] = useState<string | null>(null)
@@ -34,6 +46,14 @@ export function WatchlistPage() {
   const [q, setQ] = useState('')
   const [searchRows, setSearchRows] = useState<StockRow[]>([])
   const [addBusyCode, setAddBusyCode] = useState<string | null>(null)
+
+  const chartHostRef = useRef<HTMLDivElement | null>(null)
+  const chartRef = useRef<IChartApi | null>(null)
+  const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const lwcRef = useRef<LightweightChartsModule | null>(null)
+
+  const [daily, setDaily] = useState<DailyCandle[]>([])
+  const [dailyBusy, setDailyBusy] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -95,6 +115,119 @@ export function WatchlistPage() {
     if (!selectedCode) return null
     return items.find((x) => x.code === selectedCode) ?? null
   }, [items, selectedCode])
+
+  useEffect(() => {
+    if (!selectedCode) {
+      setDaily([])
+      return
+    }
+
+    let cancelled = false
+    setDailyBusy(true)
+    fetchJson<{ code: string; items: DailyCandle[] }>(`/api/stocks/${encodeURIComponent(selectedCode)}/daily?limit=400`)
+      .then((res) => {
+        if (cancelled) return
+        setDaily(Array.isArray(res.items) ? res.items : [])
+      })
+      .catch(() => {
+        if (!cancelled) setDaily([])
+      })
+      .finally(() => {
+        if (!cancelled) setDailyBusy(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedCode])
+
+  useEffect(() => {
+    const host = chartHostRef.current
+    if (!host) return
+
+    // Initialize once.
+    if (chartRef.current) return
+
+    let cancelled = false
+    ;(async () => {
+      try {
+        if (!lwcRef.current) {
+          lwcRef.current = await import('lightweight-charts')
+        }
+        if (cancelled || chartRef.current || !lwcRef.current) return
+
+        const lwc = lwcRef.current
+        const chart = lwc.createChart(host, {
+          autoSize: true,
+          layout: {
+            background: { color: 'transparent' },
+            textColor: 'rgba(255, 255, 255, 0.82)',
+          },
+          grid: {
+            vertLines: { color: 'rgba(255, 255, 255, 0.08)' },
+            horzLines: { color: 'rgba(255, 255, 255, 0.08)' },
+          },
+          timeScale: {
+            borderColor: 'rgba(255, 255, 255, 0.18)',
+          },
+          rightPriceScale: {
+            borderColor: 'rgba(255, 255, 255, 0.18)' },
+          crosshair: {
+            vertLine: { color: 'rgba(255, 255, 255, 0.22)' },
+            horzLine: { color: 'rgba(255, 255, 255, 0.22)' },
+          },
+        })
+
+        const candles = chart.addSeries(lwc.CandlestickSeries, {
+          upColor: 'rgba(52, 211, 153, 0.95)',
+          downColor: 'rgba(251, 113, 133, 0.95)',
+          borderUpColor: 'rgba(52, 211, 153, 0.95)',
+          borderDownColor: 'rgba(251, 113, 133, 0.95)',
+          wickUpColor: 'rgba(52, 211, 153, 0.95)',
+          wickDownColor: 'rgba(251, 113, 133, 0.95)',
+        })
+
+        chartRef.current = chart
+        candleSeriesRef.current = candles
+      } catch {
+        // Keep UX minimal: chart area will show overlay messaging.
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+
+    return () => {
+      // Keep the chart instance for the lifetime of the page.
+    }
+  }, [])
+
+  useEffect(() => {
+    const series = candleSeriesRef.current
+    const chart = chartRef.current
+    if (!series || !chart) return
+
+    if (!daily || daily.length === 0) {
+      series.setData([])
+      return
+    }
+
+    // lightweight-charts accepts ISO date strings for daily candles.
+    series.setData(
+      daily
+        .filter((x) => x && x.time)
+        .map((x) => ({
+          time: x.time,
+          open: x.open,
+          high: x.high,
+          low: x.low,
+          close: x.close,
+        }))
+    )
+
+    chart.timeScale().fitContent()
+  }, [daily])
 
   return (
     <>
@@ -240,7 +373,7 @@ export function WatchlistPage() {
         <article className="panel glass reveal">
           <div className="panel-head">
             <h3>차트</h3>
-            <p className="subtle">이 화면에서는 요약만 표시합니다</p>
+            <p className="subtle">일봉 캔들 (DB 기반)</p>
           </div>
 
           <ul className="engine-list">
@@ -266,9 +399,11 @@ export function WatchlistPage() {
 
           <div className="divider"></div>
 
-          <div className="chart-placeholder watchlist-chart-placeholder">
-            Chart Placeholder
-            <div className="subtle">종목명을 클릭하면 TradingView 차트가 새 창으로 열립니다.</div>
+          <div className="watchlist-chart-shell">
+            <div ref={chartHostRef} className="watchlist-chart-canvas" />
+            {dailyBusy && <div className="watchlist-chart-overlay">불러오는 중…</div>}
+            {!dailyBusy && selectedCode && daily.length === 0 && <div className="watchlist-chart-overlay">차트 데이터 없음</div>}
+            {!selectedCode && <div className="watchlist-chart-overlay">종목을 선택하세요</div>}
           </div>
 
           {selectedItem && (
