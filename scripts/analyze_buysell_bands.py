@@ -28,6 +28,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from reverse_engine.buysell_bands import compute_buysell_bands, fit_ema_prev_from_bands
+
 
 @dataclass(frozen=True)
 class Stats:
@@ -139,6 +141,23 @@ def main() -> int:
     mid_obs = 0.5 * (up + lo)
     sd_obs = 0.5 * (up - lo)
 
+    fit = fit_ema_prev_from_bands(s, up, lo, length=args.span)
+    if fit is None:
+        ema_prev, ema_t0 = None, None
+    else:
+        ema_prev, ema_t0 = fit
+        ema_prev = float(ema_prev)
+        ema_t0 = int(ema_t0)
+
+    fixed = compute_buysell_bands(
+        s,
+        length=args.span,
+        k=1.0,
+        ddof=args.ddof,
+        ema_prev=ema_prev,
+        ema_start=ema_t0,
+    )
+
     # Candidate computations from exported signal.
     mid_s_adjT = s.ewm(span=args.span, adjust=True, min_periods=args.span).mean()
     mid_s_adjF = s.ewm(span=args.span, adjust=False, min_periods=args.span).mean()
@@ -191,6 +210,20 @@ def main() -> int:
     lines.append(f"- sd_obs vs rolling std of (signal-mid_adjT): {_fmt(_stats(sd_obs, sd_s_roll_dev))}")
     lines.append(f"- sd_obs vs ewm std of dev (adjust=False): {_fmt(_stats(sd_obs, sd_s_ewm_dev_adjF))}")
     lines.append(f"- sd_obs vs ewm std of dev (adjust=True):  {_fmt(_stats(sd_obs, sd_s_ewm_dev_adjT))}")
+    lines.append("")
+
+    lines.append("## Step 2b: Fixed BuySell definition (stateful EMA + rolling std)")
+    lines.append("")
+    lines.append("- mid = EMA(signal, span, adjust=False) with carried state")
+    lines.append("- sd  = rolling std(signal, span, ddof)")
+    lines.append("- bands = mid ± sd (k=1)")
+    lines.append("")
+    if fit is None:
+        lines.append("- EMA state fit: (not available; insufficient finite overlap)")
+    else:
+        lines.append(f"- EMA state fit: ema_prev={ema_prev:.12g}, ema_start(t0)={ema_t0}")
+    lines.append(f"- Upper vs fixed bands: {_fmt(_stats(up, fixed.upper))}")
+    lines.append(f"- Lower vs fixed bands: {_fmt(_stats(lo, fixed.lower))}")
     lines.append("")
 
     lines.append("## Step 3: Reconstruct latent signal s_hat from mid_obs (EMA adjust=True inversion)")
