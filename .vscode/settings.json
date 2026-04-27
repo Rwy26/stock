@@ -2,6 +2,10 @@
     "python.defaultInterpreterPath": "${workspaceFolder}\\backend\\.venv\\Scripts\\python.exe",
     "python.analysis.typeCheckingMode": "basic",
     "python.terminal.activateEnvironment": true,
+    "powershell.powerShellAdditionalExePaths": {
+        "PowerShell 7 (Workspace)": "C:/Program Files/PowerShell/7/pwsh.exe"
+    },
+    "powershell.powerShellDefaultVersion": "PowerShell 7 (Workspace)",
     "editor.formatOnSave": true,
     "[python]": {
         "editor.defaultFormatter": "ms-python.black-formatter"
