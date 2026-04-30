@@ -13,7 +13,10 @@ import { ProfileSetupPage } from './pages/ProfileSetupPage'
 import { RecommendationsPage } from './pages/RecommendationsPage'
 import { StockSearchPage } from './pages/StockSearchPage'
 import { SvAgentPage } from './pages/SvAgentPage'
+
 import { WatchlistPage } from './pages/WatchlistPage'
+import { BolinzerPage } from './pages/BolinzerPage'
+import { InvestmentRulesPage } from './pages/InvestmentRulesPage'
 
 export default function App() {
   return (
@@ -40,6 +43,8 @@ export default function App() {
           <Route path="auto-plus" element={<AutoPlusPage />} />
           <Route path="sv-agent" element={<SvAgentPage />} />
           <Route path="admin" element={<AdminPage />} />
+          <Route path="bolinzer" element={<BolinzerPage />} />
+          <Route path="investment-rules" element={<InvestmentRulesPage />} />
         </Route>
 
         <Route path="login" element={<LoginPage />} />
