@@ -6,6 +6,10 @@
         "PowerShell 7 (Workspace)": "C:/Program Files/PowerShell/7/pwsh.exe"
     },
     "powershell.powerShellDefaultVersion": "PowerShell 7 (Workspace)",
+    "powershell.startAutomatically": true,
+    "powershell.enableProfileLoading": false,
+    "powershell.integratedConsole.showOnStartup": false,
+    "powershell.integratedConsole.startInBackground": true,
     "editor.formatOnSave": true,
     "[python]": {
         "editor.defaultFormatter": "ms-python.black-formatter"
