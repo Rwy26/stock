@@ -74,6 +74,10 @@ class Settings:
     # Override by setting PIPELINE_ROOT in backend/.env.
     pipeline_root: Path = _default_pipeline_root()
 
+    # OpenAI (AI chart analysis)
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
+    openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+
     def database_url(self) -> str:
         if self.mysql_url:
             return self.mysql_url

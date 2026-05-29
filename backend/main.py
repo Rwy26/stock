@@ -3005,6 +3005,129 @@ def upsert_profile(payload: dict = Body(...), current_user=Depends(get_current_u
 DIST_DIR = REPO_ROOT / "frontend" / "dist"
 
 
+# ---------------------------------------------------------------------------
+# AI Chart Analysis
+# ---------------------------------------------------------------------------
+
+try:
+    import chart_analysis as _chart_analysis
+except Exception:  # pragma: no cover
+    _chart_analysis = None  # type: ignore[assignment]
+
+
+from fastapi import UploadFile, File as FastAPIFile
+from pydantic import BaseModel as _BaseModel, Field as _Field
+from typing import Optional as _Optional, List as _List
+
+
+class ChartAnalysisRequest(_BaseModel):
+    symbol: str = _Field(..., description="종목코드 (예: '005930', '005930.KS', 'AAPL')")
+    period: str = _Field("6mo", description="조회 기간: 1mo/3mo/6mo/1y/2y/5y")
+    interval: str = _Field("1d", description="봉 단위: 1d/1wk/1mo")
+    ohlcv_records: _Optional[_List[dict]] = _Field(None, description="직접 OHLCV 데이터 제공 (JSON array)")
+
+
+class ChartAnalysisCSVRequest(_BaseModel):
+    symbol: str = _Field(..., description="종목코드 또는 종목명 (식별용)")
+
+
+@app.post("/api/ai/chart-analysis")
+async def ai_chart_analysis(
+    req: ChartAnalysisRequest,
+    _current_user=Depends(get_current_user),
+):
+    """AI 차트 분석 (yfinance 데이터 또는 직접 제공 OHLCV).
+
+    - symbol만 지정하면 Yahoo Finance에서 데이터 자동 수집
+    - ohlcv_records를 제공하면 해당 데이터로 분석
+    """
+    if _chart_analysis is None:
+        raise HTTPException(status_code=503, detail="chart_analysis module not available")
+
+    api_key = settings.openai_api_key
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="OPENAI_API_KEY is not configured. Set it in backend/.env",
+        )
+
+    try:
+        result = _chart_analysis.analyze_chart(
+            symbol=req.symbol.strip(),
+            openai_api_key=api_key,
+            openai_model=settings.openai_model,
+            yfinance_period=req.period if req.ohlcv_records is None else None,
+            yfinance_interval=req.interval,
+            ohlcv_records=req.ohlcv_records,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"분석 중 오류 발생: {exc}") from exc
+
+    return result
+
+
+@app.post("/api/ai/chart-analysis/upload")
+async def ai_chart_analysis_upload(
+    symbol: str,
+    file: UploadFile = FastAPIFile(..., description="TradingView CSV 파일"),
+    _current_user=Depends(get_current_user),
+):
+    """TradingView에서 내보낸 CSV 파일을 업로드하여 AI 분석.
+
+    TradingView 차트 → 내보내기 → CSV 다운로드 후 이 엔드포인트에 업로드하세요.
+    CSV 형식: time,open,high,low,close[,volume]
+    """
+    if _chart_analysis is None:
+        raise HTTPException(status_code=503, detail="chart_analysis module not available")
+
+    api_key = settings.openai_api_key
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="OPENAI_API_KEY is not configured. Set it in backend/.env",
+        )
+
+    content_type = (file.content_type or "").lower()
+    if file.filename and not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="CSV 파일만 업로드 가능합니다")
+
+    MAX_SIZE = 5 * 1024 * 1024  # 5 MB
+    raw = await file.read(MAX_SIZE + 1)
+    if len(raw) > MAX_SIZE:
+        raise HTTPException(status_code=413, detail="파일 크기가 5MB를 초과합니다")
+
+    try:
+        result = _chart_analysis.analyze_chart(
+            symbol=symbol.strip(),
+            openai_api_key=api_key,
+            openai_model=settings.openai_model,
+            csv_content=raw,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"분석 중 오류 발생: {exc}") from exc
+
+    return result
+
+
+@app.get("/api/ai/chart-analysis/status")
+def ai_chart_analysis_status(_current_user=Depends(get_current_user)):
+    """AI 차트 분석 기능 사용 가능 여부 확인."""
+    return {
+        "available": _chart_analysis is not None and bool(settings.openai_api_key),
+        "openai_configured": bool(settings.openai_api_key),
+        "openai_model": settings.openai_model,
+        "module_loaded": _chart_analysis is not None,
+    }
+
+
 @app.get("/{full_path:path}")
 def serve_frontend(full_path: str):
     # If frontend is not built, don't pretend it exists.
