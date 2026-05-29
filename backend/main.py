@@ -3128,6 +3128,78 @@ def ai_chart_analysis_status(_current_user=Depends(get_current_user)):
     }
 
 
+@app.post("/api/ai/chart-analysis/image")
+async def ai_chart_analysis_image(
+    symbol: str,
+    files: list[UploadFile] = FastAPIFile(..., description="TradingView 차트 스크린샷 (PNG/JPG, 최대 6개)"),
+    extra_context: str | None = None,
+    _current_user=Depends(get_current_user),
+):
+    """TradingView 차트 스크린샷을 업로드하여 AI 종합 분석.
+
+    - 여러 타임프레임(일봉·4H·1H 등) 이미지를 동시에 업로드 가능 (최대 6개)
+    - GPT-4o Vision으로 차트를 직접 보고 분석
+    - 기업 분석 / 기술적 분석 / 상승 이유 / 목표가 / 수급·손절가 포함
+
+    사용법:
+      1. TradingView 차트에서 스크린샷 (카메라 아이콘 또는 Alt+S)
+      2. 여러 타임프레임 이미지를 함께 업로드
+    """
+    if _chart_analysis is None:
+        raise HTTPException(status_code=503, detail="chart_analysis module not available")
+
+    api_key = settings.openai_api_key
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="OPENAI_API_KEY is not configured. Set it in backend/.env",
+        )
+
+    if not files:
+        raise HTTPException(status_code=400, detail="최소 1개 이상의 이미지를 업로드하세요")
+    if len(files) > 6:
+        raise HTTPException(status_code=400, detail="이미지는 최대 6개까지 업로드 가능합니다")
+
+    ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB per image
+
+    image_files: list[tuple[str, bytes]] = []
+    for upload in files:
+        fname = (upload.filename or "chart.png").lower()
+        ext = "." + fname.rsplit(".", 1)[-1] if "." in fname else ""
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"지원하지 않는 파일 형식: {ext}. PNG, JPG, WEBP만 가능합니다",
+            )
+        raw = await upload.read(MAX_IMAGE_SIZE + 1)
+        if len(raw) > MAX_IMAGE_SIZE:
+            raise HTTPException(status_code=413, detail=f"{upload.filename}: 파일 크기가 10MB를 초과합니다")
+        image_files.append((upload.filename or "chart.png", raw))
+
+    # Use gpt-4o for vision (better than gpt-4o-mini for chart reading)
+    vision_model = settings.openai_model
+    if vision_model == "gpt-4o-mini":
+        vision_model = "gpt-4o"
+
+    try:
+        result = _chart_analysis.analyze_chart_images(
+            symbol=symbol.strip(),
+            image_files=image_files,
+            openai_api_key=api_key,
+            openai_model=vision_model,
+            extra_context=extra_context,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"이미지 분석 중 오류 발생: {exc}") from exc
+
+    return result
+
+
 @app.get("/{full_path:path}")
 def serve_frontend(full_path: str):
     # If frontend is not built, don't pretend it exists.

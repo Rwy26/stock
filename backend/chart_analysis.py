@@ -385,3 +385,218 @@ def analyze_chart(
         "ai_result": ai_result,
         "analyzed_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Image-based analysis (TradingView screenshot → OpenAI Vision)
+# ---------------------------------------------------------------------------
+
+_VISION_SYSTEM_PROMPT = """\
+당신은 전문 주식/자산 트레이딩 분석 AI입니다.
+첨부된 TradingView 차트 스크린샷(일봉/4시간봉/1시간봉 등 여러 타임프레임)을 보고
+아래 5가지 항목을 반드시 포함하는 종합 분석을 한국어로 수행합니다.
+
+── 분석 항목 ──────────────────────────────────────
+1. 기업·종목 기본 분석
+   - 차트에 표시된 종목명·코드·거래소 확인
+   - 사업 특성 및 현재 가격 수준 평가
+
+2. 기술적 분석 (Technical Analysis)
+   - 현재 추세 (상승/하락/횡보) 및 강도
+   - 이동평균선 배열 (정배열/역배열/수렴)
+   - RSI·MACD·볼린저밴드·기타 보조지표 해석
+   - 주요 캔들 패턴 (장대양봉·십자성·이브닝스타 등)
+   - 지지/저항 구간 (정확한 가격대)
+
+3. 상승 이유 분석 (섹터·업계·뉴스)
+   - 차트의 급등 구간·거래량 폭발 이유 추론
+   - 관련 섹터·산업 트렌드 (AI, 반도체, 전장, 2차전지 등)
+   - 예상되는 촉매(뉴스/이슈/실적)
+
+4. 목표가 추론
+   - 피보나치 확장/되돌림 기반 목표가
+   - 기술적 패턴 완성 목표가
+   - 1차 / 2차 / 3차 목표가 (가격 명시)
+
+5. 수급 분석 및 손절가
+   - Volume Profile·거래량 분포로 핵심 매물대 파악
+   - 손절 기준가 (스윙/단기 구분)
+   - 리스크/리워드 비율
+
+── 응답 형식 ──────────────────────────────────────
+반드시 아래 JSON만 반환하세요 (설명 텍스트 없음):
+{
+  "symbol": "종목명 (차트에서 읽은 값)",
+  "timeframes": ["확인된 타임프레임 목록"],
+  "current_price": "현재가 (차트에서 읽은 값)",
+  "signal": "매수" | "매도" | "관망",
+  "confidence": 0~100,
+  "trend": "강한상승" | "상승" | "횡보" | "하락" | "강한하락",
+  "summary": "3~5문장 핵심 요약",
+  "company_analysis": {
+    "sector": "섹터/산업군",
+    "key_products": "핵심 제품/사업",
+    "current_position": "현재 차트상 포지션 평가"
+  },
+  "technical": {
+    "trend_detail": "추세 상세",
+    "ma_alignment": "이동평균선 배열 상태",
+    "support_zones": ["지지구간1", "지지구간2"],
+    "resistance_zones": ["저항구간1", "저항구간2"],
+    "rsi": "RSI 해석",
+    "macd": "MACD 해석",
+    "bollinger": "볼린저밴드 해석",
+    "volume": "거래량 분석",
+    "patterns": "주요 캔들/차트 패턴"
+  },
+  "rise_reason": {
+    "catalyst": "상승 촉매 추론",
+    "sector_trend": "섹터 트렌드",
+    "news_factors": ["예상 뉴스/이슈 1", "예상 뉴스/이슈 2"]
+  },
+  "targets": {
+    "target_1": "1차 목표가",
+    "target_2": "2차 목표가",
+    "target_3": "3차 목표가",
+    "basis": "목표가 산출 근거"
+  },
+  "supply_demand": {
+    "key_volume_zone": "핵심 거래량 집중 구간",
+    "stop_loss_swing": "스윙 손절가",
+    "stop_loss_short": "단기 손절가",
+    "risk_reward": "리스크/리워드 비율",
+    "entry_zone": "진입 추천 구간"
+  },
+  "risks": ["리스크1", "리스크2", "리스크3"],
+  "outlook": {
+    "short_term": "단기(1~5일) 전망",
+    "mid_term": "중기(1~4주) 전망"
+  }
+}
+"""
+
+
+def _image_bytes_to_data_url(image_bytes: bytes, filename: str = "") -> str:
+    """Convert image bytes to a base64 data URL for OpenAI Vision API."""
+    ext = ""
+    if filename:
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+    mime_map = {
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "png": "image/png",
+        "gif": "image/gif",
+        "webp": "image/webp",
+    }
+    mime = mime_map.get(ext, "image/png")
+
+    # Auto-detect from magic bytes if no extension hint
+    if not ext:
+        if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+            mime = "image/png"
+        elif image_bytes[:2] in (b"\xff\xd8", b"\xff\xe0", b"\xff\xe1"):
+            mime = "image/jpeg"
+        elif image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+            mime = "image/webp"
+
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
+def analyze_chart_images(
+    *,
+    symbol: str,
+    image_files: list[tuple[str, bytes]],   # [(filename, bytes), ...]
+    openai_api_key: str,
+    openai_model: str = "gpt-4o",
+    extra_context: str | None = None,
+    timeout_seconds: float = 90.0,
+) -> dict[str, Any]:
+    """Analyze TradingView chart screenshots using OpenAI Vision.
+
+    Args:
+        symbol: 종목명 or 코드 (식별용, AI가 차트에서 직접 읽기도 함)
+        image_files: list of (filename, bytes) tuples – 여러 타임프레임 가능
+        openai_api_key: OpenAI API key
+        openai_model: 'gpt-4o' recommended for vision (gpt-4o-mini also works)
+        extra_context: 추가 컨텍스트 (예: 현재가, 보유여부 등)
+        timeout_seconds: HTTP 타임아웃
+
+    Returns:
+        dict with keys: symbol, ai_result, analyzed_at, images_count
+    """
+    if not openai_api_key:
+        raise ValueError("OPENAI_API_KEY is not configured")
+    if not image_files:
+        raise ValueError("최소 1개 이상의 차트 이미지가 필요합니다")
+    if len(image_files) > 6:
+        raise ValueError("이미지는 최대 6개까지 업로드 가능합니다")
+
+    # Build content list: text + images
+    content: list[dict[str, Any]] = []
+
+    timeframe_labels = ["일봉", "4시간봉", "1시간봉", "15분봉", "5분봉", "주봉"]
+    intro_text = f"종목: {symbol}\n첨부된 {len(image_files)}개의 TradingView 차트를 분석해주세요."
+    if extra_context:
+        intro_text += f"\n추가 정보: {extra_context}"
+    intro_text += "\n지정된 JSON 형식으로만 응답하세요."
+
+    content.append({"type": "text", "text": intro_text})
+
+    for idx, (filename, img_bytes) in enumerate(image_files):
+        label = timeframe_labels[idx] if idx < len(timeframe_labels) else f"차트{idx+1}"
+        data_url = _image_bytes_to_data_url(img_bytes, filename)
+        content.append({"type": "text", "text": f"[{label} 차트]"})
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": data_url, "detail": "high"},
+        })
+
+    payload = {
+        "model": openai_model,
+        "messages": [
+            {"role": "system", "content": _VISION_SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 4096,
+        "response_format": {"type": "json_object"},
+    }
+
+    headers = {
+        "Authorization": f"Bearer {openai_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        resp = httpx.post(
+            "https://api.openai.com/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=timeout_seconds,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"OpenAI Vision API request failed: {exc}") from exc
+
+    if resp.status_code >= 400:
+        try:
+            err_body = resp.json()
+        except Exception:
+            err_body = resp.text
+        raise RuntimeError(f"OpenAI Vision API error {resp.status_code}: {err_body}")
+
+    data = resp.json()
+    raw_content = data["choices"][0]["message"]["content"]
+
+    try:
+        ai_result = json.loads(raw_content)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Failed to parse OpenAI response as JSON: {exc}\nRaw: {raw_content[:500]}") from exc
+
+    return {
+        "symbol": symbol,
+        "images_count": len(image_files),
+        "ai_result": ai_result,
+        "analyzed_at": datetime.now(timezone.utc).isoformat(),
+    }
