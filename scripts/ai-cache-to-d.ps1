@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [string]$Base = 'D:\AI',
+  [string]$Base = 'C:\AI',
   [switch]$SkipMigrate
 )
 
@@ -73,7 +73,7 @@ function Copy-Then-Backup([string]$src, [string]$dst) {
   }
 }
 
-Log "==== AI cache to D: ===="
+Log "==== AI cache setup ===="
 Log "Base: $Base"
 
 # 1) Create folder structure

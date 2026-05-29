@@ -53,5 +53,5 @@ else {
 Set-Content -Path $profilePath -Value $content -Encoding utf8
 
 Write-Host "Updated profile: $profilePath"
-Write-Host 'New PowerShell sessions will inherit User-scoped D:\AI cache env vars automatically.'
+Write-Host 'New PowerShell sessions will inherit the User-scoped AI cache env vars automatically.'
 Write-Host 'Note: sessions started with -NoProfile will not run the profile.'

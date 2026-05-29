@@ -1,13 +1,12 @@
 [CmdletBinding()]
 param(
-  # Desired pipeline root. If omitted, prefers D:\AI\pipeline when available, otherwise C:\AI\pipeline.
+  # Desired pipeline root. If omitted, defaults to C:\AI\pipeline.
   [string]$PipelineRoot = ''
 )
 
 $ErrorActionPreference = 'Stop'
 
 function Resolve-DefaultPipelineRoot {
-  if (Test-Path 'D:\') { return 'D:\AI\pipeline' }
   return 'C:\AI\pipeline'
 }
 

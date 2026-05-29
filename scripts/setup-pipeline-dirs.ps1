@@ -1,17 +1,13 @@
 [CmdletBinding()]
 param(
   # Base directory to create the pipeline folder structure under.
-  # If omitted, prefers D:\AI\pipeline when available, otherwise C:\AI\pipeline.
+  # If omitted, defaults to C:\AI\pipeline.
   [string]$BasePath = ''
 )
 
 $ErrorActionPreference = 'Stop'
 
 function Resolve-DefaultBasePath {
-  $dPreferred = 'D:\AI\pipeline'
-  if (Test-Path 'D:\') {
-    return $dPreferred
-  }
   return 'C:\AI\pipeline'
 }
 
