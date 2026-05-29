@@ -17,6 +17,7 @@ import { SvAgentPage } from './pages/SvAgentPage'
 import { WatchlistPage } from './pages/WatchlistPage'
 import { BolinzerPage } from './pages/BolinzerPage'
 import { InvestmentRulesPage } from './pages/InvestmentRulesPage'
+import { AiChartPage } from './pages/AiChartPage'
 
 export default function App() {
   return (
@@ -45,6 +46,7 @@ export default function App() {
           <Route path="admin" element={<AdminPage />} />
           <Route path="bolinzer" element={<BolinzerPage />} />
           <Route path="investment-rules" element={<InvestmentRulesPage />} />
+          <Route path="ai-chart" element={<AiChartPage />} />
         </Route>
 
         <Route path="login" element={<LoginPage />} />

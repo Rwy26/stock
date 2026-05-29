@@ -14,6 +14,7 @@ const menuItems = [
   { to: '/auto-sa', slug: 'auto-sa', label: 'SA 자동매매' },
   { to: '/auto-plus', slug: 'auto-plus', label: 'Plus 자동매매' },
   { to: '/sv-agent', slug: 'sv-agent', label: 'SV Agent' },
+  { to: '/ai-chart', slug: 'ai-chart', label: '🤖 AI 차트 분석' },
   { to: '/admin', slug: 'admin', label: '관리자' },
 ] as const
 
