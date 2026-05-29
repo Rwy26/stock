@@ -6,15 +6,18 @@ Supports three data sources:
   1. yfinance  - fetch OHLCV by ticker symbol (KRX: '005930.KS', KOSDAQ: '035720.KQ', US: 'AAPL')
   2. CSV upload - TradingView-exported CSV (columns: time, open, high, low, close[, volume])
   3. raw JSON   - dict list with keys: time/date, open, high, low, close[, volume]
+  4. images    - TradingView chart screenshot(s) analyzed via OpenAI Vision
 
-Flow:
-  load_ohlcv() → compute_indicators() → build_prompt() → openai_analyze() → result dict
+Flow (image):
+  image bytes → base64 encode → build_vision_prompt() → openai_vision_analyze() → result dict
 """
 
 from __future__ import annotations
 
+import base64
 import io
 import json
+import mimetypes
 from datetime import datetime, timezone
 from typing import Any
 
