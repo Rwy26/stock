@@ -64,8 +64,8 @@ export function AppShell() {
   return (
     <div className="app-shell" data-page={page}>
       <aside className="sidebar glass">
-        <h1 className="brand">APOLLO</h1>
-        <p className="brand-sub">Jeminai UI for SongStock2</p>
+        <h1 className="brand">MOON STOCK</h1>
+        <p className="brand-sub">AI 주식 분석 시스템</p>
 
         <nav className="menu-list">
           {menuItems.map((item) => (

@@ -103,7 +103,7 @@ export function DashboardPage() {
       <header className="topbar glass">
         <div>
           <p className="top-label">Production v1.0+</p>
-          <h2>Apollo Stock Trading System</h2>
+          <h2>MOON STOCK AI 주식 분석 시스템</h2>
         </div>
         <div style={{ display: 'grid', justifyItems: 'end', gap: 6 }}>
           <div className="status-pill">{kisLabel}</div>

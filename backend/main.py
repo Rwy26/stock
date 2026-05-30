@@ -98,7 +98,7 @@ def get_current_user_for_refresh(credentials=Depends(bearer_scheme)):
     finally:
         db.close()
 
-app = FastAPI(title="Apollo Stock Trading System")
+app = FastAPI(title="MOON STOCK")
 
 
 _kis_refresh_stop = threading.Event()

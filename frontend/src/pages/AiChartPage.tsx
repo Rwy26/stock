@@ -283,7 +283,7 @@ function buildReportHtml(data: AnalysisResponse, images: string[]): string {
     ${r.data_needed ? `<div class="full"><div class="section"><div class="sec-title">ℹ️ 추가 정보 요청</div><div style="padding:8px 12px;font-size:0.8rem;color:#92400e">📌 ${r.data_needed}</div></div></div>` : ''}
   </div>
 
-  <div class="footer">⚠️ 본 보고서는 AI가 생성한 참고 자료입니다. 투자 결정의 책임은 본인에게 있습니다. · Apollo Stock System</div>
+  <div class="footer">⚠️ 본 보고서는 AI가 생성한 참고 자료입니다. 투자 결정의 책임은 본인에게 있습니다. · MOON STOCK</div>
 </div>
 <script>
   // Auto open print dialog when loaded with ?print=1

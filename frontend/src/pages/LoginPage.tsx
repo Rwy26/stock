@@ -57,8 +57,8 @@ export function LoginPage() {
   return (
     <main className="auth-shell">
       <section className="auth-card glass reveal">
-        <h1 className="auth-title">APOLLO</h1>
-        <p className="subtle">Apollo Stock Trading System (SongStock2)</p>
+        <h1 className="auth-title">MOON STOCK</h1>
+        <p className="subtle">AI 주식 분석 시스템</p>
         <div className="divider"></div>
         <div className="settings-grid" style={{ gridTemplateColumns: '1fr' }}>
           <label>
@@ -105,7 +105,7 @@ export function LoginPage() {
           </button>
         </div>
         <p className="hint" style={{ marginTop: 12 }}>
-          기본 계정: administrator / !Sunset22
+          기본 계정: administrator / ChangeMe!
         </p>
       </section>
     </main>
