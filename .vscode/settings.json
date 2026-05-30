@@ -10,7 +10,6 @@
     "powershell.enableProfileLoading": false,
     "powershell.integratedConsole.showOnStartup": false,
     "powershell.integratedConsole.startInBackground": true,
-    "powershell.promptToUpdatePowerShell": false,
     "editor.formatOnSave": true,
     "[python]": {
         "editor.defaultFormatter": "ms-python.black-formatter"

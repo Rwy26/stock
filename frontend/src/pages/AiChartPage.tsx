@@ -192,7 +192,7 @@ function buildReportHtml(data: AnalysisResponse, images: string[]): string {
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>${data.symbol} AI 분析 보고서 ${date.slice(0, 10)}</title>
+<title>${data.symbol} AI 분석 보고서 ${date.slice(0, 10)}</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', -apple-system, sans-serif; font-size: 13px; background: #f8fafc; color: #1e293b; padding: 24px; line-height: 1.55; }
@@ -253,7 +253,7 @@ function buildReportHtml(data: AnalysisResponse, images: string[]): string {
   <div class="header">
     <div class="h-left">
       <h1>${data.symbol} <span style="font-weight:400;font-size:1rem;color:#94a3b8">${r.company_analysis?.sector ?? ''}</span></h1>
-      <div class="sub">AI 차트 분析 보고서 · ${date}${data.images_count ? ` · ${data.images_count}개 이미지 분析` : ''}</div>
+      <div class="sub">AI 차트 분석 보고서 · ${date}${data.images_count ? ` · ${data.images_count}개 이미지 분석` : ''}</div>
     </div>
     <div class="h-right">
       <div class="signal-pill">${signal}</div>
@@ -552,7 +552,7 @@ export function AiChartPage() {
     const a = document.createElement('a')
     a.href = url
     const dateStr = new Date(result.analyzed_at).toISOString().slice(0, 10)
-    a.download = `${result.symbol}_AI분析_${dateStr}.html`
+    a.download = `${result.symbol}_AI분석_${dateStr}.html`
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -689,8 +689,8 @@ export function AiChartPage() {
       <header className="topbar glass">
         <div>
           <p className="top-label">AI CHART ANALYSIS</p>
-          <h2>AI 차트 분析</h2>
-          <p className="subtle">차트 이미지 · CSV를 드롭하거나 종목코드로 즉시 AI 분析</p>
+          <h2>AI 차트 분석</h2>
+          <p className="subtle">차트 이미지 · CSV를 드롭하거나 종목코드로 즉시 AI 분석</p>
         </div>
         <button type="button" className="ai-key-settings-btn" onClick={() => { setShowKeyPanel(v => !v); setKeyStatus('idle'); setKeyMsg('') }}
           title="AI API 키 설정">
@@ -718,7 +718,7 @@ export function AiChartPage() {
             ))}
           </ul>
           {diagSteps.length > 0 && diagSteps.every(s => s.ok) && (
-            <p className="ai-diag-ok-msg">✅ 모든 단계 정상 — AI 분析을 바로 사용하세요</p>
+            <p className="ai-diag-ok-msg">✅ 모든 단계 정상 — AI 분석을 바로 사용하세요</p>
           )}
         </div>
       )}
