@@ -44,12 +44,16 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # ─── 가중치 ───────────────────────────────────────────────────────────────────
-# score_total = tech*3 + flow*3 + value*2 + profit*1 + growth*1  (max=100)
-W_TECH   = 3
-W_FLOW   = 3
-W_VALUE  = 2
-W_PROFIT = 1
-W_GROWTH = 1
+# 우선순위: 섹터 > 수급 > 성장/도미넌스 > 수익 > 기술 > 가치 > NLP
+# score_total = value(sector)*3 + flow*3 + growth*2 + profit*1 + tech*1  (max=100)
+W_SECTOR = 3   # a. 섹터 주도성
+               #    (구 score_value 컨럼 재활용, DB 스키마 변경 없음)
+W_FLOW   = 3   # b. 수급 (외국인+기관)
+W_GROWTH = 2   # c. 성장/도미넌스 (Negative Filter 역점수)
+W_PROFIT = 1   # d. 수익 (EPS Growth)
+W_TECH   = 1   # e. 기술적 탈출
+# f. 가치 = Tier 1 알파 (score_value 안에 포함)
+# g. NLP 감성 = N/A 시 0점, 연동 시 설정 예정
 
 # ─── 시장 지수 티커 ────────────────────────────────────────────────────────────
 KOSPI_TICKER  = "^KS11"
@@ -91,11 +95,11 @@ class StockScoreResult:
 
     def compute_total(self) -> None:
         self.score_total = (
-            self.score_tech   * W_TECH +
+            self.score_value  * W_SECTOR +   # score_value 컨럼 = 섹터 주도성
             self.score_flow   * W_FLOW +
-            self.score_value  * W_VALUE +
+            self.score_growth * W_GROWTH +
             self.score_profit * W_PROFIT +
-            self.score_growth * W_GROWTH
+            self.score_tech   * W_TECH
         )
 
 
@@ -119,6 +123,27 @@ def _load_ohlcv(ticker: str, period: str = "1y") -> pd.DataFrame:
         return df.dropna(subset=["close"])
     except Exception as exc:
         logger.warning("yfinance load failed for %s: %s", ticker, exc)
+        return pd.DataFrame()
+
+
+def _load_ohlcv_60m(ticker: str, period: str = "60d") -> pd.DataFrame:
+    """yfinance 60분봉 OHLCV (최대 60일). RSI 다이버전스 등 단기 신호용."""
+    try:
+        import yfinance as yf
+        df = yf.download(ticker, period=period, interval="60m",
+                         progress=False, auto_adjust=True)
+        if df.empty:
+            return pd.DataFrame()
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0].lower() for c in df.columns]
+        else:
+            df = df.rename(columns=str.lower)
+        df.index.name = "datetime"
+        df = df.reset_index()
+        df["datetime"] = pd.to_datetime(df["datetime"]).dt.tz_localize(None)
+        return df.dropna(subset=["close"])
+    except Exception as exc:
+        logger.warning("yfinance 60m load failed for %s: %s", ticker, exc)
         return pd.DataFrame()
 
 
@@ -334,11 +359,13 @@ def score_breakout(
     df: pd.DataFrame,
     *,
     supply_demand: dict | None = None,
+    df_60m: pd.DataFrame | None = None,
 ) -> tuple[int, list[ConditionResult]]:
     """
     기술적 탈출 패턴 + 수급/실적 조건 점수.
     각 조건 충족 → +2점 (최대 10점).
-    4~5개 이상 충족이 추천 기준.
+    3개 이상 충족이 추천 기준 (주도주 친화 완화).
+    RSI 다이버전스: 60분봉 기준 (df_60m 제공 시), 없으면 일봉 fallback.
     """
     conditions: list[ConditionResult] = []
     sd = supply_demand or {}
@@ -383,20 +410,29 @@ def score_breakout(
         note=f"{trend_note} | 5MA={ma5.iloc[-1]:.0f}, 100MA={ma100.iloc[-1]:.0f}" if not ma5.dropna().empty else "",
     ))
 
-    # ── 조건 2: 볼린저 하단 3회+ 반복 후 탈출 ────────────────────────────────
+    # ── 조건 2: 볼린저 케널 3회+ 반복 후 탈출 ───────────────────────────
+    # ✔ 주도주에도 적용: BB% 현재 위치(0.5 기준) + 상승 모멘텀 확인
     bb_upper, bb_mid, bb_lower = _bollinger(close, 20)
     bb_pct = (close - bb_lower) / (bb_upper - bb_lower).replace(0, np.nan)
-
-    # 최근 60봉에서 하단 터치(bb_pct < 0.1) 횟수
-    bb_touch_count = int((bb_pct.tail(60) < 0.1).sum())
-    # 현재 중간 이상으로 회복
     current_bb_pct = float(bb_pct.iloc[-1]) if not bb_pct.dropna().empty else 0.0
+    # 과매도 반등 제거 → 중단에서 상단(강세) or 반등 확인
+    # 바닥 탈출형: 60봉 내 하단터치 3회이상 + 현재 BB% ≥ 0.4
+    # 주도주형: BB% ≥ 0.6 (상단권 유지)
+    bb_touch_count = int((bb_pct.tail(60) < 0.1).sum())
     bb_breakout = bb_touch_count >= 3 and current_bb_pct >= 0.4
+    bb_leader   = current_bb_pct >= 0.6   # 주도주 강세
+    bb_ok = bb_breakout or bb_leader
+    if bb_leader:
+        bb_note = f"BB%={current_bb_pct:.2f} (주도주 상단)"
+    elif bb_breakout:
+        bb_note = f"BB%={current_bb_pct:.2f} (바닥터치{bb_touch_count}회 후 탈출)"
+    else:
+        bb_note = f"BB%={current_bb_pct:.2f} (기준 미충족)"
     conditions.append(ConditionResult(
-        "bollinger_lower_bounce",
-        bb_breakout,
+        "bollinger_position",
+        bb_ok,
         value=round(current_bb_pct, 3),
-        note=f"60봉내 하단터치 {bb_touch_count}회, 현재 BB%={current_bb_pct:.2f}",
+        note=bb_note,
     ))
 
     # ── 조건 3: 거래량 300%+ & 주가 8%+ 급등 ────────────────────────────────
@@ -411,20 +447,27 @@ def score_breakout(
         note=f"거래량 비율={vol_ratio:.1f}x, 주가변동={price_chg:.1f}%",
     ))
 
-    # ── 조건 4: Bullish Divergence (RSI 또는 MACD) ───────────────────────────
-    rsi   = _rsi(close, 14)
+    # ── 조건 4: Bullish Divergence (RSI 60분봉 + MACD 일봉) ──────────────────
     mhist = _macd_hist(close)
 
-    def _bullish_divergence(indicator: pd.Series, n: int = 30) -> bool:
-        """
-        최근 n봉에서 가격 저점이 낮아지는데 지표 저점이 높아지면 True.
-        2개의 저점(valley) 기준.
-        """
-        price_window = close.tail(n).reset_index(drop=True)
+    # RSI: 60분봉 우선, 없으면 일봉 fallback
+    if df_60m is not None and len(df_60m) >= 30:
+        rsi_src       = _rsi(df_60m["close"], 14)
+        rsi_price_src = df_60m["close"]
+        rsi_n         = min(120, len(df_60m))   # 60m: 120봉 ≈ 3거래일
+        rsi_tf_note   = "60분봉"
+    else:
+        rsi_src       = _rsi(close, 14)
+        rsi_price_src = close
+        rsi_n         = 30
+        rsi_tf_note   = "일봉(fallback)"
+
+    def _bullish_divergence(price_series: pd.Series, indicator: pd.Series, n: int = 30) -> bool:
+        """최근 n봉에서 가격 저점↓ + 지표 저점↑ = Bullish Divergence."""
+        price_window = price_series.tail(n).reset_index(drop=True)
         ind_window   = indicator.tail(n).reset_index(drop=True)
         if ind_window.dropna().empty:
             return False
-        # 로컬 최솟값 인덱스 (간단: 5봉 윈도우)
         valleys = []
         for i in range(2, len(price_window) - 2):
             if (price_window.iloc[i] <= price_window.iloc[i - 1] and
@@ -439,13 +482,13 @@ def score_breakout(
         ind_diverge   = ind_window.iloc[v2]  > ind_window.iloc[v1]
         return bool(price_diverge and ind_diverge)
 
-    rsi_div  = _bullish_divergence(rsi)
-    macd_div = _bullish_divergence(mhist)
+    rsi_div  = _bullish_divergence(rsi_price_src, rsi_src, n=rsi_n)
+    macd_div = _bullish_divergence(close, mhist)      # MACD는 일봉 유지
     bullish_div = rsi_div or macd_div
     conditions.append(ConditionResult(
         "bullish_divergence",
         bullish_div,
-        note=f"RSI 다이버전스={rsi_div}, MACD 다이버전스={macd_div}",
+        note=f"RSI({rsi_tf_note}) 다이버전스={rsi_div}, MACD(일봉) 다이버전스={macd_div}",
     ))
 
     # ── 조건 5: 실적 턴어라운드 + 수급 매집 (수급 데이터 필요) ───────────────
@@ -497,6 +540,7 @@ def score_negative_filter(
     df: pd.DataFrame,
     *,
     supply_demand: dict | None = None,
+    df_60m: pd.DataFrame | None = None,
 ) -> tuple[int, list[ConditionResult]]:
     """
     급락 위험 조건 탐지.
@@ -542,12 +586,24 @@ def score_negative_filter(
             note="N/A – KRX 공매도 데이터 필요",
         ))
 
-    # ── 위험 3: Bearish Divergence (RSI/MACD) at high ────────────────────────
-    rsi   = _rsi(close, 14)
+    # ── 위험 3: Bearish Divergence (RSI 60분봉 + MACD 일봉) ──────────────────
     mhist = _macd_hist(close)
 
-    def _bearish_divergence(indicator: pd.Series, n: int = 20) -> bool:
-        price_window = close.tail(n).reset_index(drop=True)
+    # RSI: 60분봉 우선, 없으면 일봉 fallback
+    if df_60m is not None and len(df_60m) >= 30:
+        rsi_src_neg   = _rsi(df_60m["close"], 14)
+        rsi_price_neg = df_60m["close"]
+        rsi_n_neg     = min(120, len(df_60m))
+        rsi_tf_neg    = "60분봉"
+    else:
+        rsi_src_neg   = _rsi(close, 14)
+        rsi_price_neg = close
+        rsi_n_neg     = 20
+        rsi_tf_neg    = "일봉(fallback)"
+
+    def _bearish_divergence(price_series: pd.Series, indicator: pd.Series, n: int = 20) -> bool:
+        """최근 n봉에서 가격 고점↑ + 지표 고점↓ = Bearish Divergence."""
+        price_window = price_series.tail(n).reset_index(drop=True)
         ind_window   = indicator.tail(n).reset_index(drop=True)
         if ind_window.dropna().empty:
             return False
@@ -565,13 +621,13 @@ def score_negative_filter(
         ind_lower    = ind_window.iloc[p2]  < ind_window.iloc[p1]
         return bool(price_higher and ind_lower)
 
-    rsi_bear  = _bearish_divergence(rsi)
-    macd_bear = _bearish_divergence(mhist)
+    rsi_bear  = _bearish_divergence(rsi_price_neg, rsi_src_neg, n=rsi_n_neg)
+    macd_bear = _bearish_divergence(close, mhist)     # MACD는 일봉 유지
     bearish_div = rsi_bear or macd_bear
     conditions.append(ConditionResult(
         "bearish_divergence_at_high",
         bearish_div,
-        note=f"RSI={rsi_bear}, MACD={macd_bear} Bearish Divergence",
+        note=f"RSI({rsi_tf_neg}) {rsi_bear}, MACD(일봉) {macd_bear} Bearish Divergence",
     ))
 
     # ── 위험 4: 긴 윗꼬리 + 장대 음봉 ───────────────────────────────────────
@@ -677,7 +733,19 @@ def compute_stock_score(
 
     result = StockScoreResult(stock_code=stock_code, scoring_date=sd_date)
 
-    # OHLCV 로드
+    # ── supply_demand 복사 + 섹터 ETF 자동 주입 ───────────────────────────
+    # caller의 dict를 수정하지 않도록 복사
+    sd_effective: dict = dict(supply_demand) if supply_demand else {}
+
+    # sector_etf_ticker 미지정 시 supply_demand["sector"] 문자열로 자동 매핑
+    if "sector_etf_ticker" not in sd_effective:
+        sector_name = sd_effective.get("sector", "")
+        auto_etf = SECTOR_ETFS.get(sector_name)
+        if auto_etf:
+            sd_effective["sector_etf_ticker"] = auto_etf
+            logger.debug("섹터 ETF 자동 주입: %s → %s", sector_name, auto_etf)
+
+    # OHLCV 로드 (일봉)
     df = _load_ohlcv(ticker, period="2y")
     if df.empty:
         # KS 실패 시 KQ 재시도
@@ -695,41 +763,85 @@ def compute_stock_score(
     if market_df.empty:
         market_df = _load_ohlcv(KOSDAQ_TICKER, period="2y")
 
-    # ── Tier 1: 섹터 알파 점수 ───────────────────────────────────────────────
-    sector_score, sector_conds = score_sector_leadership(df, market_df, supply_demand=supply_demand)
+    # ── 60분봉 로드 (RSI 다이버전스용) ─────────────────────────────────────
+    df_60m = _load_ohlcv_60m(ticker)
+    if df_60m.empty and ticker.endswith(".KS"):
+        df_60m = _load_ohlcv_60m(ticker.replace(".KS", ".KQ"))
+
+    # ── Tier 1: 섹터 알파 점수 ───────────────────────────────────────────
+    sector_score, sector_conds = score_sector_leadership(df, market_df, supply_demand=sd_effective)
     result.score_value = sector_score
 
-    # ── Tier 2: 기술적 탈출 점수 ─────────────────────────────────────────────
-    tech_score, tech_conds = score_breakout(df, supply_demand=supply_demand)
+    # ── Tier 2: 기술적 탈출 점수 ─────────────────────────────────────────
+    tech_score, tech_conds = score_breakout(df, supply_demand=sd_effective, df_60m=df_60m)
     result.score_tech = tech_score
-    # ── 수급 점수: tech_conds 중 수급/실적 조건만 별도 환산 ──────────────────
-    flow_cond = next((c for c in tech_conds if c.name == "earnings_turnaround_supply"), None)
-    result.score_flow = 10 if (flow_cond and flow_cond.met) else 0
 
-    # ── Tier 3: 급락 위험 역점수 ─────────────────────────────────────────────
-    safety_score, neg_conds = score_negative_filter(df, supply_demand=supply_demand)
+    # ── 수급 점수: 외국인+기관 순매수 연속일 + 프로그램 매수 직접 반영 ──────
+    # 우선순위: sd_effective의 KIS 수급 데이터 → earnings_turnaround_supply 조건
+    fnd = int(sd_effective.get("foreign_net_buy_days") or 0)
+    ind = int(sd_effective.get("inst_net_buy_days") or 0)
+    pgd = int(sd_effective.get("program_buy_days") or 0)
+    if fnd > 0 or ind > 0 or pgd > 0:
+        # 외국인 7일+ 또는 기관 7일+ → 10점, 감소형 스케일
+        combined_best = max(fnd, ind)
+        if combined_best >= 7:
+            flow_score = 10
+        elif combined_best >= 5:
+            flow_score = 8
+        elif combined_best >= 3:
+            flow_score = 6
+        elif combined_best >= 1:
+            flow_score = 4
+        else:
+            flow_score = 2 if pgd >= 3 else 1
+        result.score_flow = flow_score
+    else:
+        # fallback: earnings_turnaround_supply 조건
+        flow_cond = next((c for c in tech_conds if c.name == "earnings_turnaround_supply"), None)
+        result.score_flow = 10 if (flow_cond and flow_cond.met) else 0
+
+    # ── Tier 3: 급낙 위험 역점수 ───────────────────────────────────────
+    safety_score, neg_conds = score_negative_filter(df, supply_demand=sd_effective, df_60m=df_60m)
     result.score_growth = safety_score
 
-    # ── 실적/밸류에이션 점수: PER·PBR 밴드 체크 ──────────────────────────────
-    # supply_demand에 per, pbr 주입 시 점수화 (없으면 0)
-    sd = supply_demand or {}
-    per = sd.get("per", None)   # 주가수익비율
-    pbr = sd.get("pbr", None)   # 주가순자산비율
+    # ── 실적/EPS성장 점수 ────────────────────────────────────────────────────────
+    # 우선 1: sd_effective에 eps_growth 미리 주입 (배치에서 prefetch_fundamentals 활용)
+    # 우선 2: yfinance info 자동 취득 (earningsGrowth)
+    eps_growth: float | None = sd_effective.get("eps_growth", None)
+    profit_margin: float | None = sd_effective.get("profit_margin", None)
+    if eps_growth is None:
+        try:
+            import yfinance as yf
+            info_full = yf.Ticker(ticker).info
+            eg_raw = info_full.get("earningsGrowth") or info_full.get("earningsQuarterlyGrowth")
+            if eg_raw is not None:
+                eps_growth = float(eg_raw)
+            pm_raw = info_full.get("profitMargins")
+            if pm_raw is not None:
+                profit_margin = float(pm_raw)
+        except Exception:
+            eps_growth = None
+
     profit_score = 0
-    if per is not None:
+    eps_growth_note = "N/A – eps_growth 데이터 필요"
+    if eps_growth is not None:
         try:
-            per_f = float(per)
-            # PER 5~25: 합리적 밸류에이션 (+5점)
-            if 5.0 <= per_f <= 25.0:
-                profit_score += 5
-        except (TypeError, ValueError):
-            pass
-    if pbr is not None:
-        try:
-            pbr_f = float(pbr)
-            # PBR 0.5~3.0: 적정 자산가치 (+5점)
-            if 0.5 <= pbr_f <= 3.0:
-                profit_score += 5
+            eg = float(eps_growth)
+            if eg >= 0.50:
+                profit_score = 10
+                eps_growth_note = f"EPS성장 {eg*100:.0f}% (KING급)"
+            elif eg >= 0.20:
+                profit_score = 7
+                eps_growth_note = f"EPS성장 {eg*100:.0f}% (강세)"
+            elif eg >= 0.10:
+                profit_score = 5
+                eps_growth_note = f"EPS성장 {eg*100:.0f}% (양호)"
+            elif eg >= 0.0:
+                profit_score = 3
+                eps_growth_note = f"EPS성장 {eg*100:.0f}% (성장 충)"
+            else:
+                profit_score = 0
+                eps_growth_note = f"EPS성장 {eg*100:.0f}% (침체 주의)"
         except (TypeError, ValueError):
             pass
     result.score_profit = profit_score
@@ -758,15 +870,84 @@ def compute_stock_score(
         "tier2_met_count": sum(1 for c in tech_conds if c.met),
         "tier3_risk_count": sum(1 for c in neg_conds if c.met),
         "recommendation_eligible": (
-            sum(1 for c in tech_conds if c.met) >= 4 and
-            sum(1 for c in neg_conds if c.met) == 0
+            sum(1 for c in tech_conds if c.met) >= 3 and
+            sum(1 for c in neg_conds if c.met) <= 1
         ),
+        "eps_growth_note": eps_growth_note,
+        "eps_growth_value": eps_growth,
+        "profit_margin": profit_margin,
+        "60m_rows": len(df_60m) if df_60m is not None else 0,
+        "sector_etf_auto": sd_effective.get("sector_etf_ticker"),
+        "supply_demand_used": {
+            "foreign_net_buy_days": sd_effective.get("foreign_net_buy_days"),
+            "inst_net_buy_days":    sd_effective.get("inst_net_buy_days"),
+            "program_buy_days":     sd_effective.get("program_buy_days"),
+        },
     }
 
     return result
 
 
-# ─── 배치 실행 ────────────────────────────────────────────────────────────────
+# ─── 펜더멘털 일괄 조회 ──────────────────────────────────────────────────────────────────────
+
+def fetch_fundamentals_batch(
+    stock_codes: list[str],
+    *,
+    max_workers: int = 6,
+) -> dict[str, dict]:
+    """
+    yfinance .info에서 EPS 성장률 · 순이익률 · PER · PBR 일괄 추출.
+
+    run_batch() 실행 전 항상 선행 호출하는 것이 권장.
+    반환 형식::
+
+        {
+          "005930": {
+            "eps_growth":    0.42,   # earningsGrowth (YoY)
+            "profit_margin": 0.18,   # profitMargins (순이익률)
+            "trailing_per":  12.3,   # trailingPE
+            "pbr":            1.4,   # priceToBook
+          },
+          ...
+        }
+
+    Google Finance 연동 검토:
+        yfinance는 한국 종목 earningsGrowth가 None인 경우가 많으므로
+        추후 requests-html 또는 google-finance-api 툱 사용 예정.
+        현재는 yfinance 시도 후 None 유지 (배치에서 sd_map으로 직접 주입 가능).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _fetch_one(code: str) -> tuple[str, dict]:
+        t = _yf_ticker(code)
+        out: dict = {}
+        try:
+            import yfinance as yf
+            info = yf.Ticker(t).info
+            eg = info.get("earningsGrowth") or info.get("earningsQuarterlyGrowth")
+            if eg is not None:
+                out["eps_growth"] = float(eg)
+            pm = info.get("profitMargins")
+            if pm is not None:
+                out["profit_margin"] = float(pm)
+            per = info.get("trailingPE")
+            if per is not None:
+                out["trailing_per"] = float(per)
+            pbr = info.get("priceToBook")
+            if pbr is not None:
+                out["pbr"] = float(pbr)
+        except Exception as exc:
+            logger.debug("fundamentals fetch failed for %s: %s", code, exc)
+        return code, out
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        results = dict(pool.map(_fetch_one, stock_codes))
+    logger.info("fetch_fundamentals_batch: %d종목 완료, 유효 %d건",
+                len(results), sum(1 for v in results.values() if v))
+    return results
+
+
+# ─── 배치 실행 ──────────────────────────────────────────────────────────────────────────
 
 def run_batch(
     stock_codes: list[str],
@@ -774,18 +955,35 @@ def run_batch(
     scoring_date: date | None = None,
     supply_demand_map: dict[str, dict] | None = None,
     max_workers: int = 4,
+    prefetch_fundamentals: bool = True,
 ) -> list[StockScoreResult]:
     """
     여러 종목 병렬 스코어링.
 
     stock_codes: 6자리 한국 종목코드 리스트
     supply_demand_map: {stock_code: supply_demand_dict} (없으면 기술적 조건만 계산)
+    prefetch_fundamentals: True이면 실행 전 yfinance info로 EPS/순이익률 추출
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    sd_map = supply_demand_map or {}
+    # 호출자 dict 불변을 위해 미리 deep copy
+    sd_map: dict[str, dict] = {k: dict(v) for k, v in (supply_demand_map or {}).items()}
     sd_date = scoring_date or date.today()
     results: list[StockScoreResult] = []
+
+    # ── EPS/순이익률 선행 배치 조회 ────────────────────────────────────────
+    if prefetch_fundamentals:
+        logger.info("펜더멘털 일괄 조회 중 (%d 종목)...", len(stock_codes))
+        try:
+            fundamentals = fetch_fundamentals_batch(stock_codes, max_workers=max_workers)
+            for code, fund in fundamentals.items():
+                if code not in sd_map:
+                    sd_map[code] = {}
+                for k, v in fund.items():
+                    if k not in sd_map[code]:   # 기존 수동 주입값 우선
+                        sd_map[code][k] = v
+        except Exception as exc:
+            logger.warning("펜더멘털 일괄 조회 실패 (데이터 없이 계속): %s", exc)
 
     def _score_one(code: str) -> StockScoreResult:
         try:
@@ -807,3 +1005,80 @@ def run_batch(
 
     results.sort(key=lambda r: r.score_total, reverse=True)
     return results
+
+
+# ─── KING 섹터 순환 분석 ──────────────────────────────────────────────────────
+
+#: 섹터 ETF 매핑 (scoring_engine 내 독립 사용 가능)
+SECTOR_ETF_MAP: dict[str, str] = {
+    "반도체":    "091160.KS",
+    "2차전지":   "305720.KS",
+    "바이오":    "244580.KS",
+    "방산":      "459580.KS",
+    "AI/로봇":   "476600.KS",
+    "엔터":      "140570.KS",
+}
+
+
+def _etf_alpha_vs_kospi(etf_ticker: str, period_days: int = 21) -> float | None:
+    """ETF의 KOSPI 대비 초과수익률 계산 (기간: period_days 거래일)."""
+    import yfinance as yf
+
+    yf_period = "3mo" if period_days <= 63 else "6mo"
+    try:
+        etf_df  = yf.download(etf_ticker, period=yf_period, interval="1d",
+                               progress=False, auto_adjust=True)
+        mkt_df  = yf.download(KOSPI_TICKER, period=yf_period, interval="1d",
+                               progress=False, auto_adjust=True)
+        etf_close = _to_series(etf_df, "Close").dropna()
+        mkt_close = _to_series(mkt_df, "Close").dropna()
+        if len(etf_close) < 5 or len(mkt_close) < 5:
+            return None
+        n = min(period_days, len(etf_close), len(mkt_close))
+        etf_ret = float(etf_close.iloc[-1] / etf_close.iloc[-n] - 1)
+        mkt_ret = float(mkt_close.iloc[-1] / mkt_close.iloc[-n] - 1)
+        return round(etf_ret - mkt_ret, 4)
+    except Exception:
+        return None
+
+
+def compute_king_sectors(top_n: int = 2) -> list[dict]:
+    """섹터 ETF별 KOSPI 초과수익률 계산 → 상위 top_n 섹터 반환.
+
+    반환값 예시::
+
+        [
+          {
+            "sector": "반도체",
+            "etf_ticker": "091160.KS",
+            "alpha_1m": 0.082,
+            "alpha_3m": 0.031,
+            "rank": 1,
+          },
+          ...
+        ]
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _fetch(item: tuple[str, str]) -> dict:
+        name, ticker = item
+        a1m = _etf_alpha_vs_kospi(ticker, period_days=21)
+        a3m = _etf_alpha_vs_kospi(ticker, period_days=63)
+        return {
+            "sector": name,
+            "etf_ticker": ticker,
+            "alpha_1m": a1m,
+            "alpha_3m": a3m,
+        }
+
+    with ThreadPoolExecutor(max_workers=len(SECTOR_ETF_MAP)) as pool:
+        rows = list(pool.map(_fetch, SECTOR_ETF_MAP.items()))
+
+    # 1M 알파 기준 정렬 (N/A는 최하위)
+    rows.sort(key=lambda r: r["alpha_1m"] if r["alpha_1m"] is not None else -99)
+    rows.reverse()
+
+    for i, row in enumerate(rows):
+        row["rank"] = i + 1
+
+    return rows[:top_n] if top_n > 0 else rows

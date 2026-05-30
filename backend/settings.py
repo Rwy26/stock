@@ -90,6 +90,10 @@ class Settings:
     # auto = 설정된 키 중 Gemini > Groq > OpenAI 우선순위로 자동 선택
     ai_provider: str = os.getenv("AI_PROVIDER", "auto").strip().lower() or "auto"
 
+    # DART OpenAPI (공시 / 재무제표 실적)
+    # 발급: https://opendart.fss.or.kr/uss/umt/EgovMberInfoEdit.do
+    dart_api_key: str = os.getenv("DART_API_KEY", "").strip()
+
     def database_url(self) -> str:
         if self.mysql_url:
             return self.mysql_url

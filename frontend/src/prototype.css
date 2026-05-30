@@ -1316,3 +1316,83 @@ select {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* ── KING / AI Cache shared utilities ────────────────────────────────── */
+
+.banner {
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 0.88rem;
+  margin-bottom: 10px;
+}
+.banner.warn {
+  background: rgba(234, 179, 8, 0.14);
+  border: 1px solid rgba(234, 179, 8, 0.4);
+  color: #fcd34d;
+}
+.banner.error {
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+}
+
+.pill-btn {
+  padding: 5px 14px;
+  border-radius: 20px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.05);
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  transition: background 0.15s, color 0.15s;
+}
+.pill-btn:hover {
+  background: rgba(255,255,255,0.1);
+}
+.pill-btn.active {
+  background: rgba(99,102,241,0.22);
+  border-color: rgba(99,102,241,0.5);
+  color: var(--text-main);
+}
+
+/* Signal tags */
+.signal-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-size: 0.77rem;
+  font-weight: 700;
+  background: rgba(255,255,255,0.08);
+  color: var(--text-soft);
+}
+.signal-tag.strong-buy { background: rgba(16,185,129,0.22); color: #6ee7b7; }
+.signal-tag.buy        { background: rgba(52,211,153,0.15); color: #34d399; }
+.signal-tag.hold       { background: rgba(234,179,8,0.15);  color: #fbbf24; }
+.signal-tag.sell       { background: rgba(239,68,68,0.15);  color: #f87171; }
+.signal-tag.strong-sell{ background: rgba(185,28,28,0.22);  color: #fca5a5; }
+
+/* AI Cache table (reuses rec-table styles) */
+.rec-table-wrap {
+  overflow-x: auto;
+}
+.rec-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+.rec-table th {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+  color: var(--text-soft);
+  font-weight: 600;
+}
+.rec-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.rec-table .rec-row:hover { background: rgba(255,255,255,0.04); }
+.rec-table .rank-cell { color: var(--text-soft); min-width: 30px; }
+.rec-table .code-cell { font-family: monospace; color: #a5b4fc; }
+.rec-table .clickable { cursor: pointer; }

@@ -399,3 +399,235 @@ def inquire_balance(
         raise KisError(f"KIS inquire-balance error: {msg}", status_code=resp.status_code, payload=data)
 
     return data
+
+
+# ─── 수급 데이터 조회 ──────────────────────────────────────────────────────────
+
+def inquire_investor(
+    *,
+    app_key: str,
+    app_secret: str,
+    is_paper: bool,
+    code: str,
+    period_div: str = "D",
+    start_date: str = "",
+    end_date: str = "",
+    live_base_url: str | None = None,
+    paper_base_url: str | None = None,
+    timeout_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """투자자별 매매 동향 조회 (외국인/기관/개인 누적 순매수).
+
+    TR: FHKST01010900 (국내주식 투자자별 매매동향)
+
+    Args:
+        period_div: "D"=일별, "W"=주별, "M"=월별
+        start_date: "YYYYMMDD", 빈 문자열이면 오늘 기준 30거래일
+        end_date:   "YYYYMMDD", 빈 문자열이면 오늘
+
+    Returns raw KIS JSON. output 리스트에 날짜별 매매 내역.
+    각 행: stck_bsop_date, frgn_ntby_qty(외국인 순매수), orgn_ntby_qty(기관), etc.
+    """
+    from datetime import date as _date
+
+    code = code.strip()
+    if not code:
+        raise KisError("code is required")
+
+    token, _ = get_access_token(
+        app_key=app_key,
+        app_secret=app_secret,
+        is_paper=is_paper,
+        live_base_url=live_base_url,
+        paper_base_url=paper_base_url,
+        timeout_seconds=timeout_seconds,
+    )
+    base = _base_url(is_paper, live_base_url=live_base_url, paper_base_url=paper_base_url)
+    url = f"{base}/uapi/domestic-stock/v1/quotations/inquire-investor"
+
+    if not end_date:
+        end_date = _date.today().strftime("%Y%m%d")
+    if not start_date:
+        # 약 30 거래일 전 (≈42 캘린더일)
+        from datetime import timedelta
+        start_date = (_date.today() - timedelta(days=42)).strftime("%Y%m%d")
+
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appkey": app_key,
+        "appsecret": app_secret,
+        "tr_id": "FHKST01010900",
+        "custtype": "P",
+    }
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_INPUT_ISCD": code,
+        "FID_INPUT_DATE_1": start_date,
+        "FID_INPUT_DATE_2": end_date,
+        "FID_PERIOD_DIV_CODE": period_div,
+    }
+
+    try:
+        resp = httpx.get(url, headers=headers, params=params, timeout=timeout_seconds)
+    except Exception as exc:
+        raise KisError(f"KIS inquire-investor request failed: {exc}") from exc
+
+    data = _safe_json(resp)
+    if resp.status_code >= 400:
+        msg = data.get("msg1") or data.get("message") or f"HTTP {resp.status_code}"
+        raise KisError(f"KIS inquire-investor HTTP error: {msg}", status_code=resp.status_code, payload=data)
+
+    rt_cd = str(data.get("rt_cd") or "")
+    if rt_cd and rt_cd != "0":
+        msg = data.get("msg1") or "KIS error"
+        raise KisError(f"KIS inquire-investor error: {msg}", status_code=resp.status_code, payload=data)
+
+    return data
+
+
+def parse_investor_flow(data: dict[str, Any], lookback_days: int = 7) -> dict[str, int]:
+    """inquire_investor 응답 → 수급 딕셔너리 변환.
+
+    Returns:
+        {
+            "foreign_net_buy_days": int,   # 최근 N일 중 외국인 순매수 연속 일수
+            "inst_net_buy_days":    int,   # 최근 N일 중 기관 순매수 연속 일수
+            "foreign_net_qty":      int,   # 최근 N일 누적 외국인 순매수량
+            "inst_net_qty":         int,   # 최근 N일 누적 기관 순매수량
+        }
+    """
+    rows = data.get("output") or []
+    if not isinstance(rows, list):
+        rows = [rows] if rows else []
+
+    # 최신 날짜 순 정렬
+    def _date_key(r: dict) -> str:
+        return str(r.get("stck_bsop_date") or "")
+
+    rows_sorted = sorted(rows, key=_date_key, reverse=True)[:lookback_days]
+
+    def _int(v: Any) -> int:
+        try:
+            return int(str(v or 0).replace(",", "").strip() or 0)
+        except Exception:
+            return 0
+
+    # 연속 순매수 일수 (최신부터 카운트)
+    foreign_streak = 0
+    inst_streak = 0
+    for i, row in enumerate(rows_sorted):
+        fq = _int(row.get("frgn_ntby_qty") or row.get("FRGN_NTBY_QTY"))
+        iq = _int(row.get("orgn_ntby_qty") or row.get("ORGN_NTBY_QTY"))
+        if i == foreign_streak and fq > 0:
+            foreign_streak += 1
+        if i == inst_streak and iq > 0:
+            inst_streak += 1
+
+    foreign_net_qty = sum(_int(r.get("frgn_ntby_qty") or r.get("FRGN_NTBY_QTY")) for r in rows_sorted)
+    inst_net_qty    = sum(_int(r.get("orgn_ntby_qty") or r.get("ORGN_NTBY_QTY")) for r in rows_sorted)
+
+    return {
+        "foreign_net_buy_days": foreign_streak,
+        "inst_net_buy_days":    inst_streak,
+        "foreign_net_qty":      foreign_net_qty,
+        "inst_net_qty":         inst_net_qty,
+    }
+
+
+def inquire_program_trade(
+    *,
+    app_key: str,
+    app_secret: str,
+    is_paper: bool,
+    code: str,
+    start_date: str = "",
+    end_date: str = "",
+    live_base_url: str | None = None,
+    paper_base_url: str | None = None,
+    timeout_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """프로그램 매매 동향 조회.
+
+    TR: FHPPG04650100 (국내주식 프로그램매매 추이(종목))
+    각 행: bsop_date, whol_ntby_qty(전체 순매수), whol_ntby_tr_pbmn(순매수 대금)
+    """
+    from datetime import date as _date, timedelta
+
+    code = code.strip()
+    if not code:
+        raise KisError("code is required")
+
+    token, _ = get_access_token(
+        app_key=app_key,
+        app_secret=app_secret,
+        is_paper=is_paper,
+        live_base_url=live_base_url,
+        paper_base_url=paper_base_url,
+        timeout_seconds=timeout_seconds,
+    )
+    base = _base_url(is_paper, live_base_url=live_base_url, paper_base_url=paper_base_url)
+    url = f"{base}/uapi/domestic-stock/v1/quotations/program-trade-by-stock"
+
+    if not end_date:
+        end_date = _date.today().strftime("%Y%m%d")
+    if not start_date:
+        start_date = (_date.today() - timedelta(days=14)).strftime("%Y%m%d")
+
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appkey": app_key,
+        "appsecret": app_secret,
+        "tr_id": "FHPPG04650100",
+        "custtype": "P",
+    }
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_INPUT_ISCD": code,
+        "FID_INPUT_DATE_1": start_date,
+        "FID_INPUT_DATE_2": end_date,
+        "FID_PERIOD_DIV_CODE": "D",
+    }
+
+    try:
+        resp = httpx.get(url, headers=headers, params=params, timeout=timeout_seconds)
+    except Exception as exc:
+        raise KisError(f"KIS program-trade request failed: {exc}") from exc
+
+    data = _safe_json(resp)
+    if resp.status_code >= 400:
+        msg = data.get("msg1") or data.get("message") or f"HTTP {resp.status_code}"
+        raise KisError(f"KIS program-trade HTTP error: {msg}", status_code=resp.status_code, payload=data)
+
+    rt_cd = str(data.get("rt_cd") or "")
+    if rt_cd and rt_cd != "0":
+        msg = data.get("msg1") or "KIS error"
+        raise KisError(f"KIS program-trade error: {msg}", status_code=resp.status_code, payload=data)
+
+    return data
+
+
+def parse_program_trade(data: dict[str, Any], lookback_days: int = 5) -> int:
+    """inquire_program_trade 응답 → 프로그램 순매수 연속 일수."""
+    rows = data.get("output") or []
+    if not isinstance(rows, list):
+        rows = [rows] if rows else []
+
+    def _date_key(r: dict) -> str:
+        return str(r.get("bsop_date") or r.get("stck_bsop_date") or "")
+
+    rows_sorted = sorted(rows, key=_date_key, reverse=True)[:lookback_days]
+
+    def _int(v: Any) -> int:
+        try:
+            return int(str(v or 0).replace(",", "").strip() or 0)
+        except Exception:
+            return 0
+
+    streak = 0
+    for i, row in enumerate(rows_sorted):
+        qty = _int(row.get("whol_ntby_qty") or row.get("WHOL_NTBY_QTY"))
+        if i == streak and qty > 0:
+            streak += 1
+        else:
+            break
+    return streak

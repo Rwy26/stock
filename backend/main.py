@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 import os
@@ -1313,6 +1314,63 @@ def get_recommendations(_current_user=Depends(get_current_user)):
         db.close()
 
 
+@app.get("/api/recommendations/king")
+def get_king_recommendations(_current_user=Depends(get_current_user)):
+    """KING 카테고리: 섹터 순환 분석 → 상위 2개 섹터 + 해당 섹터 대표 ETF 정보 + 최고점수 종목.
+
+    - scoring_engine.compute_king_sectors() 로 KOSPI 대비 섹터 ETF 알파 계산
+    - DB IndicatorScore에서 오늘 스코어링된 종목 중 score_total 최고 종목 반환
+    """
+    if _scoring_engine is None:
+        raise HTTPException(status_code=503, detail="scoring_engine module not available")
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=503, detail="DB module not available")
+
+    try:
+        top_sectors = _scoring_engine.compute_king_sectors(top_n=2)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"섹터 분석 실패: {exc}") from exc
+
+    # DB에서 오늘 기준 최고점수 종목 (상위 10개)
+    today = date.today()
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        rows = db.execute(
+            select(
+                models.IndicatorScore.stock_code,
+                models.Stock.name,
+                models.IndicatorScore.score_total,
+                models.IndicatorScore.details,
+            )
+            .join(models.Stock, models.Stock.code == models.IndicatorScore.stock_code)
+            .where(models.IndicatorScore.scoring_date == today)
+            .order_by(desc(models.IndicatorScore.score_total))
+            .limit(10)
+        ).all()
+        top_stocks = [
+            {
+                "code": r.stock_code,
+                "name": r.name,
+                "score_total": r.score_total,
+                "eligible": bool(
+                    r.details and r.details.get("recommendation_eligible", False)
+                ),
+                "eps_growth": r.details and r.details.get("eps_growth_value"),
+                "eps_growth_note": r.details and r.details.get("eps_growth_note"),
+            }
+            for r in rows
+        ]
+    finally:
+        db.close()
+
+    return {
+        "king_sectors": top_sectors,
+        "top_stocks": top_stocks,
+        "scored_date": today.isoformat(),
+        "note": "KING: KOSPI 초과수익 상위 2개 섹터 ETF + 당일 최고점수 종목",
+    }
+
+
 @app.get("/api/watchlist")
 def get_watchlist(current_user=Depends(get_current_user)):
     if apollo_db is None or models is None:
@@ -1762,18 +1820,9 @@ def admin_scoring_run(
     {
         "codes": ["005930", "000660", ...],   // 없으면 DB 전체 종목
         "max_workers": 4,
-        "supply_demand_map": {                // 수급 데이터 (없으면 기술적 조건만)
-            "005930": {
-                "foreign_net_buy_days": 8,
-                "inst_net_buy_days": 5,
-                "program_buy_days": 4,
-                "consensus_revised_up": true,
-                "earnings_turnaround": true,
-                "short_sell_surge_3d": false,
-                "op_margin_4q_decline": false,
-                "sector_peakout": false
-            }
-        }
+        "prefetch_fundamentals": true,        // yfinance EPS 사전 조회 (기본 true)
+        "fetch_supply_demand": true,          // KIS+DART 수급/실적 자동 수집 (기본 true)
+        "supply_demand_map": { ... }          // 수동 주입 (있으면 자동 수집 덮어쓰기)
     }
     """
     if _scoring_engine is None:
@@ -1781,9 +1830,11 @@ def admin_scoring_run(
     if apollo_db is None or models is None:
         raise HTTPException(status_code=500, detail="DB 모듈 없음")
 
-    max_workers      = int(payload.get("max_workers", 4))
-    supply_demand_map: dict = payload.get("supply_demand_map") or {}
+    max_workers           = int(payload.get("max_workers", 4))
+    supply_demand_map: dict = dict(payload.get("supply_demand_map") or {})
     codes: list[str] | None = payload.get("codes")
+    fetch_sd: bool = bool(payload.get("fetch_supply_demand", True))
+    prefetch_fund: bool = bool(payload.get("prefetch_fundamentals", True))
 
     db: Session = apollo_db.get_session_factory()()
     try:
@@ -1792,6 +1843,30 @@ def admin_scoring_run(
             codes = list(rows)
         if not codes:
             return {"ok": True, "upserted": 0, "msg": "스코어링 대상 종목 없음"}
+
+        # ── KIS + DART 수급/실적 자동 수집 ─────────────────────────────────
+        if fetch_sd:
+            try:
+                from supply_demand import fetch_supply_demand_batch
+                sd_auto = fetch_supply_demand_batch(
+                    codes,
+                    kis_app_key=settings.kis_app_key if hasattr(settings, "kis_app_key") else "",
+                    kis_app_secret=settings.kis_app_secret if hasattr(settings, "kis_app_secret") else "",
+                    kis_is_paper=True,
+                    kis_live_base_url=settings.kis_live_base_url,
+                    kis_paper_base_url=settings.kis_paper_base_url,
+                    dart_api_key=settings.dart_api_key,
+                    max_workers=min(max_workers, 6),
+                    use_db_cache=True,
+                    db_session=db,
+                )
+                # supply_demand_map 수동 값이 자동 값보다 우선
+                for code, auto_data in sd_auto.items():
+                    merged = dict(auto_data)
+                    merged.update(supply_demand_map.get(code) or {})
+                    supply_demand_map[code] = merged
+            except Exception as exc:
+                logger.warning("수급 자동 수집 실패 (스코어링은 계속): %s", exc)
     finally:
         db.close()
 
@@ -1801,6 +1876,7 @@ def admin_scoring_run(
         scoring_date=today,
         supply_demand_map=supply_demand_map,
         max_workers=min(max_workers, 8),
+        prefetch_fundamentals=prefetch_fund,
     )
 
     # DB 저장
@@ -1846,7 +1922,7 @@ def admin_scoring_run(
     finally:
         db2.close()
 
-    eligible = [r for r in results if r.details.get("recommendation_eligible")]
+    eligible = [r for r in results if (r.details or {}).get("recommendation_eligible")]
     top10 = [
         {
             "code": r.stock_code,
@@ -1855,7 +1931,7 @@ def admin_scoring_run(
             "value": r.score_value,
             "growth": r.score_growth,
         }
-        for r in results[:10]
+        for r in sorted(results, key=lambda x: x.score_total, reverse=True)[:10]
     ]
     return {
         "ok": True,
@@ -1905,11 +1981,42 @@ def admin_scoring_preview(
             "growth": result.score_growth,
             "total":  result.score_total,
         },
-        "eligible": result.details.get("recommendation_eligible", False),
-        "tier2_met": result.details.get("tier2_met_count", 0),
-        "tier3_risk": result.details.get("tier3_risk_count", 0),
+        "eligible": (result.details or {}).get("recommendation_eligible", False),
+        "tier2_met": (result.details or {}).get("tier2_met_count", 0),
+        "tier3_risk": (result.details or {}).get("tier3_risk_count", 0),
         "details": result.details,
     }
+
+
+@app.get("/api/admin/supply-demand/{stock_code}")
+def admin_supply_demand_preview(
+    stock_code: str,
+    _admin=Depends(require_admin),
+):
+    """단일 종목 수급 데이터 실시간 조회 (KIS + DART).
+
+    KIS/DART 키가 없으면 각 필드 빈 값.
+    """
+    code = stock_code.strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="종목코드 필요")
+
+    try:
+        from supply_demand import fetch_supply_demand_batch
+        result = fetch_supply_demand_batch(
+            [code],
+            kis_app_key=getattr(settings, "kis_app_key", ""),
+            kis_app_secret=getattr(settings, "kis_app_secret", ""),
+            kis_is_paper=True,
+            kis_live_base_url=settings.kis_live_base_url,
+            kis_paper_base_url=settings.kis_paper_base_url,
+            dart_api_key=settings.dart_api_key,
+            max_workers=2,
+            use_db_cache=False,
+        )
+        return {"code": code, "data": result.get(code, {})}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"수급 조회 오류: {exc}") from exc
 
 
 @app.get("/api/automation/sa")
@@ -3497,6 +3604,7 @@ async def ai_chart_analysis_image(
     MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB per image
 
     image_files: list[tuple[str, bytes]] = []
+    image_hashes: list[str] = []
     for upload in files:
         fname = (upload.filename or "chart.png").lower()
         ext = "." + fname.rsplit(".", 1)[-1] if "." in fname else ""
@@ -3509,6 +3617,7 @@ async def ai_chart_analysis_image(
         if len(raw) > MAX_IMAGE_SIZE:
             raise HTTPException(status_code=413, detail=f"{upload.filename}: 파일 크기가 10MB를 초과합니다")
         image_files.append((upload.filename or "chart.png", raw))
+        image_hashes.append(hashlib.sha256(raw).hexdigest()[:16])
 
     # For vision: Gemini uses gemini-2.5-flash, OpenAI needs gpt-4o
     if provider == "openai" and model == "gpt-4o-mini":
@@ -3534,7 +3643,151 @@ async def ai_chart_analysis_image(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"이미지 분석 중 오류 발생: {exc}") from exc
 
+    # ── AI 분석 결과 캐시 저장 ──────────────────────────────────────────────
+    if apollo_db is not None and models is not None:
+        try:
+            stock_code_clean = symbol.strip()
+            sig = str(result.get("signal", "") or "").upper() if isinstance(result, dict) else ""
+            conf = result.get("confidence") if isinstance(result, dict) else None
+            upsid = result.get("upside_probability") if isinstance(result, dict) else None
+            sname = result.get("stock_name") or result.get("company") if isinstance(result, dict) else None
+
+            db_cache: Session = apollo_db.get_session_factory()()
+            try:
+                existing = db_cache.execute(
+                    select(models.AiAnalysisCache).where(
+                        models.AiAnalysisCache.stock_code == stock_code_clean
+                    )
+                ).scalar_one_or_none()
+                now_utc = datetime.utcnow()
+                if existing is None:
+                    db_cache.add(models.AiAnalysisCache(
+                        stock_code=stock_code_clean,
+                        stock_name=sname,
+                        analyzed_at=now_utc,
+                        signal=sig or None,
+                        confidence=float(conf) if conf is not None else None,
+                        upside_probability=float(upsid) if upsid is not None else None,
+                        result_json=result if isinstance(result, dict) else None,
+                        image_hashes=image_hashes,
+                    ))
+                else:
+                    existing.stock_name = sname or existing.stock_name
+                    existing.analyzed_at = now_utc
+                    existing.signal = sig or None
+                    existing.confidence = float(conf) if conf is not None else None
+                    existing.upside_probability = float(upsid) if upsid is not None else None
+                    existing.result_json = result if isinstance(result, dict) else None
+                    existing.image_hashes = image_hashes
+                db_cache.commit()
+            finally:
+                db_cache.close()
+        except Exception as _cache_err:
+            # 캐시 저장 실패는 무시 (분석 결과 반환에 영향 없음)
+            pass
+
     return result
+
+
+# ─── AI 분석 캐시 API ─────────────────────────────────────────────────────────
+
+_SIGNAL_ORDER = {"STRONG_BUY": 1, "BUY": 2, "HOLD": 3, "SELL": 4, "STRONG_SELL": 5}
+
+
+@app.get("/api/ai/analysis-cache")
+def get_ai_analysis_cache(_current_user=Depends(get_current_user)):
+    """AI 차트 분석 캐시 전체 목록 — signal 강도 순 정렬 (STRONG_BUY 우선).
+
+    상승 추세가 강한 종목부터 정렬됩니다.
+    """
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=503, detail="DB module not available")
+
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        rows = db.execute(
+            select(models.AiAnalysisCache).order_by(
+                desc(models.AiAnalysisCache.analyzed_at)
+            )
+        ).scalars().all()
+
+        items = []
+        for r in rows:
+            items.append({
+                "stock_code": r.stock_code,
+                "stock_name": r.stock_name,
+                "analyzed_at": r.analyzed_at.isoformat() if r.analyzed_at else None,
+                "signal": r.signal,
+                "confidence": r.confidence,
+                "upside_probability": r.upside_probability,
+                "image_hashes": r.image_hashes,
+                # 전체 result_json도 포함 (프론트에서 요약 표시)
+                "summary": (r.result_json or {}).get("summary") if r.result_json else None,
+                "target_price": (r.result_json or {}).get("target_price") if r.result_json else None,
+                "stop_loss": (r.result_json or {}).get("stop_loss") if r.result_json else None,
+                "entry_price": (r.result_json or {}).get("entry_price") if r.result_json else None,
+            })
+
+        # signal 강도 순 정렬 (STRONG_BUY=1 → 먼저)
+        items.sort(key=lambda x: _SIGNAL_ORDER.get(x.get("signal") or "", 99))
+
+        return {"items": items, "total": len(items)}
+    finally:
+        db.close()
+
+
+@app.get("/api/ai/analysis-cache/{stock_code}")
+def get_ai_analysis_cache_detail(
+    stock_code: str,
+    _current_user=Depends(get_current_user),
+):
+    """특정 종목의 AI 분석 캐시 상세 조회 (result_json 포함)."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=503, detail="DB module not available")
+
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        row = db.execute(
+            select(models.AiAnalysisCache).where(
+                models.AiAnalysisCache.stock_code == stock_code.strip()
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"{stock_code} 분석 캐시 없음")
+        return {
+            "stock_code": row.stock_code,
+            "stock_name": row.stock_name,
+            "analyzed_at": row.analyzed_at.isoformat() if row.analyzed_at else None,
+            "signal": row.signal,
+            "confidence": row.confidence,
+            "upside_probability": row.upside_probability,
+            "image_hashes": row.image_hashes,
+            "result_json": row.result_json,
+        }
+    finally:
+        db.close()
+
+
+@app.delete("/api/ai/analysis-cache/{stock_code}")
+def delete_ai_analysis_cache(
+    stock_code: str,
+    _current_user=Depends(require_admin),
+):
+    """특정 종목의 AI 분석 캐시 삭제 (admin 전용)."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=503, detail="DB module not available")
+
+    with apollo_db.session_scope() as session:
+        row = session.execute(
+            select(models.AiAnalysisCache).where(
+                models.AiAnalysisCache.stock_code == stock_code.strip()
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"{stock_code} 분석 캐시 없음")
+        session.delete(row)
+
+    return {"deleted": stock_code}
 
 
 @app.get("/{full_path:path}")

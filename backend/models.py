@@ -255,3 +255,52 @@ class SvAgentPrediction(Base):
     as_of: Mapped[datetime] = mapped_column(DateTime, index=True)
     payload: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AiAnalysisCache(Base):
+    """AI 차트 분석 결과 캐시 테이블.
+
+    종목별 최신 분석 결과를 보관. 동일 종목 재분석 시 덮어쓰기.
+    signal 강도 순 정렬용: STRONG_BUY(1) > BUY(2) > HOLD(3) > SELL(4) > STRONG_SELL(5)
+    """
+
+    __tablename__ = "ai_analysis_cache"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    stock_code: Mapped[str] = mapped_column(String(20), index=True, unique=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    analyzed_at: Mapped[datetime] = mapped_column(DateTime, index=True, server_default=func.now())
+    signal: Mapped[str | None] = mapped_column(String(20), nullable=True)           # STRONG_BUY | BUY | HOLD | SELL | STRONG_SELL
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)           # 0~100
+    upside_probability: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0~100
+    eps_growth: Mapped[float | None] = mapped_column(Float, nullable=True)          # EPS 성장률
+    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)           # AI 전체 분석 결과
+    image_hashes: Mapped[list | None] = mapped_column(JSON, nullable=True)          # 이미지 SHA-256 해시 목록
+
+
+class DailyInvestorFlow(Base):
+    """일별 투자자 수급 캐시 테이블.
+
+    KIS API 조회 결과를 저장해 반복 호출 최소화.
+    run_batch() 수행 시 하루 1회 갱신.
+    """
+
+    __tablename__ = "daily_investor_flow"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    stock_code: Mapped[str] = mapped_column(String(20), index=True)
+    trading_date: Mapped[date] = mapped_column(Date, index=True)
+    # 외국인
+    foreign_net_buy_days: Mapped[int] = mapped_column(Integer, default=0)    # 연속 순매수 일수
+    foreign_net_qty: Mapped[int] = mapped_column(Integer, default=0)         # 7거래일 누적 순매수량
+    # 기관
+    inst_net_buy_days: Mapped[int] = mapped_column(Integer, default=0)
+    inst_net_qty: Mapped[int] = mapped_column(Integer, default=0)
+    # 프로그램
+    program_buy_days: Mapped[int] = mapped_column(Integer, default=0)        # 연속 프로그램 매수 일수
+    # 메타
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("uq_investor_flow_code_date", "stock_code", "trading_date", unique=True),
+    )
