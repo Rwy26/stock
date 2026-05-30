@@ -3204,6 +3204,48 @@ def ai_chart_set_key(body: _AiKeyBody, _current_user=Depends(get_current_user)):
     return {"ok": True, "message": f"{provider.title()} API 키가 저장되었습니다", "provider": provider}
 
 
+@app.get("/api/ai/diagnose")
+def ai_diagnose(_current_user=Depends(get_current_user)):
+    """AI 파이프라인 단계별 진단.
+
+    각 단계를 순서대로 점검하여 어느 단계에서 실패했는지 명확히 보여줍니다:
+    1. chart_analysis 모듈 로드
+    2. API 키 설정 여부
+    3. 실제 AI API 연결 테스트 (소형 프롬프트 전송)
+    """
+    steps: list[dict] = []
+
+    # ── Step 1: Module loaded ──────────────────────────────────────────────
+    if _chart_analysis is not None:
+        steps.append({"step": "모듈 로드", "ok": True,  "msg": "chart_analysis 정상 로드됨"})
+    else:
+        steps.append({"step": "모듈 로드", "ok": False, "msg": "chart_analysis 모듈 import 실패 – uvicorn 로그 확인"})
+        return {"ok": False, "steps": steps}
+
+    # ── Step 2: API key ────────────────────────────────────────────────────
+    provider, api_key, model = _resolve_ai_provider()
+    if api_key:
+        key_preview = api_key[:6] + "..." + api_key[-4:] if len(api_key) > 10 else "***"
+        steps.append({"step": "API 키", "ok": True,  "msg": f"{provider} ({model}) 키 감지됨 [{key_preview}]"})
+    else:
+        steps.append({"step": "API 키", "ok": False, "msg": "API 키 없음 – 🔑 API 키 설정에서 Gemini/Groq 키를 저장하세요"})
+        return {"ok": False, "steps": steps}
+
+    # ── Step 3: Connectivity test (lightweight prompt) ────────────────────
+    try:
+        res = _chart_analysis.test_ai_connection(api_key=api_key, model=model, provider=provider)
+        steps.append({
+            "step": "API 연결",
+            "ok": True,
+            "msg": f"{provider} 응답 정상 – {res.get('latency_ms', '?')}ms",
+        })
+    except Exception as exc:
+        steps.append({"step": "API 연결", "ok": False, "msg": str(exc)})
+        return {"ok": False, "steps": steps, "provider": provider, "model": model}
+
+    return {"ok": True, "steps": steps, "provider": provider, "model": model}
+
+
 @app.post("/api/ai/chart-analysis/image")
 async def ai_chart_analysis_image(
     symbol: str,

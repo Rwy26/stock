@@ -310,6 +310,20 @@ _SYSTEM_PROMPT = """\
 """
 
 
+def _clean_json_response(text: str) -> str:
+    """Gemini/OpenAI sometimes wraps JSON in markdown fences. Strip them."""
+    t = text.strip()
+    # ```json ... ``` or ``` ... ```
+    if t.startswith("```"):
+        lines = t.splitlines()
+        # drop first line (``` or ```json) and last line (```)
+        inner = lines[1:] if lines[0].startswith("```") else lines
+        if inner and inner[-1].strip() == "```":
+            inner = inner[:-1]
+        t = "\n".join(inner).strip()
+    return t
+
+
 def build_prompt(symbol: str, indicators: dict[str, Any]) -> str:
     ind = dict(indicators)
     recent = ind.pop("recent_ohlcv", [])
@@ -369,9 +383,9 @@ def openai_analyze(
     content = data["choices"][0]["message"]["content"]
 
     try:
-        result = json.loads(content)
+        result = json.loads(_clean_json_response(content))
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Failed to parse response as JSON: {exc}\nRaw: {content}") from exc
+        raise RuntimeError(f"Failed to parse response as JSON: {exc}\nRaw (first 500): {content[:500]}") from exc
 
     return result
 
@@ -418,12 +432,84 @@ def gemini_analyze(
 
     data = resp.json()
     try:
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-        result = json.loads(text)
+        candidate = data["candidates"][0]
+        finish = candidate.get("finishReason", "")
+        if finish not in ("", "STOP", None):
+            raise RuntimeError(f"Gemini 응답 조기 종료: finishReason={finish}. 프롬프트가 너무 길거나 토큰 제한 초과")
+        text = candidate["content"]["parts"][0]["text"]
+        result = json.loads(_clean_json_response(text))
+    except RuntimeError:
+        raise
     except (KeyError, IndexError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Failed to parse Gemini response: {exc}\nRaw: {data}") from exc
+        raise RuntimeError(f"Failed to parse Gemini response: {exc}\nRaw (first 500): {str(data)[:500]}") from exc
 
     return result
+
+
+def test_ai_connection(
+    *,
+    api_key: str,
+    model: str,
+    provider: str = "gemini",
+    timeout_seconds: float = 15.0,
+) -> dict[str, Any]:
+    """Minimal connectivity test: sends a tiny prompt and expects a JSON reply.
+
+    Returns {"ok": True, "provider": ..., "model": ..., "latency_ms": ...}
+    Raises RuntimeError with a user-friendly message on failure.
+    """
+    import time
+
+    test_prompt = 'Respond with only valid JSON: {"ok": true, "test": "connection"}'
+    t0 = time.monotonic()
+
+    if provider == "gemini":
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta"
+            f"/models/{model}:generateContent?key={api_key}"
+        )
+        payload: dict[str, Any] = {
+            "contents": [{"role": "user", "parts": [{"text": test_prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json", "temperature": 0},
+        }
+        try:
+            resp = httpx.post(url, json=payload, timeout=timeout_seconds)
+        except Exception as exc:
+            raise RuntimeError(f"Gemini 네트워크 연결 실패: {exc}") from exc
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json()
+            except Exception:
+                detail = resp.text[:300]
+            raise RuntimeError(f"Gemini API 오류 {resp.status_code}: {detail}")
+        data = resp.json()
+        try:
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            json.loads(_clean_json_response(text))  # validate JSON
+        except Exception as exc:
+            raise RuntimeError(f"Gemini 응답 파싱 실패: {exc}\nRaw: {str(data)[:200]}") from exc
+    else:
+        base_url_t = "https://api.groq.com/openai/v1" if provider == "groq" else "https://api.openai.com/v1"
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": test_prompt}],
+            "temperature": 0,
+            "max_tokens": 64,
+        }
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        try:
+            resp = httpx.post(f"{base_url_t}/chat/completions", json=payload, headers=headers, timeout=timeout_seconds)
+        except Exception as exc:
+            raise RuntimeError(f"{provider} 네트워크 연결 실패: {exc}") from exc
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json()
+            except Exception:
+                detail = resp.text[:300]
+            raise RuntimeError(f"{provider} API 오류 {resp.status_code}: {detail}")
+
+    latency_ms = round((time.monotonic() - t0) * 1000)
+    return {"ok": True, "provider": provider, "model": model, "latency_ms": latency_ms}
 
 
 # ---------------------------------------------------------------------------
@@ -685,10 +771,16 @@ def analyze_chart_images(
             raise RuntimeError(f"Gemini Vision API error {resp.status_code}: {err_body}")
         data = resp.json()
         try:
-            raw_content = data["candidates"][0]["content"]["parts"][0]["text"]
-            ai_result = json.loads(raw_content)
+            candidate = data["candidates"][0]
+            finish = candidate.get("finishReason", "")
+            if finish not in ("", "STOP", None):
+                raise RuntimeError(f"Gemini Vision 응답 조기 종료: finishReason={finish}. 프롬프트가 너무 길거나 토큰 제한 초과")
+            raw_content = candidate["content"]["parts"][0]["text"]
+            ai_result = json.loads(_clean_json_response(raw_content))
+        except RuntimeError:
+            raise
         except (KeyError, IndexError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"Failed to parse Gemini Vision response: {exc}\nRaw: {data}") from exc
+            raise RuntimeError(f"Failed to parse Gemini Vision response: {exc}\nRaw (first 500): {str(data)[:500]}") from exc
     else:
         # OpenAI / Groq Vision (OpenAI-compatible)
         base_url_v = "https://api.groq.com/openai/v1" if provider == "groq" else "https://api.openai.com/v1"
@@ -724,9 +816,9 @@ def analyze_chart_images(
         data = resp.json()
         raw_content = data["choices"][0]["message"]["content"]
         try:
-            ai_result = json.loads(raw_content)
+            ai_result = json.loads(_clean_json_response(raw_content))
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Failed to parse response as JSON: {exc}\nRaw: {raw_content[:500]}") from exc
+            raise RuntimeError(f"Failed to parse response as JSON: {exc}\nRaw (first 500): {raw_content[:500]}") from exc
 
     return {
         "symbol": symbol,

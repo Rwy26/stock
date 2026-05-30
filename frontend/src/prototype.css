@@ -863,6 +863,41 @@ select {
 .ai-key-msg.ok { color: #86efac; }
 .ai-key-msg.err { color: #f87171; }
 
+/* Diagnose Panel */
+.ai-diag-panel {
+  padding: 1rem 1.4rem;
+  display: grid;
+  gap: 0.7rem;
+  margin-bottom: 0.5rem;
+}
+.ai-diag-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.ai-diag-step {
+  display: grid;
+  grid-template-columns: 22px 110px 1fr;
+  align-items: start;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 0.83rem;
+}
+.ai-diag-step.pass { background: rgba(34, 197, 94, 0.10); border: 1px solid rgba(34,197,94,.25); }
+.ai-diag-step.fail { background: rgba(239, 68, 68, 0.12);  border: 1px solid rgba(239,68,68,.3); }
+.ai-diag-icon { font-size: 0.95rem; }
+.ai-diag-name { font-weight: 600; color: var(--text-main); white-space: nowrap; }
+.ai-diag-msg  { color: var(--text-soft); word-break: break-all; }
+.ai-diag-ok-msg {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+  color: #86efac;
+  font-weight: 600;
+}
+
 /* Provider Tabs */
 .ai-provider-tabs {
   display: flex;
@@ -1245,6 +1280,27 @@ select {
   text-align: center;
   padding: 0.5rem 0;
   opacity: 0.7;
+}
+
+.ai-export-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid rgba(99, 102, 241, 0.45);
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.ai-export-btn:hover {
+  background: rgba(99, 102, 241, 0.3);
+  color: #e0e7ff;
 }
 
 @media (max-width: 960px) {

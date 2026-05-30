@@ -43,9 +43,11 @@ type Mode = 'drop' | 'code'
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function extractSymbolFromFilename(name: string): string {
-  const code6 = name.match(/\b(\d{6})\b/)
+  // 009150_2026-05-30_... 형태: 숫자 6자리가 시작 또는 비숫자 뒤에 오는 경우
+  const code6 = name.match(/(?:^|[^\d])(\d{6})(?:[^\d]|$)/)
   if (code6) return code6[1]
-  const ticker = name.match(/^([A-Z]{1,5})[_\-\s,]/)
+  // AAPL_... 형태: 대문자 알파벳 2~5자
+  const ticker = name.match(/^([A-Z]{2,5})[_\-\s,.]/)
   if (ticker) return ticker[1]
   return ''
 }
@@ -118,7 +120,180 @@ function LoadingSkeleton() {
   )
 }
 
-function ResultView({ data }: { data: AnalysisResponse }) {
+// ─── One-pager Report Generator ──────────────────────────────────────────────
+
+function buildReportHtml(data: AnalysisResponse, images: string[]): string {
+  const r = data.ai_result
+  const date = new Date(data.analyzed_at).toLocaleString('ko-KR')
+  const signal = r.signal ?? '—'
+  const signalColor = signal === '매수' ? '#16a34a' : signal === '매도' ? '#dc2626' : '#d97706'
+  const valColor = r.valuation === '저평가' ? '#16a34a' : r.valuation === '고평가' ? '#dc2626' : '#2563eb'
+
+  const row = (label: string, val?: string | null) =>
+    val ? `<tr><td class="lbl">${label}</td><td>${val}</td></tr>` : ''
+
+  const imgHtml = images.length
+    ? `<div class="img-row">${images.map(src =>
+        `<img src="${src}" alt="chart" />`).join('')}</div>`
+    : ''
+
+  const targetsHtml = (r.targets || r.supply_demand) ? `
+  <div class="section">
+    <div class="sec-title">📌 목표가 · 진입 · 손절</div>
+    <div class="price-grid">
+      ${r.targets?.entry_zone || r.supply_demand?.entry_zone ? `<div class="pc entry"><div class="pc-l">진입 구간</div><div class="pc-v">${r.targets?.entry_zone ?? r.supply_demand?.entry_zone}</div></div>` : ''}
+      ${r.targets?.target_1 ? `<div class="pc t1"><div class="pc-l">1차 목표가</div><div class="pc-v">${r.targets.target_1}</div></div>` : ''}
+      ${r.targets?.target_2 ? `<div class="pc t2"><div class="pc-l">2차 목표가</div><div class="pc-v">${r.targets.target_2}</div></div>` : ''}
+      ${r.targets?.target_3 ? `<div class="pc t3"><div class="pc-l">3차 목표가</div><div class="pc-v">${r.targets.target_3}</div></div>` : ''}
+      ${r.targets?.stop_loss || r.supply_demand?.stop_loss_swing ? `<div class="pc stop"><div class="pc-l">⚠️ 손절</div><div class="pc-v">${r.targets?.stop_loss ?? r.supply_demand?.stop_loss_swing}</div></div>` : ''}
+      ${r.targets?.risk_reward || r.supply_demand?.risk_reward ? `<div class="pc rr"><div class="pc-l">R/R</div><div class="pc-v">${r.targets?.risk_reward ?? r.supply_demand?.risk_reward}</div></div>` : ''}
+    </div>
+    ${r.targets?.basis ? `<p class="basis">📎 ${r.targets.basis}</p>` : ''}
+  </div>` : ''
+
+  const ictHtml = r.ict_analysis ? `
+  <div class="section">
+    <div class="sec-title">🧠 ICT 스마트머니</div>
+    <table>${row('Order Block', r.ict_analysis.order_block)}${row('FVG', r.ict_analysis.fvg)}${row('유동성', r.ict_analysis.liquidity)}${row('시장 구조', r.ict_analysis.market_structure)}${row('Zone', r.ict_analysis.zone)}</table>
+  </div>` : ''
+
+  const techHtml = r.technical ? `
+  <div class="section">
+    <div class="sec-title">📊 기술적 분석</div>
+    <table>${row('추세', r.technical.trend_detail)}${row('이동평균', r.technical.ma_alignment)}${row('RSI', r.technical.rsi)}${row('MACD', r.technical.macd)}${row('볼린저', r.technical.bollinger)}${row('거래량', r.technical.volume)}${row('패턴', r.technical.patterns)}${row('지지', r.technical.support_zones?.join(' / '))}${row('저항', r.technical.resistance_zones?.join(' / '))}</table>
+  </div>` : ''
+
+  const catalystsHtml = r.catalysts ? `
+  <div class="section">
+    <div class="sec-title">📈 상승 재료</div>
+    <table>${row('뉴스/공시', r.catalysts.news_materials)}${row('섹터 기대감', r.catalysts.sector_expectation)}${r.catalysts.risk_factors?.length ? `<tr><td class="lbl">리스크</td><td>${r.catalysts.risk_factors.map(f => `• ${f}`).join('<br>')}</td></tr>` : ''}</table>
+  </div>` : ''
+
+  const companyHtml = r.company_analysis ? `
+  <div class="section">
+    <div class="sec-title">🏢 기업 분석</div>
+    <table>${row('섹터', r.company_analysis.sector)}${row('핵심 제품', r.company_analysis.key_products)}${row('평가', r.company_analysis.current_position)}</table>
+  </div>` : ''
+
+  const outlookHtml = r.outlook ? `
+  <div class="section">
+    <div class="sec-title">🔭 전망</div>
+    <table>${row('단기 (1~5일)', r.outlook.short_term)}${row('중기 (1~4주)', r.outlook.mid_term)}</table>
+  </div>` : ''
+
+  const risksHtml = r.risks?.length ? `
+  <div class="section">
+    <div class="sec-title">⚠️ 리스크</div>
+    <ul>${r.risks.map(rk => `<li>${rk}</li>`).join('')}</ul>
+  </div>` : ''
+
+  return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>${data.symbol} AI 분析 보고서 ${date.slice(0, 10)}</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', -apple-system, sans-serif; font-size: 13px; background: #f8fafc; color: #1e293b; padding: 24px; line-height: 1.55; }
+  .page { max-width: 900px; margin: 0 auto; background: #fff; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,.1); overflow: hidden; }
+  /* Header */
+  .header { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); color: #fff; padding: 20px 28px; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+  .h-left h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: .02em; }
+  .h-left .sub { font-size: 0.8rem; color: #94a3b8; margin-top: 4px; }
+  .signal-pill { display: inline-block; padding: 6px 18px; border-radius: 20px; font-size: 1.1rem; font-weight: 700; background: ${signalColor}22; border: 2px solid ${signalColor}; color: ${signalColor}; }
+  .h-right { text-align: right; }
+  .conf-bar { width: 120px; height: 8px; background: rgba(255,255,255,.15); border-radius: 4px; margin-top: 6px; overflow: hidden; }
+  .conf-fill { height: 100%; background: ${signalColor}; border-radius: 4px; width: ${r.confidence ?? 0}%; }
+  /* Prob chips */
+  .prob-row { display: flex; gap: 8px; padding: 12px 28px; background: #f1f5f9; flex-wrap: wrap; align-items: center; }
+  .chip { padding: 4px 12px; border-radius: 20px; font-size: 0.82rem; font-weight: 600; }
+  .chip.up   { background: #dcfce7; color: #16a34a; border: 1px solid #86efac; }
+  .chip.down { background: #fee2e2; color: #dc2626; border: 1px solid #fca5a5; }
+  .chip.val  { background: #dbeafe; color: ${valColor}; border: 1px solid #93c5fd; }
+  .summary { padding: 14px 28px; font-size: 0.9rem; color: #334155; background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
+  /* Images */
+  .img-row { display: flex; gap: 8px; padding: 16px 28px; flex-wrap: wrap; background: #0f172a; }
+  .img-row img { flex: 1; min-width: 0; max-height: 220px; object-fit: contain; border-radius: 6px; border: 1px solid #334155; }
+  /* Body */
+  .body { padding: 16px 28px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .body .full { grid-column: 1 / -1; }
+  .section { border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; }
+  .sec-title { background: #f1f5f9; padding: 7px 12px; font-weight: 700; font-size: 0.82rem; color: #475569; border-bottom: 1px solid #e2e8f0; }
+  table { width: 100%; border-collapse: collapse; }
+  table tr { border-bottom: 1px solid #f1f5f9; }
+  table tr:last-child { border-bottom: none; }
+  td { padding: 5px 10px; font-size: 0.8rem; vertical-align: top; }
+  td.lbl { white-space: nowrap; font-weight: 600; color: #64748b; width: 90px; }
+  /* Price grid */
+  .price-grid { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+  .pc { padding: 6px 12px; border-radius: 6px; text-align: center; min-width: 90px; }
+  .pc-l { font-size: 0.68rem; color: #64748b; font-weight: 600; margin-bottom: 2px; }
+  .pc-v { font-size: 0.92rem; font-weight: 700; }
+  .pc.entry { background: #f0fdf4; border: 1px solid #86efac; color: #16a34a; }
+  .pc.t1    { background: #eff6ff; border: 1px solid #93c5fd; color: #2563eb; }
+  .pc.t2    { background: #eff6ff; border: 1px solid #6ea8fe; color: #1d4ed8; }
+  .pc.t3    { background: #eef2ff; border: 1px solid #a5b4fc; color: #4338ca; }
+  .pc.stop  { background: #fef2f2; border: 1px solid #fca5a5; color: #dc2626; }
+  .pc.rr    { background: #faf5ff; border: 1px solid #d8b4fe; color: #7c3aed; }
+  .basis { font-size: 0.75rem; color: #64748b; padding: 4px 12px 10px; }
+  ul { padding: 8px 12px 8px 24px; }
+  li { font-size: 0.8rem; margin-bottom: 3px; }
+  /* Footer */
+  .footer { padding: 10px 28px; text-align: center; font-size: 0.72rem; color: #94a3b8; border-top: 1px solid #e2e8f0; background: #f8fafc; }
+  @media print {
+    body { padding: 0; background: #fff; }
+    .page { box-shadow: none; border-radius: 0; }
+    @page { margin: 10mm; size: A4; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <div class="h-left">
+      <h1>${data.symbol} <span style="font-weight:400;font-size:1rem;color:#94a3b8">${r.company_analysis?.sector ?? ''}</span></h1>
+      <div class="sub">AI 차트 분析 보고서 · ${date}${data.images_count ? ` · ${data.images_count}개 이미지 분析` : ''}</div>
+    </div>
+    <div class="h-right">
+      <div class="signal-pill">${signal}</div>
+      <div class="conf-bar"><div class="conf-fill"></div></div>
+      <div style="font-size:0.72rem;color:#94a3b8;margin-top:4px">확신도 ${r.confidence ?? '—'}%</div>
+    </div>
+  </div>
+
+  ${(r.rise_probability != null || r.fall_probability != null || r.valuation) ? `
+  <div class="prob-row">
+    ${r.rise_probability != null ? `<span class="chip up">▲ 상승 ${r.rise_probability}%</span>` : ''}
+    ${r.fall_probability != null ? `<span class="chip down">▼ 하락 ${r.fall_probability}%</span>` : ''}
+    ${r.valuation ? `<span class="chip val">${r.valuation === '저평가' ? '💹' : r.valuation === '고평가' ? '📈' : '⚖️'} ${r.valuation}</span>` : ''}
+    ${r.targets?.risk_reward || r.supply_demand?.risk_reward ? `<span class="chip val" style="background:#faf5ff;border-color:#d8b4fe;color:#7c3aed">R/R ${r.targets?.risk_reward ?? r.supply_demand?.risk_reward}</span>` : ''}
+  </div>` : ''}
+
+  ${r.summary ? `<div class="summary">💡 ${r.summary}</div>` : ''}
+
+  ${imgHtml}
+
+  <div class="body">
+    ${targetsHtml ? `<div class="full">${targetsHtml}</div>` : ''}
+    ${ictHtml}${techHtml}
+    ${catalystsHtml}${companyHtml}
+    ${outlookHtml}
+    ${risksHtml ? `<div class="full">${risksHtml}</div>` : ''}
+    ${r.data_needed ? `<div class="full"><div class="section"><div class="sec-title">ℹ️ 추가 정보 요청</div><div style="padding:8px 12px;font-size:0.8rem;color:#92400e">📌 ${r.data_needed}</div></div></div>` : ''}
+  </div>
+
+  <div class="footer">⚠️ 본 보고서는 AI가 생성한 참고 자료입니다. 투자 결정의 책임은 본인에게 있습니다. · Apollo Stock System</div>
+</div>
+<script>
+  // Auto open print dialog when loaded with ?print=1
+  if (location.search.includes('print=1')) { window.addEventListener('load', () => window.print()) }
+</script>
+</body>
+</html>`
+}
+
+function ResultView({ data, onExport }: { data: AnalysisResponse; onExport?: () => void }) {
   const r = data.ai_result
   const cls = signalClass(r.signal)
 
@@ -139,6 +314,11 @@ function ResultView({ data }: { data: AnalysisResponse }) {
             <div>{data.symbol}{r.company_analysis?.sector ? ` · ${r.company_analysis.sector}` : ''}{r.ict_analysis?.zone ? ` · ${r.ict_analysis.zone}` : ''}</div>
             {data.images_count != null && <div>{data.images_count}개 이미지 분석</div>}
             <div>{new Date(data.analyzed_at).toLocaleString('ko-KR')}</div>
+            {onExport && (
+              <button type="button" className="ai-export-btn" onClick={onExport} title="원페이퍼 보고서 내보내기">
+                📄 내보내기
+              </button>
+            )}
           </div>
         </div>
 
@@ -300,6 +480,8 @@ export function AiChartPage() {
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [keyStatus, setKeyStatus] = useState<'idle' | 'saving' | 'ok' | 'err'>('idle')
   const [keyMsg, setKeyMsg] = useState('')
+  const [diagSteps, setDiagSteps] = useState<{step: string; ok: boolean; msg: string}[] | null>(null)
+  const [diagRunning, setDiagRunning] = useState(false)
 
   const providerPrefixes: Record<string, string> = { openai: 'sk-', gemini: '', groq: 'gsk_' }
   const providerHints: Record<string, string> = {
@@ -331,6 +513,48 @@ export function AiChartPage() {
     } catch (err: unknown) {
       setKeyStatus('err'); setKeyMsg(err instanceof Error ? err.message : String(err))
     }
+  }
+
+  async function runDiagnose() {
+    setDiagRunning(true)
+    setDiagSteps(null)
+    try {
+      const data = await fetchJson<{ ok: boolean; steps: {step: string; ok: boolean; msg: string}[] }>(
+        '/api/ai/diagnose'
+      )
+      setDiagSteps(data.steps ?? [])
+    } catch (err: unknown) {
+      setDiagSteps([{ step: '진단 실패', ok: false, msg: err instanceof Error ? err.message : String(err) }])
+    } finally {
+      setDiagRunning(false)
+    }
+  }
+
+  async function exportOnePager() {
+    if (!result) return
+    // Convert image object URLs → base64 data URLs
+    const images: string[] = []
+    for (const f of droppedFiles.filter(d => d.type === 'image' && d.previewUrl)) {
+      try {
+        const resp = await fetch(f.previewUrl!)
+        const blob = await resp.blob()
+        const b64 = await new Promise<string>(resolve => {
+          const reader = new FileReader()
+          reader.onload = () => resolve(reader.result as string)
+          reader.readAsDataURL(blob)
+        })
+        images.push(b64)
+      } catch { /* skip failed images */ }
+    }
+    const html = buildReportHtml(result, images)
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    const dateStr = new Date(result.analyzed_at).toISOString().slice(0, 10)
+    a.download = `${result.symbol}_AI분析_${dateStr}.html`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   const processFiles = useCallback(async (incoming: File[]) => {
@@ -393,8 +617,16 @@ export function AiChartPage() {
     setError(null); setResult(null)
 
     if (mode === 'drop') {
-      if (!symbol.trim()) { setError('종목명 또는 종목코드를 입력하세요'); return }
       if (droppedFiles.length === 0) { setError('파일을 1개 이상 업로드하세요'); return }
+      // symbol이 비어있으면 파일명에서 자동 추출 시도
+      let effectiveSymbol = symbol.trim()
+      if (!effectiveSymbol) {
+        for (const d of droppedFiles) {
+          effectiveSymbol = extractSymbolFromFilename(d.file.name)
+          if (effectiveSymbol) break
+        }
+      }
+      if (!effectiveSymbol) { setError('종목명 또는 종목코드를 입력하세요 (파일명에서 자동 감지 실패)'); return }
       setLoading(true)
       try {
         const imageFiles = droppedFiles.filter(d => d.type === 'image')
@@ -403,7 +635,7 @@ export function AiChartPage() {
           const form = new FormData()
           imageFiles.forEach(d => form.append('files', d.file))
           const token = getAccessToken()
-          const params = new URLSearchParams({ symbol: symbol.trim() })
+          const params = new URLSearchParams({ symbol: effectiveSymbol })
           if (extraContext.trim()) params.set('extra_context', extraContext.trim())
           const resp = await fetch(`/api/ai/chart-analysis/image?${params}`, {
             method: 'POST',
@@ -417,7 +649,7 @@ export function AiChartPage() {
           const form = new FormData()
           form.append('file', csvFiles[0].file)
           const token = getAccessToken()
-          const params = new URLSearchParams({ symbol: symbol.trim() })
+          const params = new URLSearchParams({ symbol: effectiveSymbol })
           const resp = await fetch(`/api/ai/chart-analysis/upload?${params}`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${token}` },
@@ -461,10 +693,35 @@ export function AiChartPage() {
           <p className="subtle">차트 이미지 · CSV를 드롭하거나 종목코드로 즉시 AI 분析</p>
         </div>
         <button type="button" className="ai-key-settings-btn" onClick={() => { setShowKeyPanel(v => !v); setKeyStatus('idle'); setKeyMsg('') }}
-          title="OpenAI API 키 설정">
+          title="AI API 키 설정">
           🔑 API 키 설정
         </button>
+        <button type="button" className="ai-key-settings-btn" style={{ marginLeft: 8 }}
+          onClick={runDiagnose} disabled={diagRunning} title="AI 파이프라인 진단">
+          {diagRunning ? '⏳ 진단 중...' : '🔍 진단'}
+        </button>
       </header>
+
+      {diagSteps !== null && (
+        <div className="ai-diag-panel panel glass">
+          <div className="ai-key-panel-head">
+            <span>🔍 AI 파이프라인 진단</span>
+            <button type="button" className="ai-key-close" onClick={() => setDiagSteps(null)}>✕</button>
+          </div>
+          <ul className="ai-diag-list">
+            {diagSteps.map((s, i) => (
+              <li key={i} className={`ai-diag-step ${s.ok ? 'pass' : 'fail'}`}>
+                <span className="ai-diag-icon">{s.ok ? '✅' : '❌'}</span>
+                <span className="ai-diag-name">{s.step}</span>
+                <span className="ai-diag-msg">{s.msg}</span>
+              </li>
+            ))}
+          </ul>
+          {diagSteps.length > 0 && diagSteps.every(s => s.ok) && (
+            <p className="ai-diag-ok-msg">✅ 모든 단계 정상 — AI 분析을 바로 사용하세요</p>
+          )}
+        </div>
+      )}
 
       {showKeyPanel && (
         <div className="ai-key-panel panel glass">
@@ -585,7 +842,7 @@ export function AiChartPage() {
                   </div>
                 ) : (
                   <label>
-                    종목명 / 코드 <span style={{ color: '#ef4444' }}>*</span>
+                    종목명 / 코드 <span className="hint">(선택 — 파일명에서 자동 감지)</span>
                     <input value={symbol}
                       onChange={e => setSymbol(e.target.value)}
                       placeholder="예: 삼성전기, 009150, AAPL" />
@@ -656,7 +913,7 @@ export function AiChartPage() {
           {loading ? (
             <LoadingSkeleton />
           ) : result ? (
-            <ResultView data={result} />
+            <ResultView data={result} onExport={exportOnePager} />
           ) : (
             <div className="panel glass ai-empty-state">
               <div className="ai-empty-icon">🤖</div>
