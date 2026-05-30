@@ -78,6 +78,18 @@ class Settings:
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 
+    # Google Gemini (무료 티어 – aistudio.google.com에서 발급)
+    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "").strip()
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+
+    # Groq (무료 티어 – console.groq.com에서 발급)
+    groq_api_key: str = os.getenv("GROQ_API_KEY", "").strip()
+    groq_model: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
+
+    # AI provider selection: auto / openai / gemini / groq
+    # auto = 설정된 키 중 Gemini > Groq > OpenAI 우선순위로 자동 선택
+    ai_provider: str = os.getenv("AI_PROVIDER", "auto").strip().lower() or "auto"
+
     def database_url(self) -> str:
         if self.mysql_url:
             return self.mysql_url

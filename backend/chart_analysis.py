@@ -60,7 +60,12 @@ def load_ohlcv_from_yfinance(
     if df.empty:
         raise ValueError(f"No data returned for symbol '{symbol}' (tried ticker '{ticker}')")
 
-    df = df.rename(columns=str.lower)
+    # yfinance ≥1.x returns MultiIndex columns for single tickers too.
+    # Flatten: ('Close', '005930.KS') → 'close'
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [col[0].lower() for col in df.columns]
+    else:
+        df = df.rename(columns=str.lower)
     df.index.name = "time"
     df = df.reset_index()
     df["time"] = pd.to_datetime(df["time"]).dt.tz_localize(None)
@@ -283,11 +288,12 @@ def openai_analyze(
     *,
     api_key: str,
     model: str = "gpt-4o-mini",
+    base_url: str = "https://api.openai.com/v1",
     timeout_seconds: float = 60.0,
 ) -> dict[str, Any]:
-    """Call OpenAI Chat Completions API and parse the JSON response."""
+    """Call OpenAI-compatible Chat Completions API (OpenAI / Groq) and parse the JSON response."""
     if not api_key:
-        raise ValueError("OPENAI_API_KEY is not configured")
+        raise ValueError("API key is not configured")
 
     prompt = build_prompt(symbol, indicators)
 
@@ -306,22 +312,19 @@ def openai_analyze(
         "Content-Type": "application/json",
     }
 
+    endpoint = f"{base_url.rstrip('/')}/chat/completions"
+
     try:
-        resp = httpx.post(
-            "https://api.openai.com/v1/chat/completions",
-            json=payload,
-            headers=headers,
-            timeout=timeout_seconds,
-        )
+        resp = httpx.post(endpoint, json=payload, headers=headers, timeout=timeout_seconds)
     except Exception as exc:
-        raise RuntimeError(f"OpenAI API request failed: {exc}") from exc
+        raise RuntimeError(f"API request failed: {exc}") from exc
 
     if resp.status_code >= 400:
         try:
             err_body = resp.json()
         except Exception:
             err_body = resp.text
-        raise RuntimeError(f"OpenAI API error {resp.status_code}: {err_body}")
+        raise RuntimeError(f"API error {resp.status_code}: {err_body}")
 
     data = resp.json()
     content = data["choices"][0]["message"]["content"]
@@ -329,7 +332,57 @@ def openai_analyze(
     try:
         result = json.loads(content)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Failed to parse OpenAI response as JSON: {exc}\nRaw: {content}") from exc
+        raise RuntimeError(f"Failed to parse response as JSON: {exc}\nRaw: {content}") from exc
+
+    return result
+
+
+def gemini_analyze(
+    symbol: str,
+    indicators: dict[str, Any],
+    *,
+    api_key: str,
+    model: str = "gemini-2.5-flash",
+    timeout_seconds: float = 60.0,
+) -> dict[str, Any]:
+    """Call Google Gemini API (free tier) and parse the JSON response."""
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not configured")
+
+    prompt = build_prompt(symbol, indicators)
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta"
+        f"/models/{model}:generateContent?key={api_key}"
+    )
+
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "systemInstruction": {"parts": [{"text": _SYSTEM_PROMPT}]},
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.3,
+        },
+    }
+
+    try:
+        resp = httpx.post(url, json=payload, timeout=timeout_seconds)
+    except Exception as exc:
+        raise RuntimeError(f"Gemini API request failed: {exc}") from exc
+
+    if resp.status_code >= 400:
+        try:
+            err_body = resp.json()
+        except Exception:
+            err_body = resp.text
+        raise RuntimeError(f"Gemini API error {resp.status_code}: {err_body}")
+
+    data = resp.json()
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        result = json.loads(text)
+    except (KeyError, IndexError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Failed to parse Gemini response: {exc}\nRaw: {data}") from exc
 
     return result
 
@@ -341,8 +394,9 @@ def openai_analyze(
 def analyze_chart(
     *,
     symbol: str,
-    openai_api_key: str,
-    openai_model: str = "gpt-4o-mini",
+    api_key: str,
+    model: str,
+    provider: str = "openai",  # "openai" | "gemini" | "groq"
     # Data source options (exactly one should be provided)
     yfinance_period: str | None = "6mo",
     yfinance_interval: str = "1d",
@@ -352,6 +406,7 @@ def analyze_chart(
     """End-to-end: load data → compute indicators → AI analysis.
 
     Returns a dict with keys: symbol, indicators (summary), ai_result, analyzed_at.
+    provider: "openai" | "gemini" (완전 무료) | "groq" (무료)
     """
     # 1. Load OHLCV
     if csv_content is not None:
@@ -371,13 +426,17 @@ def analyze_chart(
     # 2. Indicators
     indicators = compute_indicators(df)
 
-    # 3. AI analysis
-    ai_result = openai_analyze(
-        symbol,
-        indicators,
-        api_key=openai_api_key,
-        model=openai_model,
-    )
+    # 3. AI analysis – dispatch to selected provider
+    if provider == "gemini":
+        ai_result = gemini_analyze(symbol, indicators, api_key=api_key, model=model)
+    elif provider == "groq":
+        ai_result = openai_analyze(
+            symbol, indicators,
+            api_key=api_key, model=model,
+            base_url="https://api.groq.com/openai/v1",
+        )
+    else:
+        ai_result = openai_analyze(symbol, indicators, api_key=api_key, model=model)
 
     return {
         "symbol": symbol,
@@ -508,32 +567,34 @@ def analyze_chart_images(
     *,
     symbol: str,
     image_files: list[tuple[str, bytes]],   # [(filename, bytes), ...]
-    openai_api_key: str,
-    openai_model: str = "gpt-4o",
+    api_key: str,
+    model: str = "gpt-4o",
+    provider: str = "openai",  # "openai" | "gemini" | "groq"
     extra_context: str | None = None,
     timeout_seconds: float = 90.0,
 ) -> dict[str, Any]:
-    """Analyze TradingView chart screenshots using OpenAI Vision.
+    """Analyze TradingView chart screenshots using Vision API.
 
     Args:
         symbol: 종목명 or 코드 (식별용, AI가 차트에서 직접 읽기도 함)
         image_files: list of (filename, bytes) tuples – 여러 타임프레임 가능
-        openai_api_key: OpenAI API key
-        openai_model: 'gpt-4o' recommended for vision (gpt-4o-mini also works)
+        api_key: API key for the selected provider
+        model: model name
+        provider: "openai" | "gemini" (무료) | "groq"
         extra_context: 추가 컨텍스트 (예: 현재가, 보유여부 등)
         timeout_seconds: HTTP 타임아웃
 
     Returns:
         dict with keys: symbol, ai_result, analyzed_at, images_count
     """
-    if not openai_api_key:
-        raise ValueError("OPENAI_API_KEY is not configured")
+    if not api_key:
+        raise ValueError("API key is not configured")
     if not image_files:
         raise ValueError("최소 1개 이상의 차트 이미지가 필요합니다")
     if len(image_files) > 6:
         raise ValueError("이미지는 최대 6개까지 업로드 가능합니다")
 
-    # Build content list: text + images
+    # Build content list: text + images (OpenAI Vision format)
     content: list[dict[str, Any]] = []
 
     timeframe_labels = ["일봉", "4시간봉", "1시간봉", "15분봉", "5분봉", "주봉"]
@@ -553,46 +614,82 @@ def analyze_chart_images(
             "image_url": {"url": data_url, "detail": "high"},
         })
 
-    payload = {
-        "model": openai_model,
-        "messages": [
-            {"role": "system", "content": _VISION_SYSTEM_PROMPT},
-            {"role": "user", "content": content},
-        ],
-        "temperature": 0.3,
-        "max_tokens": 4096,
-        "response_format": {"type": "json_object"},
-    }
-
-    headers = {
-        "Authorization": f"Bearer {openai_api_key}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        resp = httpx.post(
-            "https://api.openai.com/v1/chat/completions",
-            json=payload,
-            headers=headers,
-            timeout=timeout_seconds,
+    if provider == "gemini":
+        # Gemini Vision API – images as inlineData
+        gurl = (
+            f"https://generativelanguage.googleapis.com/v1beta"
+            f"/models/{model}:generateContent?key={api_key}"
         )
-    except Exception as exc:
-        raise RuntimeError(f"OpenAI Vision API request failed: {exc}") from exc
-
-    if resp.status_code >= 400:
+        g_parts: list[dict[str, Any]] = [{"text": intro_text}]
+        for idx2, (fname2, img_bytes2) in enumerate(image_files):
+            label2 = timeframe_labels[idx2] if idx2 < len(timeframe_labels) else f"\ucc28\ud2b82{idx2 + 1}"
+            data_url2 = _image_bytes_to_data_url(img_bytes2, fname2)
+            mime2 = data_url2.split(";")[0].split("data:")[1]
+            b64_2 = data_url2.split(";base64,")[1]
+            g_parts.append({"text": f"[{label2} \ucc28\ud2b8]"})
+            g_parts.append({"inlineData": {"mimeType": mime2, "data": b64_2}})
+        g_payload = {
+            "contents": [{"role": "user", "parts": g_parts}],
+            "systemInstruction": {"parts": [{"text": _VISION_SYSTEM_PROMPT}]},
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "temperature": 0.3,
+            },
+        }
         try:
-            err_body = resp.json()
-        except Exception:
-            err_body = resp.text
-        raise RuntimeError(f"OpenAI Vision API error {resp.status_code}: {err_body}")
-
-    data = resp.json()
-    raw_content = data["choices"][0]["message"]["content"]
-
-    try:
-        ai_result = json.loads(raw_content)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Failed to parse OpenAI response as JSON: {exc}\nRaw: {raw_content[:500]}") from exc
+            resp = httpx.post(gurl, json=g_payload, timeout=timeout_seconds)
+        except Exception as exc:
+            raise RuntimeError(f"Gemini Vision API request failed: {exc}") from exc
+        if resp.status_code >= 400:
+            try:
+                err_body = resp.json()
+            except Exception:
+                err_body = resp.text
+            raise RuntimeError(f"Gemini Vision API error {resp.status_code}: {err_body}")
+        data = resp.json()
+        try:
+            raw_content = data["candidates"][0]["content"]["parts"][0]["text"]
+            ai_result = json.loads(raw_content)
+        except (KeyError, IndexError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Failed to parse Gemini Vision response: {exc}\nRaw: {data}") from exc
+    else:
+        # OpenAI / Groq Vision (OpenAI-compatible)
+        base_url_v = "https://api.groq.com/openai/v1" if provider == "groq" else "https://api.openai.com/v1"
+        oa_payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": _VISION_SYSTEM_PROMPT},
+                {"role": "user", "content": content},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 4096,
+            "response_format": {"type": "json_object"},
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            resp = httpx.post(
+                f"{base_url_v}/chat/completions",
+                json=oa_payload,
+                headers=headers,
+                timeout=timeout_seconds,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Vision API request failed: {exc}") from exc
+        if resp.status_code >= 400:
+            try:
+                err_body = resp.json()
+            except Exception:
+                err_body = resp.text
+            raise RuntimeError(f"Vision API error {resp.status_code}: {err_body}")
+        data = resp.json()
+        raw_content = data["choices"][0]["message"]["content"]
+        try:
+            ai_result = json.loads(raw_content)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Failed to parse response as JSON: {exc}\nRaw: {raw_content[:500]}") from exc
 
     return {
         "symbol": symbol,

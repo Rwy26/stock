@@ -243,6 +243,40 @@ export function AiChartPage() {
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<AnalysisResponse | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [showKeyPanel, setShowKeyPanel] = useState(false)
+  const [keyProvider, setKeyProvider] = useState<'gemini' | 'groq' | 'openai'>('gemini')
+  const [apiKeyInput, setApiKeyInput] = useState('')
+  const [keyStatus, setKeyStatus] = useState<'idle' | 'saving' | 'ok' | 'err'>('idle')
+  const [keyMsg, setKeyMsg] = useState('')
+
+  const providerPrefixes: Record<string, string> = { openai: 'sk-', gemini: 'AIza', groq: 'gsk_' }
+  const providerHints: Record<string, string> = {
+    openai: 'sk-로 시작 · platform.openai.com/api-keys',
+    gemini: 'AIza로 시작 · aistudio.google.com/app/apikey',
+    groq: 'gsk_로 시작 · console.groq.com/keys',
+  }
+
+  async function saveApiKey(e: React.FormEvent) {
+    e.preventDefault()
+    const key = apiKeyInput.trim()
+    const prefix = providerPrefixes[keyProvider]
+    if (!key.startsWith(prefix)) {
+      setKeyStatus('err'); setKeyMsg(`${providerHints[keyProvider]}`); return
+    }
+    setKeyStatus('saving')
+    try {
+      await fetchJson('/api/ai/chart-analysis/set-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: key, provider: keyProvider }),
+      })
+      setKeyStatus('ok'); setKeyMsg('저장 완료! AI 분석을 바로 사용할 수 있습니다')
+      setApiKeyInput('')
+      setTimeout(() => setShowKeyPanel(false), 1800)
+    } catch (err: unknown) {
+      setKeyStatus('err'); setKeyMsg(err instanceof Error ? err.message : String(err))
+    }
+  }
 
   const processFiles = useCallback(async (incoming: File[]) => {
     const accepted = incoming.filter(f =>
@@ -349,6 +383,7 @@ export function AiChartPage() {
       try {
         const data = await fetchJson<AnalysisResponse>('/api/ai/chart-analysis', {
           method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ symbol: symCode.trim(), period, interval: intv }),
         })
         setResult(data)
@@ -367,10 +402,64 @@ export function AiChartPage() {
       <header className="topbar glass">
         <div>
           <p className="top-label">AI CHART ANALYSIS</p>
-          <h2>AI 차트 분석</h2>
-          <p className="subtle">차트 이미지 · CSV를 드롭하거나 종목코드로 즉시 AI 분석</p>
+          <h2>AI 차트 분析</h2>
+          <p className="subtle">차트 이미지 · CSV를 드롭하거나 종목코드로 즉시 AI 분析</p>
         </div>
+        <button type="button" className="ai-key-settings-btn" onClick={() => { setShowKeyPanel(v => !v); setKeyStatus('idle'); setKeyMsg('') }}
+          title="OpenAI API 키 설정">
+          🔑 API 키 설정
+        </button>
       </header>
+
+      {showKeyPanel && (
+        <div className="ai-key-panel panel glass">
+          <div className="ai-key-panel-head">
+            <span>🔑 AI API 키 설정</span>
+            <button type="button" className="ai-key-close" onClick={() => setShowKeyPanel(false)}>✕</button>
+          </div>
+          <div className="ai-provider-tabs">
+            <button
+              type="button"
+              className={`ai-provider-tab${keyProvider === 'gemini' ? ' active' : ''}`}
+              onClick={() => { setKeyProvider('gemini'); setApiKeyInput(''); setKeyStatus('idle') }}
+            >Gemini <span className="free-badge">무료</span></button>
+            <button
+              type="button"
+              className={`ai-provider-tab${keyProvider === 'groq' ? ' active' : ''}`}
+              onClick={() => { setKeyProvider('groq'); setApiKeyInput(''); setKeyStatus('idle') }}
+            >Groq <span className="free-badge">무료</span></button>
+            <button
+              type="button"
+              className={`ai-provider-tab${keyProvider === 'openai' ? ' active' : ''}`}
+              onClick={() => { setKeyProvider('openai'); setApiKeyInput(''); setKeyStatus('idle') }}
+            >OpenAI</button>
+          </div>
+          <p className="ai-key-hint">
+            {keyProvider === 'gemini' && <><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">aistudio.google.com/app/apikey</a>에서 무료 발급 · <code>AIza</code>로 시작</>}
+            {keyProvider === 'groq' && <><a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">console.groq.com/keys</a>에서 무료 발급 · <code>gsk_</code>로 시작</>}
+            {keyProvider === 'openai' && <><a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">platform.openai.com/api-keys</a>에서 발급 · <code>sk-</code>로 시작</>}
+            <br />키는 <code>backend/.env</code>에 저장되며 즉시 적용됩니다.
+          </p>
+          <form onSubmit={saveApiKey} className="ai-key-form">
+            <input
+              type="password"
+              placeholder={providerPrefixes[keyProvider] + '...'}
+              value={apiKeyInput}
+              onChange={e => { setApiKeyInput(e.target.value); setKeyStatus('idle') }}
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <button type="submit" className="btn" disabled={keyStatus === 'saving'}>
+              {keyStatus === 'saving' ? '저장 중...' : '저장'}
+            </button>
+          </form>
+          {keyMsg && (
+            <p className={`ai-key-msg ${keyStatus}`}>
+              {keyStatus === 'ok' ? '✅' : '❌'} {keyMsg}
+            </p>
+          )}
+        </div>
+      )}
 
       <div className="ai-chart-layout">
         <div className="ai-left">
@@ -432,15 +521,21 @@ export function AiChartPage() {
               )}
 
               <div className="panel glass" style={{ padding: '12px 14px', display: 'grid', gap: '10px' }}>
-                <label>
-                  종목명 / 코드 <span style={{ color: '#ef4444' }}>*</span>
-                  <div className="ai-stock-input-wrap">
-                    <input value={symbol}
-                      onChange={e => { setSymbol(e.target.value); setSymbolAutoDetected(false) }}
-                      placeholder="예: 삼성전기, 009150, AAPL" />
-                    {symbolAutoDetected && <span className="ai-auto-tag">자동감지</span>}
+                {symbolAutoDetected ? (
+                  <div className="ai-detected-symbol-row">
+                    <span className="ai-detail-label">종목</span>
+                    <span className="ai-auto-tag" style={{ fontSize: '0.9rem', padding: '3px 10px' }}>{symbol}</span>
+                    <button type="button" className="ai-edit-symbol-btn"
+                      onClick={() => setSymbolAutoDetected(false)}>✏️ 수정</button>
                   </div>
-                </label>
+                ) : (
+                  <label>
+                    종목명 / 코드 <span style={{ color: '#ef4444' }}>*</span>
+                    <input value={symbol}
+                      onChange={e => setSymbol(e.target.value)}
+                      placeholder="예: 삼성전기, 009150, AAPL" />
+                  </label>
+                )}
                 <label>
                   추가 정보 <span className="hint">(선택)</span>
                   <input value={extraContext} onChange={e => setExtraContext(e.target.value)}

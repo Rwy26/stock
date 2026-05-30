@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import secrets
 import string
 import threading
@@ -3020,15 +3021,40 @@ from pydantic import BaseModel as _BaseModel, Field as _Field
 from typing import Optional as _Optional, List as _List
 
 
+def _resolve_ai_provider() -> tuple[str, str, str]:
+    """Returns (provider, api_key, model). Auto-selects based on configured keys.
+
+    Priority (auto mode): Gemini → Groq → OpenAI
+    """
+    ai_prov = os.environ.get("AI_PROVIDER", settings.ai_provider).strip().lower() or "auto"
+    gemini_key = os.environ.get("GEMINI_API_KEY", settings.gemini_api_key).strip()
+    groq_key = os.environ.get("GROQ_API_KEY", settings.groq_api_key).strip()
+    openai_key = os.environ.get("OPENAI_API_KEY", settings.openai_api_key).strip()
+
+    if ai_prov == "auto":
+        if gemini_key:
+            return "gemini", gemini_key, settings.gemini_model
+        if groq_key:
+            return "groq", groq_key, settings.groq_model
+        if openai_key:
+            return "openai", openai_key, settings.openai_model
+        return "none", "", ""
+    if ai_prov == "gemini":
+        return "gemini", gemini_key, settings.gemini_model
+    if ai_prov == "groq":
+        return "groq", groq_key, settings.groq_model
+    return "openai", openai_key, settings.openai_model
+
+
 class ChartAnalysisRequest(_BaseModel):
-    symbol: str = _Field(..., description="종목코드 (예: '005930', '005930.KS', 'AAPL')")
-    period: str = _Field("6mo", description="조회 기간: 1mo/3mo/6mo/1y/2y/5y")
-    interval: str = _Field("1d", description="봉 단위: 1d/1wk/1mo")
-    ohlcv_records: _Optional[_List[dict]] = _Field(None, description="직접 OHLCV 데이터 제공 (JSON array)")
+    symbol: str = _Field(..., description="\uc885\ubaa9\ucf54\ub4dc (\uc608: '005930', '005930.KS', 'AAPL')")
+    period: str = _Field("6mo", description="\uc870\ud68c \uae30\uac04: 1mo/3mo/6mo/1y/2y/5y")
+    interval: str = _Field("1d", description="\ubd09 \ub2e8\uc704: 1d/1wk/1mo")
+    ohlcv_records: _Optional[_List[dict]] = _Field(None, description="\uc9c1\uc811 OHLCV \ub370\uc774\ud130 \uc81c\uacf5 (JSON array)")
 
 
 class ChartAnalysisCSVRequest(_BaseModel):
-    symbol: str = _Field(..., description="종목코드 또는 종목명 (식별용)")
+    symbol: str = _Field(..., description="\uc885\ubaa9\ucf54\ub4dc \ub610\ub294 \uc885\ubaa9\uba85 (\uc2dd\ubcc4\uc6a9)")
 
 
 @app.post("/api/ai/chart-analysis")
@@ -3044,18 +3070,19 @@ async def ai_chart_analysis(
     if _chart_analysis is None:
         raise HTTPException(status_code=503, detail="chart_analysis module not available")
 
-    api_key = settings.openai_api_key
+    provider, api_key, model = _resolve_ai_provider()
     if not api_key:
         raise HTTPException(
             status_code=503,
-            detail="OPENAI_API_KEY is not configured. Set it in backend/.env",
+            detail="AI API key not configured. Set GEMINI_API_KEY / GROQ_API_KEY / OPENAI_API_KEY in backend/.env",
         )
 
     try:
         result = _chart_analysis.analyze_chart(
             symbol=req.symbol.strip(),
-            openai_api_key=api_key,
-            openai_model=settings.openai_model,
+            api_key=api_key,
+            model=model,
+            provider=provider,
             yfinance_period=req.period if req.ohlcv_records is None else None,
             yfinance_interval=req.interval,
             ohlcv_records=req.ohlcv_records,
@@ -3084,11 +3111,11 @@ async def ai_chart_analysis_upload(
     if _chart_analysis is None:
         raise HTTPException(status_code=503, detail="chart_analysis module not available")
 
-    api_key = settings.openai_api_key
+    provider, api_key, model = _resolve_ai_provider()
     if not api_key:
         raise HTTPException(
             status_code=503,
-            detail="OPENAI_API_KEY is not configured. Set it in backend/.env",
+            detail="AI API key not configured. Set GEMINI_API_KEY / GROQ_API_KEY / OPENAI_API_KEY in backend/.env",
         )
 
     content_type = (file.content_type or "").lower()
@@ -3103,8 +3130,9 @@ async def ai_chart_analysis_upload(
     try:
         result = _chart_analysis.analyze_chart(
             symbol=symbol.strip(),
-            openai_api_key=api_key,
-            openai_model=settings.openai_model,
+            api_key=api_key,
+            model=model,
+            provider=provider,
             csv_content=raw,
         )
     except ValueError as exc:
@@ -3120,12 +3148,60 @@ async def ai_chart_analysis_upload(
 @app.get("/api/ai/chart-analysis/status")
 def ai_chart_analysis_status(_current_user=Depends(get_current_user)):
     """AI 차트 분석 기능 사용 가능 여부 확인."""
+    provider, api_key, model = _resolve_ai_provider()
     return {
-        "available": _chart_analysis is not None and bool(settings.openai_api_key),
-        "openai_configured": bool(settings.openai_api_key),
-        "openai_model": settings.openai_model,
+        "available": _chart_analysis is not None and bool(api_key),
+        "active_provider": provider if api_key else "none",
+        "active_model": model,
+        "openai_configured": bool(os.environ.get("OPENAI_API_KEY", settings.openai_api_key).strip()),
+        "gemini_configured": bool(os.environ.get("GEMINI_API_KEY", settings.gemini_api_key).strip()),
+        "groq_configured": bool(os.environ.get("GROQ_API_KEY", settings.groq_api_key).strip()),
         "module_loaded": _chart_analysis is not None,
     }
+
+
+class _AiKeyBody(_BaseModel):
+    api_key: str
+    provider: str = "openai"  # "openai" | "gemini" | "groq"
+
+
+@app.post("/api/ai/chart-analysis/set-key")
+def ai_chart_set_key(body: _AiKeyBody, _current_user=Depends(get_current_user)):
+    """AI API 키를 backend/.env에 저장하고 런타임에 즉시 적용."""
+    key = body.api_key.strip()
+    provider = body.provider.strip().lower()
+
+    # Validate key prefix
+    prefix_map = {"openai": "sk-", "gemini": "AIza", "groq": "gsk_"}
+    prefix = prefix_map.get(provider, "")
+    if prefix and not key.startswith(prefix):
+        raise HTTPException(
+            status_code=400,
+            detail=f"올바른 {provider.title()} API 키가 아닙니다 ({prefix}로 시작해야 함)",
+        )
+
+    env_var_map = {"openai": "OPENAI_API_KEY", "gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY"}
+    settings_attr_map = {"openai": "openai_api_key", "gemini": "gemini_api_key", "groq": "groq_api_key"}
+    env_var = env_var_map.get(provider, "OPENAI_API_KEY")
+    attr = settings_attr_map.get(provider, "openai_api_key")
+
+    env_path = REPO_ROOT / "backend" / ".env"
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    found = False
+    for i, line in enumerate(lines):
+        if line.startswith(f"{env_var}="):
+            lines[i] = f"{env_var}={key}"
+            found = True
+            break
+    if not found:
+        lines.append(f"{env_var}={key}")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # Apply at runtime immediately
+    os.environ[env_var] = key
+    object.__setattr__(settings, attr, key)
+
+    return {"ok": True, "message": f"{provider.title()} API 키가 저장되었습니다", "provider": provider}
 
 
 @app.post("/api/ai/chart-analysis/image")
@@ -3148,11 +3224,11 @@ async def ai_chart_analysis_image(
     if _chart_analysis is None:
         raise HTTPException(status_code=503, detail="chart_analysis module not available")
 
-    api_key = settings.openai_api_key
+    provider, api_key, model = _resolve_ai_provider()
     if not api_key:
         raise HTTPException(
             status_code=503,
-            detail="OPENAI_API_KEY is not configured. Set it in backend/.env",
+            detail="AI API key not configured. Set GEMINI_API_KEY / GROQ_API_KEY / OPENAI_API_KEY in backend/.env",
         )
 
     if not files:
@@ -3177,17 +3253,21 @@ async def ai_chart_analysis_image(
             raise HTTPException(status_code=413, detail=f"{upload.filename}: 파일 크기가 10MB를 초과합니다")
         image_files.append((upload.filename or "chart.png", raw))
 
-    # Use gpt-4o for vision (better than gpt-4o-mini for chart reading)
-    vision_model = settings.openai_model
-    if vision_model == "gpt-4o-mini":
+    # For vision: Gemini uses gemini-2.5-flash, OpenAI needs gpt-4o
+    if provider == "openai" and model == "gpt-4o-mini":
         vision_model = "gpt-4o"
+    elif provider == "gemini":
+        vision_model = model  # gemini-2.5-flash supports vision
+    else:
+        vision_model = model
 
     try:
         result = _chart_analysis.analyze_chart_images(
             symbol=symbol.strip(),
             image_files=image_files,
-            openai_api_key=api_key,
-            openai_model=vision_model,
+            api_key=api_key,
+            model=vision_model,
+            provider=provider,
             extra_context=extra_context,
         )
     except ValueError as exc:
