@@ -14,6 +14,7 @@ type RecommendationItem = {
 type RecommendationsResponse = {
   date: string
   items: RecommendationItem[]
+  priceError?: string | null
 }
 
 export function RecommendationsPage() {
@@ -114,6 +115,13 @@ export function RecommendationsPage() {
           총점 = 가치(29) + 수급(26) + 수익(21) + 성장(6) + 기술(18)
         </p>
       </section>
+
+      {data?.priceError && (
+        <div className="banner warn" style={{ marginBottom: 12 }}>
+          ⚠️ KIS 실시간 시세 조회 실패 — 현재가/등락률은 0으로 표시됩니다.
+          <span className="hint" style={{ marginLeft: 8 }}>{data.priceError}</span>
+        </div>
+      )}
 
       <section className="panel glass reveal">
         <div className="panel-head">

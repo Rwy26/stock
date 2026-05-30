@@ -29,6 +29,11 @@ try:
 except Exception:  # pragma: no cover
     models = None
 
+try:
+    import scoring_engine as _scoring_engine
+except Exception:  # pragma: no cover
+    _scoring_engine = None
+
 import auth
 from pipeline_paths import get_pipeline_paths
 from settings import settings
@@ -1284,11 +1289,14 @@ def get_recommendations(_current_user=Depends(get_current_user)):
             ).all()
 
         items: list[dict] = []
+        kis_error: str | None = None
         for rank, score_total, stock_code, name in rows:
+            price, change_rate = 0.0, 0.0
             try:
                 price, change_rate = _get_realtime_price_and_change(db, user_profile, stock_code)
             except Exception as exc:
-                raise HTTPException(status_code=503, detail=f"KIS 시세 조회 실패: {exc}") from exc
+                if kis_error is None:
+                    kis_error = str(exc)
             items.append(
                 {
                     "rank": int(rank or 0),
@@ -1300,7 +1308,7 @@ def get_recommendations(_current_user=Depends(get_current_user)):
                 }
             )
 
-        return {"date": today.isoformat(), "items": items}
+        return {"date": today.isoformat(), "items": items, "priceError": kis_error}
     finally:
         db.close()
 
@@ -1695,6 +1703,213 @@ def admin_generate_recommendations_today(_admin=Depends(require_admin)):
         return {"ok": True, "date": today.isoformat(), "scoreDate": score_date, "upserted": int(count)}
     finally:
         db.close()
+
+
+# ─── Scoring Engine Endpoints ─────────────────────────────────────────────────
+
+@app.get("/api/admin/scoring/status")
+def admin_scoring_status(_admin=Depends(require_admin)):
+    """3-Tier 스코어링 엔진 상태 및 최근 실행 정보."""
+    if _scoring_engine is None:
+        return {"available": False, "reason": "scoring_engine 모듈 로드 실패"}
+
+    if apollo_db is None or models is None:
+        return {"available": True, "db": False, "reason": "DB 모듈 없음"}
+
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        latest_date = db.execute(
+            select(func.max(models.IndicatorScore.scoring_date))
+        ).scalar_one_or_none()
+        total_scored = db.execute(
+            select(func.count(models.IndicatorScore.id))
+            .where(models.IndicatorScore.scoring_date == latest_date)
+        ).scalar_one_or_none() if latest_date else 0
+        total_stocks = db.execute(select(func.count(models.Stock.code))).scalar_one_or_none()
+    finally:
+        db.close()
+
+    return {
+        "available": True,
+        "module_loaded": _scoring_engine is not None,
+        "latest_scoring_date": latest_date.isoformat() if latest_date else None,
+        "scored_count": int(total_scored or 0),
+        "total_stocks": int(total_stocks or 0),
+        "tiers": {
+            "tier1": "섹터 알파 (Alpha, Sharpe, 수급 – KIS 필요)",
+            "tier2": "바닥 탈출 (MA골든크로스, 볼린저, 거래량폭등, 다이버전스, 실적)",
+            "tier3": "급락 위험 필터 (거래량고갈, 공매도, Bearish다이버전스, 음봉, 162% 과열)",
+        },
+        "scoring_weights": {
+            "score_tech (Tier2)": "×3",
+            "score_flow (수급)": "×3",
+            "score_value (Tier1 알파)": "×2",
+            "score_profit (실적)": "×1",
+            "score_growth (Tier3 역점수)": "×1",
+            "max_total": 100,
+        },
+    }
+
+
+@app.post("/api/admin/scoring/run")
+def admin_scoring_run(
+    payload: dict = Body(default={}),
+    _admin=Depends(require_admin),
+):
+    """3-Tier 스코어링 실행 후 IndicatorScore 저장.
+
+    Body (선택):
+    {
+        "codes": ["005930", "000660", ...],   // 없으면 DB 전체 종목
+        "max_workers": 4,
+        "supply_demand_map": {                // 수급 데이터 (없으면 기술적 조건만)
+            "005930": {
+                "foreign_net_buy_days": 8,
+                "inst_net_buy_days": 5,
+                "program_buy_days": 4,
+                "consensus_revised_up": true,
+                "earnings_turnaround": true,
+                "short_sell_surge_3d": false,
+                "op_margin_4q_decline": false,
+                "sector_peakout": false
+            }
+        }
+    }
+    """
+    if _scoring_engine is None:
+        raise HTTPException(status_code=503, detail="scoring_engine 모듈 없음")
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB 모듈 없음")
+
+    max_workers      = int(payload.get("max_workers", 4))
+    supply_demand_map: dict = payload.get("supply_demand_map") or {}
+    codes: list[str] | None = payload.get("codes")
+
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        if not codes:
+            rows = db.execute(select(models.Stock.code)).scalars().all()
+            codes = list(rows)
+        if not codes:
+            return {"ok": True, "upserted": 0, "msg": "스코어링 대상 종목 없음"}
+    finally:
+        db.close()
+
+    today = date.today()
+    results = _scoring_engine.run_batch(
+        codes,
+        scoring_date=today,
+        supply_demand_map=supply_demand_map,
+        max_workers=min(max_workers, 8),
+    )
+
+    # DB 저장
+    upserted = 0
+    db2: Session = apollo_db.get_session_factory()()
+    try:
+        for res in results:
+            existing = db2.execute(
+                select(models.IndicatorScore)
+                .where(
+                    models.IndicatorScore.stock_code == res.stock_code,
+                    models.IndicatorScore.scoring_date == res.scoring_date,
+                )
+            ).scalar_one_or_none()
+
+            if existing is None:
+                db2.add(models.IndicatorScore(
+                    stock_code=res.stock_code,
+                    scoring_date=res.scoring_date,
+                    score_value=res.score_value,
+                    score_flow=res.score_flow,
+                    score_profit=res.score_profit,
+                    score_growth=res.score_growth,
+                    score_tech=res.score_tech,
+                    score_total=res.score_total,
+                    details=res.details,
+                ))
+            else:
+                existing.score_value  = res.score_value
+                existing.score_flow   = res.score_flow
+                existing.score_profit = res.score_profit
+                existing.score_growth = res.score_growth
+                existing.score_tech   = res.score_tech
+                existing.score_total  = res.score_total
+                existing.details      = res.details
+            upserted += 1
+
+        db2.commit()
+
+        # 추천 테이블도 갱신
+        _generate_recommendations_for_date(db2, rec_date=today, limit=200)
+        db2.commit()
+    finally:
+        db2.close()
+
+    eligible = [r for r in results if r.details.get("recommendation_eligible")]
+    top10 = [
+        {
+            "code": r.stock_code,
+            "score": r.score_total,
+            "tech": r.score_tech,
+            "value": r.score_value,
+            "growth": r.score_growth,
+        }
+        for r in results[:10]
+    ]
+    return {
+        "ok": True,
+        "date": today.isoformat(),
+        "total_scored": len(results),
+        "upserted": upserted,
+        "eligible_count": len(eligible),
+        "top10": top10,
+    }
+
+
+@app.post("/api/admin/scoring/preview")
+def admin_scoring_preview(
+    payload: dict = Body(...),
+    _admin=Depends(require_admin),
+):
+    """단일 종목 스코어 미리보기 (DB 저장 없음, 즉시 반환).
+
+    Body: { "code": "005930", "supply_demand": { ... } }
+    """
+    if _scoring_engine is None:
+        raise HTTPException(status_code=503, detail="scoring_engine 모듈 없음")
+
+    code = (payload.get("code") or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="종목코드(code) 필요")
+
+    supply_demand = payload.get("supply_demand") or {}
+
+    try:
+        result = _scoring_engine.compute_stock_score(
+            code,
+            scoring_date=date.today(),
+            supply_demand=supply_demand,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"스코어링 오류: {exc}") from exc
+
+    return {
+        "code": result.stock_code,
+        "date": result.scoring_date.isoformat(),
+        "scores": {
+            "tech":   result.score_tech,
+            "flow":   result.score_flow,
+            "value":  result.score_value,
+            "profit": result.score_profit,
+            "growth": result.score_growth,
+            "total":  result.score_total,
+        },
+        "eligible": result.details.get("recommendation_eligible", False),
+        "tier2_met": result.details.get("tier2_met_count", 0),
+        "tier3_risk": result.details.get("tier3_risk_count", 0),
+        "details": result.details,
+    }
 
 
 @app.get("/api/automation/sa")
