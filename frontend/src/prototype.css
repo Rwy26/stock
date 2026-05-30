@@ -900,6 +900,28 @@ select {
   vertical-align: middle;
 }
 
+/* Probability & Valuation Row */
+.ai-prob-row {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 4px;
+  flex-wrap: wrap;
+}
+.ai-prob-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.ai-prob-chip.up    { background: rgba(34,197,94,.2);  color: #86efac; border: 1px solid rgba(34,197,94,.35); }
+.ai-prob-chip.down  { background: rgba(239,68,68,.18); color: #fca5a5; border: 1px solid rgba(239,68,68,.3); }
+.ai-prob-chip.val-under { background: rgba(99,102,241,.2); color: #a5b4fc; border: 1px solid rgba(99,102,241,.35); }
+.ai-prob-chip.val-over  { background: rgba(245,158,11,.18); color: #fcd34d; border: 1px solid rgba(245,158,11,.3); }
+.ai-prob-chip.val-fair  { background: rgba(255,255,255,.1); color: #e2e8f0; border: 1px solid rgba(255,255,255,.2); }
+
 /* Analyze Button */
 .ai-analyze-btn {
   width: 100%;

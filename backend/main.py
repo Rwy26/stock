@@ -3171,8 +3171,8 @@ def ai_chart_set_key(body: _AiKeyBody, _current_user=Depends(get_current_user)):
     key = body.api_key.strip()
     provider = body.provider.strip().lower()
 
-    # Validate key prefix
-    prefix_map = {"openai": "sk-", "gemini": "AIza", "groq": "gsk_"}
+    # Validate key prefix (Gemini prefix check is optional – key format varies)
+    prefix_map = {"openai": "sk-", "groq": "gsk_"}
     prefix = prefix_map.get(provider, "")
     if prefix and not key.startswith(prefix):
         raise HTTPException(

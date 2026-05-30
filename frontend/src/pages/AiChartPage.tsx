@@ -9,19 +9,25 @@ interface AiResult {
   current_price?: string
   signal?: '매수' | '매도' | '관망'
   confidence?: number
+  rise_probability?: number
+  fall_probability?: number
+  valuation?: '저평가' | '적정' | '고평가'
   trend?: string
   summary?: string
+  ict_analysis?: { order_block?: string; fvg?: string; liquidity?: string; market_structure?: string; zone?: string }
   company_analysis?: { sector?: string; key_products?: string; current_position?: string }
   technical?: {
     trend_detail?: string; ma_alignment?: string
     support_zones?: string[]; resistance_zones?: string[]
     rsi?: string; macd?: string; bollinger?: string; volume?: string; patterns?: string
   }
+  catalysts?: { news_materials?: string; sector_expectation?: string; risk_factors?: string[] }
   rise_reason?: { catalyst?: string; sector_trend?: string; news_factors?: string[] }
-  targets?: { target_1?: string; target_2?: string; target_3?: string; basis?: string }
+  targets?: { entry_zone?: string; target_1?: string; target_2?: string; stop_loss?: string; risk_reward?: string; basis?: string; target_3?: string }
   supply_demand?: { key_volume_zone?: string; stop_loss_swing?: string; stop_loss_short?: string; risk_reward?: string; entry_zone?: string }
   risks?: string[]
   outlook?: { short_term?: string; mid_term?: string }
+  data_needed?: string | null
 }
 
 interface AnalysisResponse {
@@ -130,11 +136,29 @@ function ResultView({ data }: { data: AnalysisResponse }) {
             </div>
           </div>
           <div style={{ textAlign: 'right', fontSize: '0.78rem', color: 'var(--text-soft)' }}>
-            <div>{data.symbol}{r.company_analysis?.sector ? ` · ${r.company_analysis.sector}` : ''}</div>
+            <div>{data.symbol}{r.company_analysis?.sector ? ` · ${r.company_analysis.sector}` : ''}{r.ict_analysis?.zone ? ` · ${r.ict_analysis.zone}` : ''}</div>
             {data.images_count != null && <div>{data.images_count}개 이미지 분석</div>}
             <div>{new Date(data.analyzed_at).toLocaleString('ko-KR')}</div>
           </div>
         </div>
+
+        {/* 상승/하락 확률 + 평가 */}
+        {(r.rise_probability != null || r.fall_probability != null || r.valuation) && (
+          <div className="ai-prob-row">
+            {r.rise_probability != null && (
+              <span className="ai-prob-chip up">▲ 상승 {r.rise_probability}%</span>
+            )}
+            {r.fall_probability != null && (
+              <span className="ai-prob-chip down">▼ 하락 {r.fall_probability}%</span>
+            )}
+            {r.valuation && (
+              <span className={`ai-prob-chip val-${r.valuation === '저평가' ? 'under' : r.valuation === '고평가' ? 'over' : 'fair'}`}>
+                {r.valuation === '저평가' ? '💹' : r.valuation === '고평가' ? '📈' : '⚖️'} {r.valuation}
+              </span>
+            )}
+          </div>
+        )}
+
         <div className="ai-signal-meta">
           {r.trend && (
             <span className="ai-meta-chip">
@@ -146,8 +170,8 @@ function ResultView({ data }: { data: AnalysisResponse }) {
           {r.current_price && (
             <span className="ai-meta-chip">현재가&nbsp;<span className="ai-meta-val">{r.current_price}</span></span>
           )}
-          {r.supply_demand?.risk_reward && (
-            <span className="ai-meta-chip">R/R&nbsp;<span className="ai-meta-val">{r.supply_demand.risk_reward}</span></span>
+          {(r.targets?.risk_reward || r.supply_demand?.risk_reward) && (
+            <span className="ai-meta-chip">R/R&nbsp;<span className="ai-meta-val">{r.targets?.risk_reward ?? r.supply_demand?.risk_reward}</span></span>
           )}
         </div>
         {r.summary && <div className="ai-summary-box">{r.summary}</div>}
@@ -156,14 +180,24 @@ function ResultView({ data }: { data: AnalysisResponse }) {
       {(r.targets || r.supply_demand) && (
         <Section title="📌 목표가 · 진입 · 손절">
           <div className="ai-price-grid">
+            {(r.targets?.entry_zone || r.supply_demand?.entry_zone) && <div className="ai-price-chip entry"><span className="ai-price-label">진입 구간</span><span className="ai-price-val">{r.targets?.entry_zone ?? r.supply_demand?.entry_zone}</span></div>}
             {r.targets?.target_1 && <div className="ai-price-chip buy-1"><span className="ai-price-label">1차 목표가</span><span className="ai-price-val">{r.targets.target_1}</span></div>}
             {r.targets?.target_2 && <div className="ai-price-chip buy-2"><span className="ai-price-label">2차 목표가</span><span className="ai-price-val">{r.targets.target_2}</span></div>}
             {r.targets?.target_3 && <div className="ai-price-chip buy-3"><span className="ai-price-label">3차 목표가</span><span className="ai-price-val">{r.targets.target_3}</span></div>}
-            {r.supply_demand?.entry_zone && <div className="ai-price-chip entry"><span className="ai-price-label">진입 구간</span><span className="ai-price-val">{r.supply_demand.entry_zone}</span></div>}
-            {r.supply_demand?.stop_loss_swing && <div className="ai-price-chip stop1"><span className="ai-price-label">스윙 손절</span><span className="ai-price-val">{r.supply_demand.stop_loss_swing}</span></div>}
+            {(r.targets?.stop_loss || r.supply_demand?.stop_loss_swing) && <div className="ai-price-chip stop1"><span className="ai-price-label">⚠️ 손절 마지노선</span><span className="ai-price-val">{r.targets?.stop_loss ?? r.supply_demand?.stop_loss_swing}</span></div>}
             {r.supply_demand?.stop_loss_short && <div className="ai-price-chip stop2"><span className="ai-price-label">단기 손절</span><span className="ai-price-val">{r.supply_demand.stop_loss_short}</span></div>}
           </div>
           {r.targets?.basis && <p className="hint" style={{ marginTop: '0.6rem' }}>📎 {r.targets.basis}</p>}
+        </Section>
+      )}
+
+      {r.ict_analysis && (
+        <Section title="🧠 ICT 스마트머니 분석">
+          <DetailRow label="Order Block" value={r.ict_analysis.order_block} />
+          <DetailRow label="FVG / Imbalance" value={r.ict_analysis.fvg} />
+          <DetailRow label="유동성 청산" value={r.ict_analysis.liquidity} />
+          <DetailRow label="시장 구조" value={r.ict_analysis.market_structure} />
+          <DetailRow label="Zone" value={r.ict_analysis.zone} />
         </Section>
       )}
 
@@ -181,8 +215,22 @@ function ResultView({ data }: { data: AnalysisResponse }) {
         </Section>
       )}
 
-      {(r.company_analysis || r.rise_reason) && (
+      {(r.catalysts || r.company_analysis || r.rise_reason) && (
         <div className="two-col">
+          {r.catalysts && (
+            <Section title="📈 상승 재료 · 섹터 기대감">
+              <DetailRow label="뉴스/공시" value={r.catalysts.news_materials} />
+              <DetailRow label="미래 가치 기대감" value={r.catalysts.sector_expectation} />
+              {r.catalysts.risk_factors?.length ? (
+                <div className="ai-detail-row">
+                  <span className="ai-detail-label">리스크</span>
+                  <ul style={{ margin: 0, padding: '0 0 0 1rem' }}>
+                    {r.catalysts.risk_factors.map((f, i) => <li key={i} className="ai-detail-val">{f}</li>)}
+                  </ul>
+                </div>
+              ) : null}
+            </Section>
+          )}
           {r.company_analysis && (
             <Section title="🏢 기업 분석">
               <DetailRow label="섹터" value={r.company_analysis.sector} />
@@ -190,7 +238,7 @@ function ResultView({ data }: { data: AnalysisResponse }) {
               <DetailRow label="평가" value={r.company_analysis.current_position} />
             </Section>
           )}
-          {r.rise_reason && (
+          {!r.catalysts && r.rise_reason && (
             <Section title="🚀 상승 이유">
               <DetailRow label="촉매" value={r.rise_reason.catalyst} />
               <DetailRow label="섹터 트렌드" value={r.rise_reason.sector_trend} />
@@ -221,7 +269,11 @@ function ResultView({ data }: { data: AnalysisResponse }) {
           </ul>
         </Section>
       ) : null}
-
+      {r.data_needed && (
+        <Section title="ℹ️ 추가 정보 요청">
+          <p style={{ margin: 0, color: '#fbbf24', fontSize: '0.88rem' }}>📌 {r.data_needed}</p>
+        </Section>
+      )}
       <p className="ai-disclaimer">⚠️ AI 분석은 참고용입니다. 투자 결정의 책임은 본인에게 있습니다.</p>
     </div>
   )
@@ -249,7 +301,7 @@ export function AiChartPage() {
   const [keyStatus, setKeyStatus] = useState<'idle' | 'saving' | 'ok' | 'err'>('idle')
   const [keyMsg, setKeyMsg] = useState('')
 
-  const providerPrefixes: Record<string, string> = { openai: 'sk-', gemini: 'AIza', groq: 'gsk_' }
+  const providerPrefixes: Record<string, string> = { openai: 'sk-', gemini: '', groq: 'gsk_' }
   const providerHints: Record<string, string> = {
     openai: 'sk-로 시작 · platform.openai.com/api-keys',
     gemini: 'AIza로 시작 · aistudio.google.com/app/apikey',
@@ -260,7 +312,10 @@ export function AiChartPage() {
     e.preventDefault()
     const key = apiKeyInput.trim()
     const prefix = providerPrefixes[keyProvider]
-    if (!key.startsWith(prefix)) {
+    if (!key || key.length < 10) {
+      setKeyStatus('err'); setKeyMsg('API 키를 입력하세요'); return
+    }
+    if (prefix && !key.startsWith(prefix)) {
       setKeyStatus('err'); setKeyMsg(`${providerHints[keyProvider]}`); return
     }
     setKeyStatus('saving')
