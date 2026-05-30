@@ -1,5 +1,3 @@
-import React from "react";
-
 export function BolinzerPage() {
   return (
     <main className="bolinzer-shell">

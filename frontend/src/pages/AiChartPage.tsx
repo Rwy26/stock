@@ -1,55 +1,27 @@
-import { useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { fetchJson } from '../lib/api'
+import { getAccessToken } from '../lib/auth'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface AiResult {
   symbol?: string
-  timeframes?: string[]
   current_price?: string
   signal?: '매수' | '매도' | '관망'
   confidence?: number
   trend?: string
   summary?: string
-  company_analysis?: {
-    sector?: string
-    key_products?: string
-    current_position?: string
-  }
+  company_analysis?: { sector?: string; key_products?: string; current_position?: string }
   technical?: {
-    trend_detail?: string
-    ma_alignment?: string
-    support_zones?: string[]
-    resistance_zones?: string[]
-    rsi?: string
-    macd?: string
-    bollinger?: string
-    volume?: string
-    patterns?: string
+    trend_detail?: string; ma_alignment?: string
+    support_zones?: string[]; resistance_zones?: string[]
+    rsi?: string; macd?: string; bollinger?: string; volume?: string; patterns?: string
   }
-  rise_reason?: {
-    catalyst?: string
-    sector_trend?: string
-    news_factors?: string[]
-  }
-  targets?: {
-    target_1?: string
-    target_2?: string
-    target_3?: string
-    basis?: string
-  }
-  supply_demand?: {
-    key_volume_zone?: string
-    stop_loss_swing?: string
-    stop_loss_short?: string
-    risk_reward?: string
-    entry_zone?: string
-  }
+  rise_reason?: { catalyst?: string; sector_trend?: string; news_factors?: string[] }
+  targets?: { target_1?: string; target_2?: string; target_3?: string; basis?: string }
+  supply_demand?: { key_volume_zone?: string; stop_loss_swing?: string; stop_loss_short?: string; risk_reward?: string; entry_zone?: string }
   risks?: string[]
-  outlook?: {
-    short_term?: string
-    mid_term?: string
-  }
+  outlook?: { short_term?: string; mid_term?: string }
 }
 
 interface AnalysisResponse {
@@ -59,232 +31,198 @@ interface AnalysisResponse {
   analyzed_at: string
 }
 
-type TabKey = 'image' | 'symbol'
+type DroppedFile = { file: File; previewUrl?: string; type: 'image' | 'csv' }
+type Mode = 'drop' | 'code'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function signalColor(signal?: string) {
-  if (signal === '매수') return '#22c55e'
-  if (signal === '매도') return '#ef4444'
-  return '#f59e0b'
+function extractSymbolFromFilename(name: string): string {
+  const code6 = name.match(/\b(\d{6})\b/)
+  if (code6) return code6[1]
+  const ticker = name.match(/^([A-Z]{1,5})[_\-\s,]/)
+  if (ticker) return ticker[1]
+  return ''
 }
 
-function signalBg(signal?: string) {
-  if (signal === '매수') return 'rgba(34,197,94,0.12)'
-  if (signal === '매도') return 'rgba(239,68,68,0.12)'
-  return 'rgba(245,158,11,0.12)'
+function extractSymbolFromCsv(text: string): string {
+  const lines = text.split('\n').filter(Boolean)
+  if (!lines.length) return ''
+  const combined = lines.slice(0, 3).join(' ')
+  const code6 = combined.match(/\b(\d{6})\b/)
+  if (code6) return code6[1]
+  const ticker = combined.match(/\b([A-Z]{2,5})\b/)
+  if (ticker) return ticker[1]
+  return ''
 }
 
-function trendIcon(trend?: string) {
-  if (!trend) return '—'
-  if (trend.includes('상승')) return '▲ ' + trend
-  if (trend.includes('하락')) return '▼ ' + trend
-  return '→ ' + trend
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
+}
+
+function signalClass(signal?: string) {
+  if (signal === '매수') return 'buy'
+  if (signal === '매도') return 'sell'
+  return 'hold'
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function SignalBadge({ result }: { result: AiResult }) {
-  const color = signalColor(result.signal)
-  const bg = signalBg(result.signal)
+function DetailRow({ label, value }: { label: string; value?: string | null }) {
+  if (!value) return null
   return (
-    <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
-      <div style={{
-        padding: '0.5rem 1.4rem',
-        borderRadius: '999px',
-        background: bg,
-        border: `1.5px solid ${color}`,
-        color,
-        fontWeight: 700,
-        fontSize: '1.3rem',
-        letterSpacing: '0.05em',
-      }}>
-        {result.signal ?? '—'}
-      </div>
-      <div style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>
-        확신도&nbsp;
-        <span style={{ color: color, fontWeight: 700 }}>{result.confidence ?? '—'}%</span>
-        &nbsp;·&nbsp;추세&nbsp;
-        <span style={{ color: 'var(--fg)' }}>{trendIcon(result.trend)}</span>
-      </div>
-      {result.current_price && (
-        <div style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>
-          현재가 <span style={{ color: 'var(--fg)', fontWeight: 600 }}>{result.current_price}</span>
-        </div>
-      )}
+    <div className="ai-detail-row">
+      <span className="ai-detail-label">{label}</span>
+      <span className="ai-detail-val">{value}</span>
     </div>
   )
 }
 
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="panel glass" style={{ marginBottom: '1rem' }}>
-      <div className="panel-head" style={{ marginBottom: '0.75rem' }}>
-        <h3>{title}</h3>
-      </div>
+    <div className="panel glass reveal">
+      <div className="panel-head"><h3>{title}</h3></div>
       {children}
     </div>
   )
 }
 
-function Row({ label, value }: { label: string; value?: string | null }) {
-  if (!value) return null
+function LoadingSkeleton() {
   return (
-    <div style={{ display: 'flex', gap: '0.75rem', padding: '0.4rem 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-      <span style={{ color: 'var(--muted)', minWidth: '110px', fontSize: '0.85rem', paddingTop: '0.1rem' }}>{label}</span>
-      <span style={{ color: 'var(--fg)', fontSize: '0.9rem', lineHeight: 1.5 }}>{value}</span>
+    <div className="ai-loading-state">
+      <div className="panel glass" style={{ padding: '1.4rem 1.5rem' }}>
+        <div className="ai-loading-bar short" style={{ marginBottom: '12px' }} />
+        <div className="ai-loading-bar xlarge" />
+        <div className="ai-loading-bar medium" style={{ marginTop: '12px' }} />
+      </div>
+      <div className="panel glass" style={{ padding: '1.4rem 1.5rem' }}>
+        <div className="ai-loading-bar medium" style={{ marginBottom: '12px' }} />
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '8px' }}>
+          {[...Array(6)].map((_, i) => (
+            <div key={i} className="ai-loading-bar" style={{ height: '60px' }} />
+          ))}
+        </div>
+      </div>
+      <div className="panel glass" style={{ padding: '1.4rem 1.5rem' }}>
+        <div className="ai-loading-bar medium" style={{ marginBottom: '10px' }} />
+        {[...Array(4)].map((_, i) => <div key={i} className="ai-loading-bar long" style={{ marginBottom: '8px' }} />)}
+      </div>
     </div>
   )
 }
 
-function PriceChip({ label, value, color }: { label: string; value?: string; color: string }) {
-  if (!value) return null
-  return (
-    <div style={{
-      background: `${color}18`,
-      border: `1px solid ${color}55`,
-      borderRadius: '8px',
-      padding: '0.6rem 1rem',
-      minWidth: '120px',
-    }}>
-      <div style={{ color: 'var(--muted)', fontSize: '0.75rem', marginBottom: '0.2rem' }}>{label}</div>
-      <div style={{ color, fontWeight: 700, fontSize: '1rem' }}>{value}</div>
-    </div>
-  )
-}
-
-function ResultPanel({ data }: { data: AnalysisResponse }) {
+function ResultView({ data }: { data: AnalysisResponse }) {
   const r = data.ai_result
+  const cls = signalClass(r.signal)
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-      {/* 헤더 */}
-      <div className="panel glass" style={{ padding: '1.2rem 1.5rem', marginBottom: '0.5rem' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '0.75rem' }}>
-          <div>
-            <div style={{ color: 'var(--muted)', fontSize: '0.8rem', marginBottom: '0.3rem' }}>
-              {data.symbol}
-              {r.company_analysis?.sector && <span> · {r.company_analysis.sector}</span>}
-              {data.images_count != null && <span> · 이미지 {data.images_count}개 분석</span>}
+    <div className="ai-right">
+      <div className={`ai-signal-card ${cls} reveal`}>
+        <div className="ai-signal-top">
+          <div className="ai-signal-badge">
+            <span className={`ai-signal-pill ${cls}`}>{r.signal ?? '—'}</span>
+            <div className="ai-confidence-bar-wrap">
+              <div className="ai-confidence-label">확신도 {r.confidence ?? '—'}%</div>
+              <div className="ai-confidence-bar-bg">
+                <div className={`ai-confidence-bar-fill ${cls}`} style={{ width: `${r.confidence ?? 0}%` }} />
+              </div>
             </div>
-            <SignalBadge result={r} />
           </div>
-          <div style={{ color: 'var(--muted)', fontSize: '0.75rem', textAlign: 'right' }}>
-            분석 시각<br />
-            {new Date(data.analyzed_at).toLocaleString('ko-KR')}
+          <div style={{ textAlign: 'right', fontSize: '0.78rem', color: 'var(--text-soft)' }}>
+            <div>{data.symbol}{r.company_analysis?.sector ? ` · ${r.company_analysis.sector}` : ''}</div>
+            {data.images_count != null && <div>{data.images_count}개 이미지 분석</div>}
+            <div>{new Date(data.analyzed_at).toLocaleString('ko-KR')}</div>
           </div>
         </div>
-
-        {r.summary && (
-          <div style={{
-            marginTop: '1rem',
-            padding: '0.9rem 1rem',
-            background: 'rgba(255,255,255,0.04)',
-            borderRadius: '8px',
-            color: 'var(--fg)',
-            fontSize: '0.92rem',
-            lineHeight: 1.7,
-            borderLeft: '3px solid var(--accent)',
-          }}>
-            {r.summary}
-          </div>
-        )}
-      </div>
-
-      {/* 목표가 / 손절가 */}
-      {(r.targets || r.supply_demand) && (
-        <Card title="📌 목표가 · 손절가">
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem', marginBottom: r.targets?.basis ? '0.75rem' : 0 }}>
-            <PriceChip label="1차 목표가" value={r.targets?.target_1} color="#22c55e" />
-            <PriceChip label="2차 목표가" value={r.targets?.target_2} color="#86efac" />
-            <PriceChip label="3차 목표가" value={r.targets?.target_3} color="#bbf7d0" />
-            <PriceChip label="진입 구간" value={r.supply_demand?.entry_zone} color="#60a5fa" />
-            <PriceChip label="스윙 손절" value={r.supply_demand?.stop_loss_swing} color="#f87171" />
-            <PriceChip label="단기 손절" value={r.supply_demand?.stop_loss_short} color="#fca5a5" />
-          </div>
-          {r.targets?.basis && (
-            <div style={{ color: 'var(--muted)', fontSize: '0.85rem', marginTop: '0.5rem' }}>
-              근거: {r.targets.basis}
-            </div>
+        <div className="ai-signal-meta">
+          {r.trend && (
+            <span className="ai-meta-chip">
+              추세&nbsp;<span className="ai-meta-val">
+                {r.trend.includes('상승') ? '▲' : r.trend.includes('하락') ? '▼' : '→'} {r.trend}
+              </span>
+            </span>
+          )}
+          {r.current_price && (
+            <span className="ai-meta-chip">현재가&nbsp;<span className="ai-meta-val">{r.current_price}</span></span>
           )}
           {r.supply_demand?.risk_reward && (
-            <div style={{ color: 'var(--muted)', fontSize: '0.85rem', marginTop: '0.3rem' }}>
-              리스크/리워드: <span style={{ color: 'var(--fg)' }}>{r.supply_demand.risk_reward}</span>
-            </div>
+            <span className="ai-meta-chip">R/R&nbsp;<span className="ai-meta-val">{r.supply_demand.risk_reward}</span></span>
           )}
-        </Card>
+        </div>
+        {r.summary && <div className="ai-summary-box">{r.summary}</div>}
+      </div>
+
+      {(r.targets || r.supply_demand) && (
+        <Section title="📌 목표가 · 진입 · 손절">
+          <div className="ai-price-grid">
+            {r.targets?.target_1 && <div className="ai-price-chip buy-1"><span className="ai-price-label">1차 목표가</span><span className="ai-price-val">{r.targets.target_1}</span></div>}
+            {r.targets?.target_2 && <div className="ai-price-chip buy-2"><span className="ai-price-label">2차 목표가</span><span className="ai-price-val">{r.targets.target_2}</span></div>}
+            {r.targets?.target_3 && <div className="ai-price-chip buy-3"><span className="ai-price-label">3차 목표가</span><span className="ai-price-val">{r.targets.target_3}</span></div>}
+            {r.supply_demand?.entry_zone && <div className="ai-price-chip entry"><span className="ai-price-label">진입 구간</span><span className="ai-price-val">{r.supply_demand.entry_zone}</span></div>}
+            {r.supply_demand?.stop_loss_swing && <div className="ai-price-chip stop1"><span className="ai-price-label">스윙 손절</span><span className="ai-price-val">{r.supply_demand.stop_loss_swing}</span></div>}
+            {r.supply_demand?.stop_loss_short && <div className="ai-price-chip stop2"><span className="ai-price-label">단기 손절</span><span className="ai-price-val">{r.supply_demand.stop_loss_short}</span></div>}
+          </div>
+          {r.targets?.basis && <p className="hint" style={{ marginTop: '0.6rem' }}>📎 {r.targets.basis}</p>}
+        </Section>
       )}
 
-      {/* 기업 분석 */}
-      {r.company_analysis && (
-        <Card title="🏢 기업 분석">
-          <Row label="섹터" value={r.company_analysis.sector} />
-          <Row label="핵심 제품" value={r.company_analysis.key_products} />
-          <Row label="현재 평가" value={r.company_analysis.current_position} />
-        </Card>
-      )}
-
-      {/* 기술적 분석 */}
       {r.technical && (
-        <Card title="📊 기술적 분석">
-          <Row label="추세" value={r.technical.trend_detail} />
-          <Row label="이동평균" value={r.technical.ma_alignment} />
-          <Row label="RSI" value={r.technical.rsi} />
-          <Row label="MACD" value={r.technical.macd} />
-          <Row label="볼린저밴드" value={r.technical.bollinger} />
-          <Row label="거래량" value={r.technical.volume} />
-          <Row label="패턴" value={r.technical.patterns} />
-          {r.technical.support_zones && r.technical.support_zones.length > 0 && (
-            <Row label="지지 구간" value={r.technical.support_zones.join(' / ')} />
-          )}
-          {r.technical.resistance_zones && r.technical.resistance_zones.length > 0 && (
-            <Row label="저항 구간" value={r.technical.resistance_zones.join(' / ')} />
-          )}
-        </Card>
+        <Section title="📊 기술적 분석">
+          <DetailRow label="추세" value={r.technical.trend_detail} />
+          <DetailRow label="이동평균" value={r.technical.ma_alignment} />
+          <DetailRow label="RSI" value={r.technical.rsi} />
+          <DetailRow label="MACD" value={r.technical.macd} />
+          <DetailRow label="볼린저밴드" value={r.technical.bollinger} />
+          <DetailRow label="거래량" value={r.technical.volume} />
+          <DetailRow label="패턴" value={r.technical.patterns} />
+          {r.technical.support_zones?.length ? <DetailRow label="지지 구간" value={r.technical.support_zones.join(' / ')} /> : null}
+          {r.technical.resistance_zones?.length ? <DetailRow label="저항 구간" value={r.technical.resistance_zones.join(' / ')} /> : null}
+        </Section>
       )}
 
-      {/* 상승 이유 */}
-      {r.rise_reason && (
-        <Card title="🚀 상승 이유 분석">
-          <Row label="촉매" value={r.rise_reason.catalyst} />
-          <Row label="섹터 트렌드" value={r.rise_reason.sector_trend} />
-          {r.rise_reason.news_factors && r.rise_reason.news_factors.length > 0 && (
-            <div style={{ padding: '0.4rem 0', display: 'flex', gap: '0.75rem' }}>
-              <span style={{ color: 'var(--muted)', minWidth: '110px', fontSize: '0.85rem' }}>예상 이슈</span>
-              <ul style={{ margin: 0, padding: '0 0 0 1rem', color: 'var(--fg)', fontSize: '0.9rem' }}>
-                {r.rise_reason.news_factors.map((f, i) => <li key={i}>{f}</li>)}
-              </ul>
-            </div>
+      {(r.company_analysis || r.rise_reason) && (
+        <div className="two-col">
+          {r.company_analysis && (
+            <Section title="🏢 기업 분석">
+              <DetailRow label="섹터" value={r.company_analysis.sector} />
+              <DetailRow label="핵심 제품" value={r.company_analysis.key_products} />
+              <DetailRow label="평가" value={r.company_analysis.current_position} />
+            </Section>
           )}
-        </Card>
+          {r.rise_reason && (
+            <Section title="🚀 상승 이유">
+              <DetailRow label="촉매" value={r.rise_reason.catalyst} />
+              <DetailRow label="섹터 트렌드" value={r.rise_reason.sector_trend} />
+              {r.rise_reason.news_factors?.length ? (
+                <div className="ai-detail-row">
+                  <span className="ai-detail-label">예상 이슈</span>
+                  <ul style={{ margin: 0, padding: '0 0 0 1rem' }}>
+                    {r.rise_reason.news_factors.map((f, i) => <li key={i} className="ai-detail-val">{f}</li>)}
+                  </ul>
+                </div>
+              ) : null}
+            </Section>
+          )}
+        </div>
       )}
 
-      {/* 수급 분석 */}
-      {r.supply_demand && (
-        <Card title="📦 수급 분석">
-          <Row label="핵심 거래량 구간" value={r.supply_demand.key_volume_zone} />
-        </Card>
-      )}
-
-      {/* 전망 */}
       {r.outlook && (
-        <Card title="🔭 전망">
-          <Row label="단기 (1~5일)" value={r.outlook.short_term} />
-          <Row label="중기 (1~4주)" value={r.outlook.mid_term} />
-        </Card>
+        <Section title="🔭 전망">
+          <DetailRow label="단기 (1~5일)" value={r.outlook.short_term} />
+          <DetailRow label="중기 (1~4주)" value={r.outlook.mid_term} />
+        </Section>
       )}
 
-      {/* 리스크 */}
-      {r.risks && r.risks.length > 0 && (
-        <Card title="⚠️ 리스크 요인">
-          <ul style={{ margin: 0, padding: '0 0 0 1.2rem', color: 'var(--fg)', fontSize: '0.9rem', lineHeight: 2 }}>
+      {r.risks?.length ? (
+        <Section title="⚠️ 리스크 요인">
+          <ul className="ai-risk-list">
             {r.risks.map((risk, i) => <li key={i}>{risk}</li>)}
           </ul>
-        </Card>
-      )}
+        </Section>
+      ) : null}
 
-      <p style={{ color: 'var(--muted)', fontSize: '0.75rem', textAlign: 'center', marginTop: '0.5rem' }}>
-        ⚠️ AI 분석은 참고용입니다. 투자 결정의 책임은 본인에게 있습니다.
-      </p>
+      <p className="ai-disclaimer">⚠️ AI 분석은 참고용입니다. 투자 결정의 책임은 본인에게 있습니다.</p>
     </div>
   )
 }
@@ -292,91 +230,137 @@ function ResultPanel({ data }: { data: AnalysisResponse }) {
 // ─── Main Page ───────────────────────────────────────────────────────────────
 
 export function AiChartPage() {
-  const [tab, setTab] = useState<TabKey>('image')
-
-  // Image tab state
+  const [mode, setMode] = useState<Mode>('drop')
+  const [droppedFiles, setDroppedFiles] = useState<DroppedFile[]>([])
+  const [isDragOver, setIsDragOver] = useState(false)
   const [symbol, setSymbol] = useState('')
+  const [symbolAutoDetected, setSymbolAutoDetected] = useState(false)
   const [extraContext, setExtraContext] = useState('')
-  const [images, setImages] = useState<File[]>([])
-  const [previews, setPreviews] = useState<string[]>([])
-  const fileInputRef = useRef<HTMLInputElement>(null)
-
-  // Symbol tab state
   const [symCode, setSymCode] = useState('')
   const [period, setPeriod] = useState('6mo')
-  const [interval, setInterval] = useState('1d')
-
+  const [intv, setIntv] = useState('1d')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<AnalysisResponse | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // ── Image handlers ──────────────────────────────────────────────────────────
+  const processFiles = useCallback(async (incoming: File[]) => {
+    const accepted = incoming.filter(f =>
+      f.type.startsWith('image/') || f.name.endsWith('.csv') || f.type === 'text/csv'
+    ).slice(0, 6)
 
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files ?? []).slice(0, 6)
-    setImages(files)
-    const urls = files.map(f => URL.createObjectURL(f))
-    setPreviews(prev => { prev.forEach(u => URL.revokeObjectURL(u)); return urls })
-  }
+    const items: DroppedFile[] = await Promise.all(accepted.map(async file => {
+      if (file.type.startsWith('image/')) {
+        return { file, previewUrl: URL.createObjectURL(file), type: 'image' as const }
+      }
+      return { file, type: 'csv' as const }
+    }))
 
-  function removeImage(idx: number) {
-    setImages(prev => prev.filter((_, i) => i !== idx))
-    setPreviews(prev => {
-      URL.revokeObjectURL(prev[idx])
-      return prev.filter((_, i) => i !== idx)
+    setDroppedFiles(prev => {
+      prev.forEach(d => d.previewUrl && URL.revokeObjectURL(d.previewUrl))
+      return items
+    })
+
+    if (items.length > 0) {
+      let detected = ''
+      for (const item of items) {
+        detected = extractSymbolFromFilename(item.file.name)
+        if (detected) break
+        if (item.type === 'csv') {
+          const text = await item.file.text()
+          detected = extractSymbolFromCsv(text)
+          if (detected) break
+        }
+      }
+      if (detected) {
+        setSymbol(detected)
+        setSymbolAutoDetected(true)
+      }
+    }
+  }, [])
+
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragOver(false)
+    processFiles(Array.from(e.dataTransfer.files))
+  }, [processFiles])
+
+  const onFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    processFiles(Array.from(e.target.files ?? []))
+    e.target.value = ''
+  }, [processFiles])
+
+  function removeFile(idx: number) {
+    setDroppedFiles(prev => {
+      const copy = [...prev]
+      if (copy[idx].previewUrl) URL.revokeObjectURL(copy[idx].previewUrl!)
+      copy.splice(idx, 1)
+      return copy
     })
   }
 
-  // ── Submit handlers ─────────────────────────────────────────────────────────
-
-  async function submitImage(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (!symbol.trim()) { setError('종목명을 입력하세요'); return }
-    if (images.length === 0) { setError('차트 이미지를 1개 이상 업로드하세요'); return }
+    setError(null); setResult(null)
 
-    setLoading(true); setError(null); setResult(null)
-    try {
-      const form = new FormData()
-      images.forEach(f => form.append('files', f))
-
-      const token = (await import('../lib/auth')).getAccessToken()
-      const params = new URLSearchParams({ symbol: symbol.trim() })
-      if (extraContext.trim()) params.set('extra_context', extraContext.trim())
-
-      const resp = await fetch(`/api/ai/chart-analysis/image?${params}`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: form,
-      })
-      const data = await resp.json()
-      if (!resp.ok) throw new Error(data.detail ?? `서버 오류 ${resp.status}`)
-      setResult(data as AnalysisResponse)
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setLoading(false)
+    if (mode === 'drop') {
+      if (!symbol.trim()) { setError('종목명 또는 종목코드를 입력하세요'); return }
+      if (droppedFiles.length === 0) { setError('파일을 1개 이상 업로드하세요'); return }
+      setLoading(true)
+      try {
+        const imageFiles = droppedFiles.filter(d => d.type === 'image')
+        const csvFiles = droppedFiles.filter(d => d.type === 'csv')
+        if (imageFiles.length > 0) {
+          const form = new FormData()
+          imageFiles.forEach(d => form.append('files', d.file))
+          const token = getAccessToken()
+          const params = new URLSearchParams({ symbol: symbol.trim() })
+          if (extraContext.trim()) params.set('extra_context', extraContext.trim())
+          const resp = await fetch(`/api/ai/chart-analysis/image?${params}`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}` },
+            body: form,
+          })
+          const data = await resp.json()
+          if (!resp.ok) throw new Error(data.detail ?? `서버 오류 ${resp.status}`)
+          setResult(data as AnalysisResponse)
+        } else if (csvFiles.length > 0) {
+          const form = new FormData()
+          form.append('file', csvFiles[0].file)
+          const token = getAccessToken()
+          const params = new URLSearchParams({ symbol: symbol.trim() })
+          const resp = await fetch(`/api/ai/chart-analysis/upload?${params}`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}` },
+            body: form,
+          })
+          const data = await resp.json()
+          if (!resp.ok) throw new Error(data.detail ?? `서버 오류 ${resp.status}`)
+          setResult(data as AnalysisResponse)
+        }
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setLoading(false)
+      }
+    } else {
+      if (!symCode.trim()) { setError('종목코드를 입력하세요'); return }
+      setLoading(true)
+      try {
+        const data = await fetchJson<AnalysisResponse>('/api/ai/chart-analysis', {
+          method: 'POST',
+          body: JSON.stringify({ symbol: symCode.trim(), period, interval: intv }),
+        })
+        setResult(data)
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setLoading(false)
+      }
     }
   }
 
-  async function submitSymbol(e: React.FormEvent) {
-    e.preventDefault()
-    if (!symCode.trim()) { setError('종목코드를 입력하세요'); return }
-
-    setLoading(true); setError(null); setResult(null)
-    try {
-      const data = await fetchJson<AnalysisResponse>('/api/ai/chart-analysis', {
-        method: 'POST',
-        body: JSON.stringify({ symbol: symCode.trim(), period, interval }),
-      })
-      setResult(data)
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  // ── Render ──────────────────────────────────────────────────────────────────
+  const hasFiles = droppedFiles.length > 0
 
   return (
     <main className="bolinzer-shell">
@@ -384,237 +368,175 @@ export function AiChartPage() {
         <div>
           <p className="top-label">AI CHART ANALYSIS</p>
           <h2>AI 차트 분석</h2>
-          <p className="subtle">TradingView 차트 이미지 또는 종목코드로 AI 종합 분석</p>
+          <p className="subtle">차트 이미지 · CSV를 드롭하거나 종목코드로 즉시 AI 분석</p>
         </div>
       </header>
 
-      {/* 탭 */}
-      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
-        <button
-          type="button"
-          onClick={() => { setTab('image'); setResult(null); setError(null) }}
-          style={{
-            padding: '0.55rem 1.4rem',
-            borderRadius: '999px',
-            border: tab === 'image' ? '1.5px solid var(--accent)' : '1px solid rgba(255,255,255,0.15)',
-            background: tab === 'image' ? 'rgba(99,102,241,0.18)' : 'transparent',
-            color: tab === 'image' ? 'var(--accent)' : 'var(--muted)',
-            fontWeight: tab === 'image' ? 700 : 400,
-            cursor: 'pointer',
-            fontSize: '0.9rem',
-          }}
-        >
-          📸 차트 이미지 분석
-        </button>
-        <button
-          type="button"
-          onClick={() => { setTab('symbol'); setResult(null); setError(null) }}
-          style={{
-            padding: '0.55rem 1.4rem',
-            borderRadius: '999px',
-            border: tab === 'symbol' ? '1.5px solid var(--accent)' : '1px solid rgba(255,255,255,0.15)',
-            background: tab === 'symbol' ? 'rgba(99,102,241,0.18)' : 'transparent',
-            color: tab === 'symbol' ? 'var(--accent)' : 'var(--muted)',
-            fontWeight: tab === 'symbol' ? 700 : 400,
-            cursor: 'pointer',
-            fontSize: '0.9rem',
-          }}
-        >
-          🔢 종목코드 분석
-        </button>
-      </div>
-
-      {/* 이미지 분석 탭 */}
-      {tab === 'image' && (
-        <div className="panel glass reveal" style={{ marginBottom: '1rem' }}>
-          <div className="panel-head"><h3>📸 TradingView 스크린샷 업로드</h3></div>
-
-          <div style={{
-            padding: '0.8rem 1rem',
-            background: 'rgba(99,102,241,0.07)',
-            borderRadius: '8px',
-            marginBottom: '1.2rem',
-            fontSize: '0.85rem',
-            color: 'var(--muted)',
-            lineHeight: 1.8,
-          }}>
-            <strong style={{ color: 'var(--fg)' }}>사용법:</strong><br />
-            1. TradingView 차트 열기 → 상단 <strong style={{ color: 'var(--fg)' }}>📷 카메라 아이콘</strong> 클릭 → PNG 저장<br />
-            2. 일봉 · 4시간봉 · 1시간봉 등 <strong style={{ color: 'var(--fg)' }}>여러 타임프레임을 각각 저장</strong>해서 함께 업로드<br />
-            3. 종목명 입력 후 <strong style={{ color: 'var(--fg)' }}>분석 시작</strong> 클릭 (최대 6개)
+      <div className="ai-chart-layout">
+        <div className="ai-left">
+          <div className="ai-mode-toggle">
+            <button type="button" className={`ai-mode-btn${mode === 'drop' ? ' active' : ''}`}
+              onClick={() => { setMode('drop'); setResult(null); setError(null) }}>
+              📂 파일 드롭
+            </button>
+            <button type="button" className={`ai-mode-btn${mode === 'code' ? ' active' : ''}`}
+              onClick={() => { setMode('code'); setResult(null); setError(null) }}>
+              🔢 종목코드
+            </button>
           </div>
 
-          <form onSubmit={submitImage}>
-            <div className="settings-grid" style={{ marginBottom: '1rem' }}>
-              <label>
-                종목명 / 코드 <span style={{ color: '#ef4444' }}>*</span>
-                <input
-                  value={symbol}
-                  onChange={e => setSymbol(e.target.value)}
-                  placeholder="예: 삼성전기, 009150, AAPL"
-                />
-              </label>
-              <label>
-                추가 정보 (선택)
-                <input
-                  value={extraContext}
-                  onChange={e => setExtraContext(e.target.value)}
-                  placeholder="예: 현재 보유 중, 평단 1,800,000원"
-                />
-              </label>
-            </div>
-
-            {/* 드롭존 */}
-            <div
-              onClick={() => fileInputRef.current?.click()}
-              style={{
-                border: '2px dashed rgba(99,102,241,0.4)',
-                borderRadius: '12px',
-                padding: '2rem',
-                textAlign: 'center',
-                cursor: 'pointer',
-                marginBottom: '1rem',
-                background: 'rgba(99,102,241,0.04)',
-                transition: 'border-color 0.2s',
-              }}
-            >
-              <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>📂</div>
-              <div style={{ color: 'var(--fg)', fontWeight: 600 }}>이미지 클릭하여 선택</div>
-              <div style={{ color: 'var(--muted)', fontSize: '0.82rem', marginTop: '0.3rem' }}>
-                PNG, JPG, WEBP · 최대 6개 · 파일당 10MB
+          {mode === 'drop' ? (
+            <form onSubmit={handleSubmit}>
+              <div
+                className={`ai-dropzone${isDragOver ? ' drag-over' : ''}${hasFiles ? ' has-files' : ''}`}
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={e => { e.preventDefault(); setIsDragOver(true) }}
+                onDragLeave={() => setIsDragOver(false)}
+                onDrop={onDrop}
+              >
+                <span className="ai-dropzone-icon">{hasFiles ? '✅' : isDragOver ? '📥' : '📂'}</span>
+                <div className="ai-dropzone-title">
+                  {hasFiles ? `${droppedFiles.length}개 파일 업로드됨` : '파일을 드래그하거나 클릭하여 선택'}
+                </div>
+                <div className="ai-dropzone-sub">
+                  TradingView 차트 이미지 (PNG/JPG) 또는 CSV 데이터<br />
+                  최대 6개 · 파일당 10MB
+                </div>
+                <div className="ai-dropzone-badge">
+                  <span>📸 이미지</span><span style={{ opacity: 0.4 }}>·</span>
+                  <span>📄 CSV</span><span style={{ opacity: 0.4 }}>·</span>
+                  <span>최대 6개</span>
+                </div>
+                <input ref={fileInputRef} type="file"
+                  accept="image/png,image/jpeg,image/webp,.csv,text/csv"
+                  multiple style={{ display: 'none' }} onChange={onFileInput} />
               </div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/png,image/jpeg,image/webp"
-                multiple
-                style={{ display: 'none' }}
-                onChange={handleFileChange}
-              />
-            </div>
 
-            {/* 미리보기 */}
-            {previews.length > 0 && (
-              <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
-                {previews.map((url, i) => (
-                  <div key={i} style={{ position: 'relative' }}>
-                    <img
-                      src={url}
-                      alt={`차트 ${i + 1}`}
-                      style={{
-                        width: '160px',
-                        height: '100px',
-                        objectFit: 'cover',
-                        borderRadius: '8px',
-                        border: '1px solid rgba(255,255,255,0.15)',
-                      }}
-                    />
-                    <div style={{ color: 'var(--muted)', fontSize: '0.72rem', textAlign: 'center', marginTop: '0.2rem' }}>
-                      {images[i]?.name?.length > 20 ? images[i].name.slice(0, 18) + '…' : images[i]?.name}
+              {hasFiles && (
+                <div className="ai-file-list">
+                  {droppedFiles.map((df, i) => (
+                    <div className="ai-file-item" key={i}>
+                      {df.type === 'image' && df.previewUrl
+                        ? <img className="ai-file-thumb" src={df.previewUrl} alt="" />
+                        : <div className="ai-file-csv-icon">📄</div>
+                      }
+                      <div className="ai-file-info">
+                        <div className="ai-file-name" title={df.file.name}>{df.file.name}</div>
+                        <div className="ai-file-meta">{df.type === 'image' ? '이미지' : 'CSV'} · {formatBytes(df.file.size)}</div>
+                      </div>
+                      <button type="button" className="ai-file-remove"
+                        onClick={e => { e.stopPropagation(); removeFile(i) }}>✕</button>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => removeImage(i)}
-                      style={{
-                        position: 'absolute',
-                        top: '4px',
-                        right: '4px',
-                        background: 'rgba(0,0,0,0.65)',
-                        border: 'none',
-                        borderRadius: '50%',
-                        color: '#fff',
-                        width: '22px',
-                        height: '22px',
-                        cursor: 'pointer',
-                        fontSize: '0.75rem',
-                        lineHeight: '22px',
-                        textAlign: 'center',
-                      }}
-                    >✕</button>
+                  ))}
+                </div>
+              )}
+
+              <div className="panel glass" style={{ padding: '12px 14px', display: 'grid', gap: '10px' }}>
+                <label>
+                  종목명 / 코드 <span style={{ color: '#ef4444' }}>*</span>
+                  <div className="ai-stock-input-wrap">
+                    <input value={symbol}
+                      onChange={e => { setSymbol(e.target.value); setSymbolAutoDetected(false) }}
+                      placeholder="예: 삼성전기, 009150, AAPL" />
+                    {symbolAutoDetected && <span className="ai-auto-tag">자동감지</span>}
+                  </div>
+                </label>
+                <label>
+                  추가 정보 <span className="hint">(선택)</span>
+                  <input value={extraContext} onChange={e => setExtraContext(e.target.value)}
+                    placeholder="예: 평단 180만원 보유 중" />
+                </label>
+              </div>
+
+              <div className="panel glass" style={{ padding: '10px 14px', fontSize: '0.8rem', color: 'var(--text-soft)', lineHeight: 1.7 }}>
+                💡 <strong style={{ color: 'var(--text-main)' }}>TradingView 저장법</strong><br />
+                차트 상단 <strong style={{ color: 'var(--text-main)' }}>📷 카메라 아이콘</strong> → PNG로 저장<br />
+                일봉 · 4H · 1H 타임프레임을 함께 업로드하면 더 정확해요
+              </div>
+
+              <button className={`ai-analyze-btn${loading ? ' loading' : ''}`} type="submit" disabled={loading}>
+                {loading ? '🤖 분석 중... (30~60초)' : '🚀 AI 분석 시작'}
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleSubmit}>
+              <div className="panel glass" style={{ padding: '14px', display: 'grid', gap: '10px' }}>
+                <label>
+                  종목코드 <span style={{ color: '#ef4444' }}>*</span>
+                  <input value={symCode} onChange={e => setSymCode(e.target.value)}
+                    placeholder="005930 · 009150 · AAPL" />
+                </label>
+                <div className="settings-grid">
+                  <label>조회 기간
+                    <select value={period} onChange={e => setPeriod(e.target.value)}>
+                      <option value="1mo">1개월</option>
+                      <option value="3mo">3개월</option>
+                      <option value="6mo">6개월</option>
+                      <option value="1y">1년</option>
+                      <option value="2y">2년</option>
+                    </select>
+                  </label>
+                  <label>봉 단위
+                    <select value={intv} onChange={e => setIntv(e.target.value)}>
+                      <option value="1d">일봉</option>
+                      <option value="1wk">주봉</option>
+                      <option value="1mo">월봉</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div className="panel glass" style={{ padding: '10px 14px', fontSize: '0.8rem', color: 'var(--text-soft)', lineHeight: 1.6 }}>
+                💡 Yahoo Finance에서 자동으로 데이터를 수집합니다.<br />
+                코스피 6자리 · 코스닥 6자리 · 미국 티커 모두 지원
+              </div>
+              <button className={`ai-analyze-btn${loading ? ' loading' : ''}`} type="submit" disabled={loading}>
+                {loading ? '🤖 분석 중... (30~60초)' : '🚀 AI 분석 시작'}
+              </button>
+            </form>
+          )}
+
+          {error && (
+            <div className="ai-error-box">
+              <span>❌</span><span>{error}</span>
+            </div>
+          )}
+        </div>
+
+        <div>
+          {loading ? (
+            <LoadingSkeleton />
+          ) : result ? (
+            <ResultView data={result} />
+          ) : (
+            <div className="panel glass ai-empty-state">
+              <div className="ai-empty-icon">🤖</div>
+              <div className="ai-empty-text">
+                왼쪽에 차트 이미지나 CSV를 업로드하고<br />
+                <strong style={{ color: 'var(--text-main)' }}>AI 분석 시작</strong>을 누르면<br />
+                여기에 결과가 표시됩니다
+              </div>
+              <div style={{ display: 'grid', gap: '8px', width: '100%', maxWidth: '300px', marginTop: '0.5rem' }}>
+                {[
+                  { icon: '📊', label: '기술적 분석 · 매수/매도 신호' },
+                  { icon: '📌', label: '목표가 · 손절가 자동 계산' },
+                  { icon: '🚀', label: '상승 이유 · 수급 분석' },
+                  { icon: '🔭', label: '단기/중기 전망 · 리스크 요인' },
+                ].map(({ icon, label }) => (
+                  <div key={label} style={{
+                    display: 'flex', gap: '10px', alignItems: 'center',
+                    padding: '8px 12px', borderRadius: '10px',
+                    background: 'rgba(255,255,255,0.04)',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    fontSize: '0.83rem', color: 'var(--text-soft)',
+                  }}>
+                    <span>{icon}</span><span>{label}</span>
                   </div>
                 ))}
               </div>
-            )}
-
-            <button className="btn" type="submit" disabled={loading} style={{ width: '100%', padding: '0.75rem' }}>
-              {loading ? '🤖 AI가 차트를 분석 중입니다... (30~60초)' : '🚀 AI 분석 시작'}
-            </button>
-          </form>
-        </div>
-      )}
-
-      {/* 종목코드 분석 탭 */}
-      {tab === 'symbol' && (
-        <div className="panel glass reveal" style={{ marginBottom: '1rem' }}>
-          <div className="panel-head"><h3>🔢 종목코드로 자동 분석</h3></div>
-
-          <div style={{
-            padding: '0.8rem 1rem',
-            background: 'rgba(99,102,241,0.07)',
-            borderRadius: '8px',
-            marginBottom: '1.2rem',
-            fontSize: '0.85rem',
-            color: 'var(--muted)',
-            lineHeight: 1.8,
-          }}>
-            <strong style={{ color: 'var(--fg)' }}>사용법:</strong> 종목코드 입력하면 Yahoo Finance에서 자동으로 데이터를 가져와 분석합니다.<br />
-            코스피: <code style={{ color: 'var(--fg)' }}>005930</code> · 코스닥: <code style={{ color: 'var(--fg)' }}>035720</code> · 미국: <code style={{ color: 'var(--fg)' }}>AAPL</code>
-          </div>
-
-          <form onSubmit={submitSymbol}>
-            <div className="settings-grid" style={{ marginBottom: '1rem' }}>
-              <label>
-                종목코드 <span style={{ color: '#ef4444' }}>*</span>
-                <input
-                  value={symCode}
-                  onChange={e => setSymCode(e.target.value)}
-                  placeholder="예: 009150, 005930, AAPL"
-                />
-              </label>
-              <label>
-                조회 기간
-                <select value={period} onChange={e => setPeriod(e.target.value)}>
-                  <option value="1mo">1개월</option>
-                  <option value="3mo">3개월</option>
-                  <option value="6mo">6개월</option>
-                  <option value="1y">1년</option>
-                  <option value="2y">2년</option>
-                </select>
-              </label>
-              <label>
-                봉 단위
-                <select value={interval} onChange={e => setInterval(e.target.value)}>
-                  <option value="1d">일봉</option>
-                  <option value="1wk">주봉</option>
-                  <option value="1mo">월봉</option>
-                </select>
-              </label>
             </div>
-
-            <button className="btn" type="submit" disabled={loading} style={{ width: '100%', padding: '0.75rem' }}>
-              {loading ? '🤖 AI가 분석 중입니다... (30~60초)' : '🚀 AI 분석 시작'}
-            </button>
-          </form>
+          )}
         </div>
-      )}
-
-      {/* 오류 메시지 */}
-      {error && (
-        <div style={{
-          padding: '0.9rem 1rem',
-          background: 'rgba(239,68,68,0.1)',
-          border: '1px solid rgba(239,68,68,0.4)',
-          borderRadius: '8px',
-          color: '#fca5a5',
-          marginBottom: '1rem',
-          fontSize: '0.9rem',
-        }}>
-          ❌ {error}
-        </div>
-      )}
-
-      {/* 분석 결과 */}
-      {result && <ResultPanel data={result} />}
+      </div>
     </main>
   )
 }
