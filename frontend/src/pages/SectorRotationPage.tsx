@@ -8,12 +8,18 @@ interface MacroDetail {
   dxy?: number | null
   vix?: number
   tnx20dChg?: number
+  tnxChg5d?: number
   dxy20dChg?: number
   growthScore?: number
   nasdaq?: number | null
   nasdaqChg5d?: number
+  nasdaqChg20d?: number
   usKrw?: number | null
   usKrwChg5d?: number
+  usKrwChg20d?: number
+  oil?: number | null
+  oilChg5d?: number
+  oilChg20d?: number
   error?: string
 }
 
@@ -353,6 +359,43 @@ function LifecyclePipeline({ sectors }: { sectors: SectorItem[] }) {
   )
 }
 
+// ─── Trend Sparkline ─────────────────────────────────────────────────────────
+// chg5d: 최근 5거래일 변화율, chg20d: 최근 20거래일 변화율
+// 패턴: 상승 / 상승후하락 / 하락후상승 / 하락·횡보
+function TrendLine({ chg5d = 0, chg20d = 0, color }: { chg5d?: number; chg20d?: number; color: string }) {
+  const T = 0.8  // % threshold
+  const recentUp = chg5d > T
+  const recentDn = chg5d < -T
+  const prevUp   = chg20d > T
+  const prevDn   = chg20d < -T
+
+  let d: string
+  let label: string
+  if (prevUp && recentUp) {
+    d = 'M2,17 C10,14 28,7 42,3'           // 상승 ↗
+    label = '상승'
+  } else if (prevUp && recentDn) {
+    d = 'M2,14 C10,5 22,4 32,9 C36,12 40,16 42,17'  // 상승후하락 ∧
+    label = '상승후하락'
+  } else if (prevDn && recentUp) {
+    d = 'M2,6 C6,12 18,18 26,18 C32,18 38,10 42,4'  // 하락후상승 ∨
+    label = '하락후상승'
+  } else {
+    d = 'M2,4 C12,7 30,14 42,17'            // 하락·횡보 ↘
+    label = '하락·횡보'
+  }
+
+  return (
+    <svg
+      width="44" height="20" viewBox="0 0 44 20"
+      style={{ flex: '0 0 44px', opacity: 0.85 }}
+      aria-label={label}
+    >
+      <path d={d} fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 // ─── Sector Grid ─────────────────────────────────────────────────────────────
 // 원형 도넛 → 3×3 사각형 그리드 (동=1위, 시계방향)
 // 각 셀: 섹터 태그 + 점수 + 생애주기 + 대표 종목 3개(14거래일 수익률)
@@ -395,60 +438,64 @@ function SectorGrid({ sectors, macro }: { sectors: SectorItem[]; macro: MacroDet
           border: '1px solid rgba(99,102,241,0.28)',
           borderRadius: 10,
           display: 'flex', flexDirection: 'column',
-          padding: '12px 12px',
+          padding: '10px 12px',
           minHeight: 148,
-          gap: 0,
+          justifyContent: 'space-around',
         }}>
-          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.3)', letterSpacing: 2, marginBottom: 8 }}>MACRO</span>
-
-          {/* 나스닥 */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
-            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)' }}>나스닥</span>
-            <div style={{ textAlign: 'right' }}>
-              <span style={{ fontSize: 15, fontWeight: 700, color: '#f1f5f9' }}>
-                {macro.nasdaq != null ? macro.nasdaq.toLocaleString() : '—'}
-              </span>
-              {macro.nasdaqChg5d != null && (
-                <span style={{ fontSize: 10, marginLeft: 4, color: macro.nasdaqChg5d >= 0 ? '#34d399' : '#f87171' }}>
-                  {macro.nasdaqChg5d >= 0 ? '+' : ''}{macro.nasdaqChg5d.toFixed(1)}%
-                </span>
-              )}
+          {([
+            {
+              label: '나스닥',
+              val: macro.nasdaq != null ? macro.nasdaq.toLocaleString() : '—',
+              chg: macro.nasdaqChg5d,
+              chg5d: macro.nasdaqChg5d ?? 0,
+              chg20d: macro.nasdaqChg20d ?? 0,
+              // 상승 좋음
+              chgColor: (c: number) => c >= 0 ? '#34d399' : '#f87171',
+              lineColor: macro.nasdaqChg5d != null && macro.nasdaqChg5d >= 0 ? '#34d399' : '#f87171',
+            },
+            {
+              label: '달러/원',
+              val: macro.usKrw != null ? macro.usKrw.toLocaleString() : '—',
+              chg: macro.usKrwChg5d,
+              chg5d: macro.usKrwChg5d ?? 0,
+              chg20d: macro.usKrwChg20d ?? 0,
+              // 달러 강세(상승) = 위험 → 빨강
+              chgColor: (c: number) => c >= 0 ? '#f87171' : '#34d399',
+              lineColor: macro.usKrwChg5d != null && macro.usKrwChg5d >= 0 ? '#f87171' : '#34d399',
+            },
+            {
+              label: '유가(WTI)',
+              val: macro.oil != null ? macro.oil.toFixed(1) : '—',
+              chg: macro.oilChg5d,
+              chg5d: macro.oilChg5d ?? 0,
+              chg20d: macro.oilChg20d ?? 0,
+              chgColor: (c: number) => c >= 0 ? '#fbbf24' : '#60a5fa',
+              lineColor: macro.oilChg5d != null && macro.oilChg5d >= 0 ? '#fbbf24' : '#60a5fa',
+            },
+            {
+              label: '미 10Y',
+              val: macro.tnx != null ? macro.tnx + '%' : '—',
+              chg: macro.tnxChg5d,
+              chg5d: macro.tnxChg5d ?? 0,
+              chg20d: macro.tnx20dChg ?? 0,
+              // 금리 상승 = 성장주 불리 → 빨강
+              chgColor: (c: number) => c >= 0 ? '#f87171' : '#34d399',
+              lineColor: macro.tnxChg5d != null && macro.tnxChg5d >= 0 ? '#f87171' : '#34d399',
+            },
+          ] as const).map(({ label, val, chg, chg5d, chg20d, chgColor, lineColor }) => (
+            <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.42)', width: 50, flexShrink: 0 }}>{label}</span>
+              <TrendLine chg5d={chg5d} chg20d={chg20d} color={lineColor} />
+              <div style={{ flex: 1, textAlign: 'right' }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: '#f1f5f9' }}>{val}</span>
+                {chg != null && (
+                  <span style={{ fontSize: 10, marginLeft: 4, color: chgColor(chg), fontWeight: 600 }}>
+                    {chg >= 0 ? '+' : ''}{chg.toFixed(1)}%
+                  </span>
+                )}
+              </div>
             </div>
-          </div>
-
-          <div style={{ height: 1, background: 'rgba(255,255,255,0.07)', marginBottom: 6 }} />
-
-          {/* 달러/원 */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
-            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)' }}>달러/원</span>
-            <div style={{ textAlign: 'right' }}>
-              <span style={{ fontSize: 15, fontWeight: 700, color: '#f1f5f9' }}>
-                {macro.usKrw != null ? macro.usKrw.toLocaleString() : '—'}
-              </span>
-              {macro.usKrwChg5d != null && (
-                <span style={{ fontSize: 10, marginLeft: 4, color: macro.usKrwChg5d >= 0 ? '#f87171' : '#34d399' }}>
-                  {macro.usKrwChg5d >= 0 ? '+' : ''}{macro.usKrwChg5d.toFixed(1)}%
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div style={{ height: 1, background: 'rgba(255,255,255,0.07)', marginBottom: 6 }} />
-
-          {/* 미 10Y 국채 */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)' }}>미 10Y</span>
-            <div style={{ textAlign: 'right' }}>
-              <span style={{ fontSize: 15, fontWeight: 700, color: '#f1f5f9' }}>
-                {macro.tnx != null ? macro.tnx + '%' : '—'}
-              </span>
-              {macro.tnx20dChg != null && (
-                <span style={{ fontSize: 10, marginLeft: 4, color: macro.tnx20dChg >= 0 ? '#f87171' : '#34d399' }}>
-                  {macro.tnx20dChg >= 0 ? '+' : ''}{macro.tnx20dChg.toFixed(1)}
-                </span>
-              )}
-            </div>
-          </div>
+          ))}
         </div>
 
         {/* ── 8개 섹터 셀 ── */}

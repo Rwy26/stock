@@ -129,7 +129,7 @@ def _macro_score() -> Tuple[float, dict]:
         import yfinance as yf
 
         raw = yf.download(
-            "^TNX DX-Y.NYB ^VIX ^IXIC KRW=X",
+            "^TNX DX-Y.NYB ^VIX ^IXIC KRW=X CL=F",
             period="60d", interval="1d", progress=False,
         )
         closes = raw["Close"]
@@ -138,7 +138,8 @@ def _macro_score() -> Tuple[float, dict]:
         dxy    = closes["DX-Y.NYB"].dropna()
         vix    = closes["^VIX"].dropna()
         nasdaq = closes["^IXIC"].dropna()
-        krw    = closes["KRW=X"].dropna()  # USD per 1 KRW → invert for USD/KRW
+        krw    = closes["KRW=X"].dropna()  # USD per 1 KRW (ex. 1380.5)
+        oil    = closes["CL=F"].dropna()   # WTI 원유 선물 (USD/배럴)
 
         def _dir(series, n: int = 20) -> float:
             if len(series) < n + 1:
@@ -158,23 +159,37 @@ def _macro_score() -> Tuple[float, dict]:
         growth_score -= max(0.0, (vix_val - 20.0) * 0.5)  # VIX 20 초과 → 위험
         growth_score = round(max(0.0, min(100.0, growth_score)), 1)
 
-        # 달러/원: KRW=X는 USD 기준 KRW 수량 (ex. 1380.5)
-        us_krw_val   = round(_safe(krw.iloc[-1]),  1) if len(krw)    > 0 else None
-        nasdaq_val   = round(_safe(nasdaq.iloc[-1]), 0) if len(nasdaq) > 0 else None
-        nasdaq_chg5  = round(_dir(nasdaq, n=5)  * 100, 2)
-        us_krw_chg5  = round(_dir(krw, n=5)     * 100, 2) if len(krw) >= 6 else 0.0
+        nasdaq_val    = round(_safe(nasdaq.iloc[-1]), 0) if len(nasdaq) > 0 else None
+        nasdaq_chg5d  = round(_dir(nasdaq, n=5)  * 100, 2)
+        nasdaq_chg20d = round(_dir(nasdaq, n=20) * 100, 2)
+
+        us_krw_val    = round(_safe(krw.iloc[-1]), 1) if len(krw) > 0 else None
+        us_krw_chg5d  = round(_dir(krw, n=5)  * 100, 2) if len(krw) >= 6  else 0.0
+        us_krw_chg20d = round(_dir(krw, n=20) * 100, 2) if len(krw) >= 21 else 0.0
+
+        oil_val    = round(_safe(oil.iloc[-1]), 2) if len(oil) > 0 else None
+        oil_chg5d  = round(_dir(oil, n=5)  * 100, 2) if len(oil) >= 6  else 0.0
+        oil_chg20d = round(_dir(oil, n=20) * 100, 2) if len(oil) >= 21 else 0.0
+
+        tnx_chg5d = round(_dir(tnx, n=5) * 100, 2) if len(tnx) >= 6 else 0.0
 
         detail = {
-            "tnx":        round(_safe(tnx.iloc[-1]), 3) if len(tnx) > 0 else None,
-            "dxy":        round(_safe(dxy.iloc[-1]), 3) if len(dxy) > 0 else None,
-            "vix":        round(vix_val, 2),
-            "tnx20dChg":  round(tnx_dir * 100, 2),
-            "dxy20dChg":  round(dxy_dir * 100, 2),
+            "tnx":         round(_safe(tnx.iloc[-1]), 3) if len(tnx) > 0 else None,
+            "dxy":         round(_safe(dxy.iloc[-1]), 3) if len(dxy) > 0 else None,
+            "vix":         round(vix_val, 2),
+            "tnx20dChg":   round(tnx_dir * 100, 2),
+            "tnxChg5d":    tnx_chg5d,
+            "dxy20dChg":   round(dxy_dir * 100, 2),
             "growthScore": growth_score,
-            "nasdaq":     int(nasdaq_val) if nasdaq_val is not None else None,
-            "nasdaqChg5d": nasdaq_chg5,
-            "usKrw":      us_krw_val,
-            "usKrwChg5d": us_krw_chg5,
+            "nasdaq":      int(nasdaq_val) if nasdaq_val is not None else None,
+            "nasdaqChg5d": nasdaq_chg5d,
+            "nasdaqChg20d": nasdaq_chg20d,
+            "usKrw":       us_krw_val,
+            "usKrwChg5d":  us_krw_chg5d,
+            "usKrwChg20d": us_krw_chg20d,
+            "oil":         oil_val,
+            "oilChg5d":    oil_chg5d,
+            "oilChg20d":   oil_chg20d,
         }
         return growth_score, detail
 
