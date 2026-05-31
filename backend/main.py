@@ -3325,6 +3325,152 @@ def upsert_profile(payload: dict = Body(...), current_user=Depends(get_current_u
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Macro Data – US Treasury Yields & Dollar Index
+# ---------------------------------------------------------------------------
+
+@app.get("/api/macro/us-bonds")
+def get_macro_us_bonds():
+    """미국채 10년·30년 일봉 + 도미넌스(10Y/30Y%) + 볼린저밴드(20,2) + RSI(14).
+
+    데이터 소스: Yahoo Finance (^TNX, ^TYX) — yfinance
+    인증 불필요 (공개 매크로 데이터).
+    """
+    try:
+        import yfinance as yf  # type: ignore
+        import pandas as pd    # type: ignore
+        import math
+
+        raw = yf.download("^TNX ^TYX", period="180d", interval="1d",
+                          progress=False, auto_adjust=False)
+        close = raw["Close"]
+        opn   = raw["Open"]
+        high  = raw["High"]
+        low   = raw["Low"]
+
+        tnx_c = close["^TNX"].dropna()
+        tyx_c = close["^TYX"].dropna()
+
+        # ── Bollinger 20 / 2σ on TNX ──────────────────────────────────────
+        sma20  = tnx_c.rolling(20).mean()
+        std20  = tnx_c.rolling(20).std()
+        bb_up  = sma20 + 2 * std20
+        bb_lo  = sma20 - 2 * std20
+
+        # ── RSI 14 on TNX ─────────────────────────────────────────────────
+        delta = tnx_c.diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rs    = gain / loss.replace(0, float("nan"))
+        rsi14 = 100 - (100 / (1 + rs))
+
+        def ts(idx):
+            return idx.strftime("%Y-%m-%d")
+
+        def _v(val):
+            return None if (val is None or (isinstance(val, float) and math.isnan(val))) else round(float(val), 4)
+
+        # ── build OHLCV for TNX ───────────────────────────────────────────
+        tnx_rows = []
+        for i in tnx_c.index:
+            o = _v(opn["^TNX"].get(i))
+            h = _v(high["^TNX"].get(i))
+            l = _v(low["^TNX"].get(i))
+            c = _v(tnx_c.get(i))
+            if c is None:
+                continue
+            tnx_rows.append({"time": ts(i), "open": o or c, "high": h or c, "low": l or c, "close": c})
+
+        tyx_rows = []
+        for i in tyx_c.index:
+            c = _v(tyx_c.get(i))
+            if c is None:
+                continue
+            tyx_rows.append({"time": ts(i), "value": c})
+
+        # ── dominance (10Y / 30Y * 100) ───────────────────────────────────
+        dom_rows = []
+        for i in tnx_c.index:
+            t10 = _v(tnx_c.get(i))
+            t30 = _v(tyx_c.get(i))
+            if t10 is None or t30 is None or t30 == 0:
+                continue
+            dom_rows.append({"time": ts(i), "value": round(t10 / t30 * 100, 4)})
+
+        bb_rows = []
+        for i in tnx_c.index:
+            c  = _v(tnx_c.get(i))
+            u  = _v(bb_up.get(i))
+            m  = _v(sma20.get(i))
+            lo = _v(bb_lo.get(i))
+            if c is None or u is None:
+                continue
+            bb_rows.append({"time": ts(i), "upper": u, "middle": m, "lower": lo})
+
+        rsi_rows = []
+        for i in rsi14.index:
+            v = _v(rsi14.get(i))
+            if v is None:
+                continue
+            rsi_rows.append({"time": ts(i), "value": v})
+
+        return {
+            "asOf": ts(tnx_c.index[-1]) if len(tnx_c) else None,
+            "tnx":  tnx_rows,
+            "tyx":  tyx_rows,
+            "dominance": dom_rows,
+            "bb":   bb_rows,
+            "rsi":  rsi_rows,
+        }
+
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"us-bonds 데이터 조회 실패: {exc}") from exc
+
+
+@app.get("/api/macro/dxy")
+def get_macro_dxy():
+    """달러 인덱스(DXY) 일봉 OHLCV.
+
+    데이터 소스: Yahoo Finance (DX-Y.NYB) — yfinance
+    인증 불필요.
+    """
+    try:
+        import yfinance as yf  # type: ignore
+        import math
+
+        raw = yf.download("DX-Y.NYB", period="180d", interval="1d",
+                          progress=False, auto_adjust=False)
+
+        def ts(idx):
+            return idx.strftime("%Y-%m-%d")
+
+        def _v(val):
+            return None if (val is None or (isinstance(val, float) and math.isnan(val))) else round(float(val), 4)
+
+        rows = []
+        opn_s  = raw["Open"]["DX-Y.NYB"]
+        high_s = raw["High"]["DX-Y.NYB"]
+        low_s  = raw["Low"]["DX-Y.NYB"]
+        close_s = raw["Close"]["DX-Y.NYB"]
+
+        for i in close_s.index:
+            o  = _v(float(opn_s[i]))
+            h  = _v(float(high_s[i]))
+            lo = _v(float(low_s[i]))
+            c  = _v(float(close_s[i]))
+            if c is None:
+                continue
+            rows.append({"time": ts(i), "open": o or c, "high": h or c, "low": lo or c, "close": c})
+
+        return {
+            "asOf": ts(raw.index[-1]) if len(raw) else None,
+            "ohlcv": rows,
+        }
+
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"DXY 데이터 조회 실패: {exc}") from exc
+
+
 DIST_DIR = REPO_ROOT / "frontend" / "dist"
 
 

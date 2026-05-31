@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { fetchJson } from '../lib/api'
 import { formatKRW, formatNumber, formatPercent } from '../lib/format'
+import { UsBondsChart } from '../components/UsBondsChart'
+import { DxyChart } from '../components/DxyChart'
 
 type DashboardResponse = {
   kpis: {
@@ -214,20 +216,20 @@ export function DashboardPage() {
           <div className="chart-placeholder">Market Index Chart Placeholder</div>
         </article>
 
-        <article className="panel glass reveal">
+        <article className="panel glass reveal" style={{ gridColumn: 'span 2' }}>
           <div className="panel-head">
-            <h3>금리 차트</h3>
-            <p className="subtle">한국 기준금리 / CD금리</p>
+            <h3>미 국채 금리</h3>
+            <p className="subtle">10년물(파랑) · 30년물(주황) · 도미넌스 10Y/30Y(초록) — 일봉 180일</p>
           </div>
-          <div className="chart-placeholder">Interest Rate Chart Placeholder</div>
+          <UsBondsChart />
         </article>
 
         <article className="panel glass reveal">
           <div className="panel-head">
-            <h3>환율 차트</h3>
-            <p className="subtle">USD/KRW 최근 30일</p>
+            <h3>달러 인덱스 (DXY)</h3>
+            <p className="subtle">USD Index 일봉 180일</p>
           </div>
-          <div className="chart-placeholder">FX Chart Placeholder</div>
+          <DxyChart />
         </article>
 
         <article className="panel glass reveal">
