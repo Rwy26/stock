@@ -30,6 +30,12 @@ interface SectorDetail {
   volumeSurgePct: number
 }
 
+interface LeadStock {
+  code: string
+  name: string
+  change14d: number
+}
+
 interface SectorItem {
   sector: string
   score: number
@@ -39,6 +45,10 @@ interface SectorItem {
   breakdown: SectorBreakdown
   detail: SectorDetail
   codes: string[]
+  leadNames?: string[]
+  componentNames?: string[]
+  trends?: { tags: string[]; theme: string }
+  leadStocks?: LeadStock[]
 }
 
 interface RotationData {
@@ -222,6 +232,23 @@ function SectorCard({ item, rank, expanded, onToggle }: {
           <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginTop: 10 }}>
             대표 종목: {item.codes.join(', ')}
           </p>
+          {item.trends && item.trends.tags.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
+              <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>🏷️</span>
+              {item.trends.tags.map(tag => (
+                <span key={tag} style={{
+                  fontSize: 10, padding: '2px 7px', borderRadius: 99,
+                  background: 'rgba(96,165,250,0.1)', color: '#93c5fd',
+                  border: '1px solid rgba(96,165,250,0.2)',
+                }}>{tag}</span>
+              ))}
+            </div>
+          )}
+          {item.trends?.theme && (
+            <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginTop: 4, fontStyle: 'italic' }}>
+              ↗ {item.trends.theme}
+            </p>
+          )}
         </div>
       )}
     </div>
@@ -322,189 +349,139 @@ function LifecyclePipeline({ sectors }: { sectors: SectorItem[] }) {
   )
 }
 
-// ─── Sector Compass ────────────────────────────────────────────────────────────
+// ─── Sector Grid ─────────────────────────────────────────────────────────────
+// 원형 도넛 → 3×3 사각형 그리드 (동=1위, 시계방향)
+// 각 셀: 섹터 태그 + 점수 + 생애주기 + 대표 종목 3개(14거래일 수익률)
 
-function SectorCompass({ sectors }: { sectors: SectorItem[] }) {
+function SectorGrid({ sectors }: { sectors: SectorItem[] }) {
   if (sectors.length < 2) return null
 
-  const SZ = 520
-  const cx = 260, cy = 260
-  const OR = 142   // outer radius (normal)
-  const TR = 160   // outer radius (rank-1, protrudes)
-  const IR = 54    // inner radius (center hole)
-  const BM = OR - 6  // max radar bar radius
-
-  const toRad = (d: number) => (d * Math.PI) / 180
-  const polar  = (r: number, d: number) => ({ x: cx + r * Math.cos(toRad(d)), y: cy + r * Math.sin(toRad(d)) })
-
-  const donut = (r1: number, r2: number, sDeg: number, eDeg: number) => {
-    const a = polar(r1, sDeg), b = polar(r1, eDeg)
-    const c = polar(r2, eDeg), d = polar(r2, sDeg)
-    const lg = eDeg - sDeg > 180 ? 1 : 0
-    return `M${a.x.toFixed(1)},${a.y.toFixed(1)} A${r1},${r1} 0 ${lg},1 ${b.x.toFixed(1)},${b.y.toFixed(1)} L${c.x.toFixed(1)},${c.y.toFixed(1)} A${r2},${r2} 0 ${lg},0 ${d.x.toFixed(1)},${d.y.toFixed(1)}Z`
-  }
-
-  // 시계방향 · 동(E=0°)=1위, SE=2위, S=3위, SW=4위, W=5위, NW=6위, N=7위, NE=8위
-  const pos = sectors.slice(0, 8).map((item, i) => ({ item, i, cDeg: i * 45, isTop: i === 0 }))
-  const best = sectors[0]
+  const displayed = sectors.slice(0, 8)
+  const best = displayed[0]
   const bestColor = SCORE_COLOR(best.score)
 
-  const radarPts = pos
-    .map(({ item, cDeg }) => {
-      const r = IR + (BM - IR) * Math.max(0.05, item.score / 100)
-      const p = polar(r, cDeg)
-      return `${p.x.toFixed(1)},${p.y.toFixed(1)}`
-    })
-    .join(' ')
+  // E(1위) → SE(2위) → S(3위) → SW(4위) → W(5위) → NW(6위) → N(7위) → NE(8위)
+  const AREA_MAP = ['e', 'se', 's', 'sw', 'w', 'nw', 'n', 'ne'] as const
+  const DIR_LABEL: Record<string, string> = {
+    e: 'E ▶', se: 'SE', s: 'S', sw: 'SW', w: 'W', nw: 'NW', n: 'N', ne: 'NE',
+  }
 
   return (
     <div style={{
       background: 'rgba(6,9,22,0.92)',
       border: '1px solid rgba(255,255,255,0.08)',
       borderRadius: 16,
-      padding: '16px 16px 12px',
+      padding: '12px 12px 10px',
       marginBottom: 24,
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
     }}>
-      <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', letterSpacing: 2, marginBottom: 6 }}>
-        SECTOR ROTATION COMPASS · 동(E) = 1위 주도 섹터 · 시계방향 순위
+      <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', letterSpacing: 3, textAlign: 'center', marginBottom: 10 }}>
+        SECTOR ROTATION COMPASS · 동(E) = 1위 주도 섹터 · 시계방향 순위 · 종목 수익률: 14거래일
       </p>
 
-      <svg
-        viewBox={`0 0 ${SZ} ${SZ}`}
-        width={SZ}
-        style={{ width: '100%', maxWidth: SZ, display: 'block', overflow: 'visible' }}
-      >
-        <defs>
-          <filter id="cGlow" x="-60%" y="-60%" width="220%" height="220%">
-            <feGaussianBlur stdDeviation="4" result="blur" />
-            <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
-          </filter>
-          <radialGradient id="eastGlow" cx="72%" cy="50%" r="40%">
-            <stop offset="0%" stopColor={bestColor} stopOpacity="0.18" />
-            <stop offset="100%" stopColor={bestColor} stopOpacity="0" />
-          </radialGradient>
-        </defs>
+      <div style={{
+        display: 'grid',
+        gridTemplateAreas: '"nw n ne" "w c e" "sw s se"',
+        gridTemplateColumns: 'repeat(3, 1fr)',
+        gap: 5,
+        width: '100%',
+      }}>
 
-        {/* East ambient glow */}
-        <ellipse cx={cx} cy={cy} rx={SZ * 0.44} ry={SZ * 0.44} fill="url(#eastGlow)" />
+        {/* ── 중앙: 주도 섹터 요약 ── */}
+        <div style={{
+          gridArea: 'c',
+          background: `linear-gradient(135deg, ${bestColor}1c, rgba(4,7,18,0.98))`,
+          border: `2px solid ${bestColor}55`,
+          borderRadius: 10,
+          display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center',
+          padding: '14px 8px',
+          textAlign: 'center',
+          minHeight: 148,
+          gap: 3,
+        }}>
+          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', letterSpacing: 2 }}>주도섹터</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: '#f1f5f9', lineHeight: 1.3 }}>{best.sector}</span>
+          <span style={{ fontSize: 34, fontWeight: 800, color: bestColor, lineHeight: 1 }}>{best.score}</span>
+          <span style={{ fontSize: 10, color: LIFECYCLE_COLORS[best.lifecycleStage] ?? '#6b7280' }}>
+            {best.lifecycle}
+          </span>
+        </div>
 
-        {/* Guide rings (33 / 67 / 100) */}
-        {[0.33, 0.67, 1.0].map((f) => (
-          <circle key={f} cx={cx} cy={cy} r={IR + (BM - IR) * f}
-            fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth={1} strokeDasharray="3 9" />
-        ))}
-        {[{ f: 0.33, l: '33' }, { f: 0.67, l: '67' }, { f: 1.0, l: '100' }].map(({ f, l }) => {
-          const p = polar(IR + (BM - IR) * f, 258)
-          return <text key={l} x={p.x + 3} y={p.y + 3} fill="rgba(255,255,255,0.12)" fontSize={8}>{l}</text>
-        })}
-
-        {/* Axis dividers */}
-        {[0, 45, 90, 135].map((d) => {
-          const a = polar(IR, d), b = polar(OR + 2, d)
-          const a2 = polar(IR, d + 180), b2 = polar(OR + 2, d + 180)
-          return (
-            <g key={d}>
-              <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="rgba(255,255,255,0.07)" strokeWidth={1} />
-              <line x1={a2.x} y1={a2.y} x2={b2.x} y2={b2.y} stroke="rgba(255,255,255,0.07)" strokeWidth={1} />
-            </g>
-          )
-        })}
-
-        {/* Donut segments */}
-        {pos.map(({ item, cDeg, isTop }) => {
+        {/* ── 8개 섹터 셀 ── */}
+        {displayed.map((item, i) => {
+          const area = AREA_MAP[i]
           const color = SCORE_COLOR(item.score)
-          const r = isTop ? TR : OR
-          const alpha = 0.3 + (item.score / 100) * 0.55
+          const lcColor = LIFECYCLE_COLORS[item.lifecycleStage] ?? '#6b7280'
+          const isTop = i === 0
+          const stocks = item.leadStocks ?? []
+
           return (
-            <g key={'seg-' + item.sector}>
-              <path d={donut(r, IR, cDeg - 21.5, cDeg + 21.5)}
-                fill={color} opacity={alpha} stroke="rgba(0,0,0,0.55)" strokeWidth={1.5} />
-              {isTop && (
-                <path d={donut(r + 5, IR, cDeg - 21.5, cDeg + 21.5)}
-                  fill="none" stroke={color} strokeWidth={2.5} opacity={0.7} filter="url(#cGlow)" />
+            <div key={item.sector} style={{
+              gridArea: area,
+              background: `linear-gradient(145deg, ${color}${isTop ? '16' : '0b'}, rgba(4,7,18,0.94))`,
+              border: `1px solid ${isTop ? color + '55' : 'rgba(255,255,255,0.07)'}`,
+              borderRadius: 10,
+              padding: '10px 11px',
+              display: 'flex', flexDirection: 'column', gap: 5,
+              minHeight: 148,
+              position: 'relative',
+            }}>
+              {/* 섹터 태그 + 순위 방향 */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{
+                  fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 99,
+                  background: color + '22', color, border: `1px solid ${color}44`,
+                  maxWidth: '68%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}>{item.sector}</span>
+                <span style={{
+                  fontSize: 9, color: isTop ? '#fbbf24' : 'rgba(255,255,255,0.2)',
+                  fontWeight: isTop ? 700 : 400, flexShrink: 0,
+                }}>#{i + 1} {DIR_LABEL[area]}</span>
+              </div>
+
+              {/* 점수 + 생애주기 */}
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                <span style={{ fontSize: 24, fontWeight: 800, color, lineHeight: 1 }}>{item.score}</span>
+                <span style={{ fontSize: 10, color: lcColor }}>{item.lifecycle}</span>
+              </div>
+
+              {/* 구분선 */}
+              <div style={{ height: 1, background: 'rgba(255,255,255,0.07)' }} />
+
+              {/* 대표 종목 3개 (14거래일 수익률) */}
+              {stocks.length > 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {stocks.slice(0, 3).map(stock => (
+                    <div key={stock.code} style={{
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 4,
+                    }}>
+                      <span style={{
+                        fontSize: 11, color: 'rgba(241,245,249,0.78)',
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        flex: 1, minWidth: 0,
+                      }}>{stock.name}</span>
+                      <span style={{
+                        fontSize: 11, fontWeight: 700, flexShrink: 0,
+                        color: stock.change14d >= 0 ? '#34d399' : '#f87171',
+                      }}>
+                        {stock.change14d >= 0 ? '+' : ''}{stock.change14d.toFixed(1)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.15)' }}>수집 중...</span>
               )}
-            </g>
+            </div>
           )
         })}
+      </div>
 
-        {/* Radar polygon */}
-        <polygon points={radarPts}
-          fill="rgba(148,163,184,0.06)" stroke="rgba(148,163,184,0.22)" strokeWidth={1.5} />
-
-        {/* Radar dots */}
-        {pos.map(({ item, cDeg, isTop }) => {
-          const r = IR + (BM - IR) * Math.max(0.05, item.score / 100)
-          const p = polar(r, cDeg)
-          const color = SCORE_COLOR(item.score)
-          return (
-            <g key={'dot-' + item.sector}>
-              {isTop && <circle cx={p.x} cy={p.y} r={11} fill={color} opacity={0.18} filter="url(#cGlow)" />}
-              <circle cx={p.x} cy={p.y} r={isTop ? 6.5 : 3.5}
-                fill={color} stroke="rgba(0,0,0,0.55)" strokeWidth={1.5} />
-            </g>
-          )
-        })}
-
-        {/* Rank numbers inside segments */}
-        {pos.map(({ item, cDeg, i, isTop }) => {
-          const p = polar((isTop ? TR : OR) - 14, cDeg)
-          return (
-            <text key={'rk-' + item.sector} x={p.x} y={p.y + 4} textAnchor="middle"
-              fill={isTop ? '#fbbf24' : 'rgba(255,255,255,0.35)'}
-              fontSize={isTop ? 13 : 10} fontWeight={700}>{i + 1}</text>
-          )
-        })}
-
-        {/* Center circle */}
-        <circle cx={cx} cy={cy} r={IR} fill="rgba(4,7,18,0.98)" stroke={bestColor} strokeWidth={2} />
-        <text x={cx} y={cy - 17} textAnchor="middle" fill="rgba(255,255,255,0.2)" fontSize={8} letterSpacing={2}>주도섹터</text>
-        <text x={cx} y={cy + 2}  textAnchor="middle" fill="#f1f5f9" fontSize={13} fontWeight={700}>{best.sector}</text>
-        <text x={cx} y={cy + 21} textAnchor="middle" fill={bestColor} fontSize={20} fontWeight={800}>{best.score}</text>
-
-        {/* Outer labels */}
-        {pos.map(({ item, cDeg, isTop }) => {
-          const p = polar((isTop ? TR : OR) + 46, cDeg)
-          const lc = LIFECYCLE_COLORS[item.lifecycleStage] ?? '#6b7280'
-          return (
-            <g key={'lbl-' + item.sector}>
-              <text x={p.x} y={p.y - 9} textAnchor="middle"
-                fill={isTop ? '#fbbf24' : 'rgba(241,245,249,0.85)'}
-                fontSize={isTop ? 13 : 11} fontWeight={isTop ? 700 : 500}>{item.sector}</text>
-              <text x={p.x} y={p.y + 5} textAnchor="middle"
-                fill={SCORE_COLOR(item.score)} fontSize={12} fontWeight={700}>{item.score}</text>
-              <text x={p.x} y={p.y + 17} textAnchor="middle"
-                fill={lc} fontSize={8.5}>{item.lifecycle}</text>
-            </g>
-          )
-        })}
-
-        {/* East arrow indicator */}
-        {(() => {
-          const tip = polar(TR + 14, 0)
-          return (
-            <polygon
-              points={`${(tip.x + 11).toFixed(1)},${tip.y.toFixed(1)} ${tip.x.toFixed(1)},${(tip.y - 6).toFixed(1)} ${tip.x.toFixed(1)},${(tip.y + 6).toFixed(1)}`}
-              fill="#fbbf24" opacity={0.95} filter="url(#cGlow)" />
-          )
-        })()}
-
-        {/* Cardinal direction labels */}
-        {[{ d: 0, l: 'E' }, { d: 90, l: 'S' }, { d: 180, l: 'W' }, { d: 270, l: 'N' }].map(({ d, l }) => {
-          const isE = d === 0
-          const p = polar((isE ? TR : OR) + 78, d)
-          return (
-            <text key={l} x={p.x} y={p.y + 4} textAnchor="middle"
-              fill={isE ? 'rgba(251,191,36,0.55)' : 'rgba(255,255,255,0.12)'}
-              fontSize={isE ? 13 : 10} fontWeight={isE ? 700 : 400}>{l}</text>
-          )
-        })}
-      </svg>
-
-      {/* Score legend */}
-      <div style={{ display: 'flex', gap: 20, fontSize: 11, color: 'rgba(255,255,255,0.3)', marginTop: 8 }}>
+      {/* 범례 */}
+      <div style={{
+        display: 'flex', gap: 16, fontSize: 11, flexWrap: 'wrap',
+        color: 'rgba(255,255,255,0.25)', marginTop: 10, justifyContent: 'center',
+      }}>
         <span><span style={{ color: '#34d399' }}>●</span> 75+ 강매집</span>
         <span><span style={{ color: '#60a5fa' }}>●</span> 55–74 유입</span>
         <span><span style={{ color: '#eab308' }}>●</span> 40–54 중립</span>
@@ -516,13 +493,39 @@ function SectorCompass({ sectors }: { sectors: SectorItem[] }) {
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
+const CACHE_KEY = 'apolloSectorCache'
+const CACHE_TS_KEY = 'apolloSectorCacheTs'
+const REFRESH_INTERVAL = 60 * 60 * 1000  // 1시간
+
+function loadCached(): { data: RotationData | null; stale: boolean; savedAt: number } {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY)
+    const ts = Number(localStorage.getItem(CACHE_TS_KEY) ?? '0')
+    if (raw) return { data: JSON.parse(raw) as RotationData, stale: true, savedAt: ts }
+  } catch { /* ignore */ }
+  return { data: null, stale: false, savedAt: 0 }
+}
+
+function fmtCountdown(ms: number): string {
+  if (ms <= 0) return '갱신 중...'
+  const totalSec = Math.ceil(ms / 1000)
+  const m = Math.floor(totalSec / 60)
+  const s = totalSec % 60
+  return m > 0 ? `${m}분 ${s}초 후 갱신` : `${s}초 후 갱신`
+}
+
 export function SectorRotationPage() {
-  const [data, setData] = useState<RotationData | null>(null)
+  const init = loadCached()
+  const [data, setData] = useState<RotationData | null>(init.data)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [stale, setStale] = useState(init.stale)
+  const [nextRefreshAt, setNextRefreshAt] = useState<number>(init.savedAt ? init.savedAt + REFRESH_INTERVAL : 0)
+  const [countdown, setCountdown] = useState<string>('')
   const timerRef = useRef<number | null>(null)
+  const countdownRef = useRef<number | null>(null)
 
   const load = useCallback(async (force = false) => {
     setLoading(true)
@@ -530,6 +533,14 @@ export function SectorRotationPage() {
     try {
       const res = await fetchJson<RotationData>(`/api/sector-rotation${force ? '?force=true' : ''}`)
       setData(res)
+      setStale(false)
+      const now = Date.now()
+      const next = now + REFRESH_INTERVAL
+      setNextRefreshAt(next)
+      try {
+        localStorage.setItem(CACHE_KEY, JSON.stringify(res))
+        localStorage.setItem(CACHE_TS_KEY, String(now))
+      } catch { /* ignore */ }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : '데이터 로드 실패')
     } finally {
@@ -538,9 +549,21 @@ export function SectorRotationPage() {
     }
   }, [])
 
+  // 카운트다운 타이머 (1초마다 갱신)
+  useEffect(() => {
+    const tick = () => {
+      if (nextRefreshAt <= 0) { setCountdown(''); return }
+      const remaining = nextRefreshAt - Date.now()
+      setCountdown(remaining > 0 ? fmtCountdown(remaining) : '갱신 중...')
+    }
+    tick()
+    countdownRef.current = window.setInterval(tick, 1000)
+    return () => { if (countdownRef.current) window.clearInterval(countdownRef.current) }
+  }, [nextRefreshAt])
+
   useEffect(() => {
     load()
-    timerRef.current = window.setInterval(() => load(), 60 * 60 * 1000)  // 1시간마다 갱신
+    timerRef.current = window.setInterval(() => load(), REFRESH_INTERVAL)
     return () => { if (timerRef.current) window.clearInterval(timerRef.current) }
   }, [load])
 
@@ -548,6 +571,10 @@ export function SectorRotationPage() {
     setRefreshing(true)
     load(true)
   }
+
+  // 로딩 중이면서 이미 캐시 데이터가 있으면 배너만 표시 (빈 화면 X)
+  const showLoadingBanner = loading && !data
+  const showStaleBanner   = stale && loading && !!data
 
   return (
     <div style={{ padding: '24px 28px', maxWidth: 1100, margin: '0 auto' }}>
@@ -574,9 +601,20 @@ export function SectorRotationPage() {
             {refreshing ? '⏳ 재계산 중...' : '↺ 강제 갱신'}
           </button>
           {data && (
-            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>
-              {data.cached ? '📦 캐시' : '🔄 신선'} · {data.asOf}
-            </span>
+            <div style={{ textAlign: 'right' }}>
+              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', display: 'block' }}>
+                {showStaleBanner
+                  ? '⏳ 새 데이터 수집 중...'
+                  : stale
+                    ? '📦 이전 저장본'
+                    : data.cached ? '📦 서버캐시' : '🔄 신선'} · {data.asOf}
+              </span>
+              {countdown && !showStaleBanner && (
+                <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', display: 'block', marginTop: 2 }}>
+                  🕐 {countdown}
+                </span>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -591,8 +629,8 @@ export function SectorRotationPage() {
         </div>
       )}
 
-      {/* Loading skeleton */}
-      {loading && !data && (
+      {/* Loading skeleton - 캐시가 없을 때만 전체 대기 화면 */}
+      {showLoadingBanner && (
         <div style={{ textAlign: 'center', padding: '80px 0', color: 'rgba(255,255,255,0.3)' }}>
           <div style={{ fontSize: 32, marginBottom: 12 }}>⏳</div>
           <p style={{ fontSize: 14 }}>데이터 수집 중... (최초 약 30~60초 소요)</p>
@@ -600,9 +638,21 @@ export function SectorRotationPage() {
         </div>
       )}
 
+      {/* 캐시 표시 중 새 데이터 로딩 배너 */}
+      {showStaleBanner && (
+        <div style={{
+          background: 'rgba(234,179,8,0.07)', border: '1px solid rgba(234,179,8,0.2)',
+          borderRadius: 8, padding: '8px 14px', color: 'rgba(234,179,8,0.7)',
+          marginBottom: 12, fontSize: 12, display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span style={{ animation: 'spin 1.2s linear infinite', display: 'inline-block' }}>⏳</span>
+          이전 저장 데이터를 표시 중입니다. 새 수급 데이터 수집 중...
+        </div>
+      )}
+
       {data && (
         <>
-          <SectorCompass sectors={data.sectors} />
+          <SectorGrid sectors={data.sectors} />
 
           {/* TOP 3 highlights */}
           {data.topSectors.length > 0 && (
