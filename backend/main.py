@@ -2298,14 +2298,33 @@ def upsert_sv_config(payload: dict = Body(...), current_user=Depends(get_current
 
 
 @app.get("/api/stocks/search")
-def search_stocks(q: str | None = None, market: str | None = None, sort: str | None = None, current_user=Depends(get_current_user)):
+def search_stocks(
+    q: str | None = None,
+    market: str | None = None,
+    sort: str | None = None,
+    screen: str | None = None,
+    current_user=Depends(get_current_user),
+):
     if apollo_db is None or models is None:
         raise HTTPException(status_code=500, detail="DB module not available")
 
     user_id = int(current_user.id)
-    q_norm = (q or "").strip()
+    q_norm      = (q      or "").strip()
     market_norm = (market or "").strip().upper()
-    _sort_norm = (sort or "").strip()
+    screen_norm = (screen or "").strip().lower()
+
+    # ── 스크린별 점수 컬럼 매핑 ──────────────────────────────────────────────
+    # models.IndicatorScore 에 해당 컬럼이 없을 경우 score_total 로 fallback
+    SCREEN_SORT: dict[str, str] = {
+        "leading":       "score_total",   # 주도 섹터: 종합점수 상위
+        "big_buy":       "score_flow",    # 대량 매수: 수급 점수 상위
+        "bottom_escape": "score_tech",    # 바닥 탈출: 기술 점수 상위
+        "crash_risk":    "score_total",   # 급락 위험: 종합점수 하위 (역정렬)
+    }
+
+    def _score_col(col_name: str):
+        """IndicatorScore 에서 col_name 컬럼을 가져오되, 없으면 score_total."""
+        return getattr(models.IndicatorScore, col_name, models.IndicatorScore.score_total)
 
     db: Session = apollo_db.get_session_factory()()
     try:
@@ -2331,7 +2350,18 @@ def search_stocks(q: str | None = None, market: str | None = None, sort: str | N
             like_name = f"%{q_norm}%"
             stmt = stmt.where((models.Stock.code.like(like_code)) | (models.Stock.name.like(like_name)))
 
-        rows = db.execute(stmt.order_by(desc(models.IndicatorScore.score_total), models.Stock.code).limit(30)).all()
+        # 스크린 정렬 / 필터
+        if screen_norm == "crash_risk":
+            # 급락 위험: 점수 낮은 종목 우선 (위험 신호 상위)
+            sort_col = _score_col(SCREEN_SORT.get(screen_norm, "score_total"))
+            stmt = stmt.order_by(sort_col, models.Stock.code)
+        elif screen_norm in SCREEN_SORT:
+            sort_col = _score_col(SCREEN_SORT[screen_norm])
+            stmt = stmt.order_by(desc(sort_col), models.Stock.code)
+        else:
+            stmt = stmt.order_by(desc(models.IndicatorScore.score_total), models.Stock.code)
+
+        rows = db.execute(stmt.limit(30)).all()
 
         items: list[dict] = []
         for code, name, score_total in rows:
@@ -2358,7 +2388,7 @@ def search_stocks(q: str | None = None, market: str | None = None, sort: str | N
                 }
             )
 
-        return {"items": items}
+        return {"items": items, "screen": screen_norm or None}
     finally:
         db.close()
 

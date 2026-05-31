@@ -24,17 +24,76 @@ type StockDetail = StockRow & {
   }
 }
 
+type ScreenKey = '' | 'leading' | 'big_buy' | 'bottom_escape' | 'crash_risk'
+
+interface ScreenDef {
+  key: ScreenKey
+  label: string
+  icon: string
+  color: string       // accent color
+  border: string      // border rgba
+  bg: string          // tile bg
+  desc: string
+  tags: string[]
+}
+
+const SCREENS: ScreenDef[] = [
+  {
+    key: 'leading',
+    label: '주도 섹터',
+    icon: '🚀',
+    color: '#34d399',
+    border: 'rgba(52,211,153,0.35)',
+    bg: 'rgba(52,211,153,0.07)',
+    desc: '이평선 정배열 · 신고가 · 수급 강세 · 거래대금 상위 · 실적 성장',
+    tags: ['정배열', '신고가', 'RSI우위', '거래대금上', '주도수급', '거래량폭발', '이익성장', '대장주', '유동성'],
+  },
+  {
+    key: 'big_buy',
+    label: '대량 매수',
+    icon: '💥',
+    color: '#fbbf24',
+    border: 'rgba(251,191,36,0.35)',
+    bg: 'rgba(251,191,36,0.07)',
+    desc: '체결강도 200% · 거래대금 급증 · 대형 단일 체결 포착',
+    tags: ['체결강도≥200%', '거래대금급증', '대형체결'],
+  },
+  {
+    key: 'bottom_escape',
+    label: '바닥 탈출',
+    icon: '📈',
+    color: '#60a5fa',
+    border: 'rgba(96,165,250,0.35)',
+    bg: 'rgba(96,165,250,0.07)',
+    desc: '골든크로스 · 볼린저 하단 돌파 반등 · Bullish Divergence · 실적 턴어라운드',
+    tags: ['골든크로스', 'BB하단반등', '거래량300%+', 'RSI다이버전스', '실적턴어라운드', '기관+외국인매집'],
+  },
+  {
+    key: 'crash_risk',
+    label: '급락 위험',
+    icon: '⚠️',
+    color: '#f87171',
+    border: 'rgba(248,113,113,0.35)',
+    bg: 'rgba(248,113,113,0.07)',
+    desc: '매수세 소진 · 공매도 급증 · Bearish Divergence · 섹터 Peak-out',
+    tags: ['거래량소진', '공매도급증', 'Bearish다이버전스', '장대음봉', '이익률하락', '과열162%+', '섹터Peak-out'],
+  },
+]
+
 export function StockSearchPage() {
   const [q, setQ] = useState('')
   const [market, setMarket] = useState('KOSPI')
   const [sort, setSort] = useState('관련도')
+  const [screen, setScreen] = useState<ScreenKey>('')
   const [rows, setRows] = useState<StockRow[]>([])
   const [selected, setSelected] = useState<StockDetail | null>(null)
   const [watchlistBusy, setWatchlistBusy] = useState(false)
 
+  const activeScreen = SCREENS.find(s => s.key === screen) ?? null
+
   useEffect(() => {
     let cancelled = false
-    fetchJson<SearchResponse>(`/api/stocks/search?q=${encodeURIComponent(q)}&market=${encodeURIComponent(market)}&sort=${encodeURIComponent(sort)}`)
+    fetchJson<SearchResponse>(`/api/stocks/search?q=${encodeURIComponent(q)}&market=${encodeURIComponent(market)}&sort=${encodeURIComponent(sort)}&screen=${encodeURIComponent(screen)}`)
       .then((payload) => {
         if (cancelled) return
         setRows(payload.items)
@@ -56,12 +115,12 @@ export function StockSearchPage() {
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
-      fetchJson<SearchResponse>(`/api/stocks/search?q=${encodeURIComponent(q)}&market=${encodeURIComponent(market)}&sort=${encodeURIComponent(sort)}`)
+      fetchJson<SearchResponse>(`/api/stocks/search?q=${encodeURIComponent(q)}&market=${encodeURIComponent(market)}&sort=${encodeURIComponent(sort)}&screen=${encodeURIComponent(screen)}`)
         .then((payload) => setRows(payload.items))
         .catch(() => setRows([]))
     }, 200)
     return () => window.clearTimeout(handle)
-  }, [q, market, sort])
+  }, [q, market, sort, screen])
 
   const detailIndicators = selected?.indicators
 
@@ -75,6 +134,71 @@ export function StockSearchPage() {
         </div>
         <div className="status-pill">실시간 조회 준비</div>
       </header>
+
+      {/* ── 스크린 버튼 패널 ── */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(4, 1fr)',
+        gap: 10,
+        marginBottom: 16,
+      }}>
+        {SCREENS.map(s => {
+          const active = screen === s.key
+          return (
+            <button
+              key={s.key}
+              type="button"
+              onClick={() => setScreen(active ? '' : s.key)}
+              style={{
+                background: active ? s.bg : 'rgba(255,255,255,0.03)',
+                border: `1px solid ${active ? s.border : 'rgba(255,255,255,0.08)'}`,
+                borderRadius: 12,
+                padding: '12px 14px',
+                cursor: 'pointer',
+                textAlign: 'left',
+                transition: 'all 0.18s',
+                outline: 'none',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 5 }}>
+                <span style={{ fontSize: 18, lineHeight: 1 }}>{s.icon}</span>
+                <span style={{
+                  fontSize: 13, fontWeight: 700,
+                  color: active ? s.color : '#f1f5f9',
+                }}>{s.label}</span>
+              </div>
+              <p style={{
+                fontSize: 10, color: 'rgba(255,255,255,0.38)',
+                lineHeight: 1.45, margin: 0,
+              }}>{s.desc}</p>
+            </button>
+          )
+        })}
+      </div>
+
+      {/* 활성 스크린 조건 태그 */}
+      {activeScreen && (
+        <div style={{
+          display: 'flex', flexWrap: 'wrap', gap: 6,
+          marginBottom: 14, padding: '10px 14px',
+          background: activeScreen.bg,
+          border: `1px solid ${activeScreen.border}`,
+          borderRadius: 10,
+        }}>
+          <span style={{ fontSize: 11, color: activeScreen.color, fontWeight: 700, marginRight: 4 }}>
+            {activeScreen.icon} {activeScreen.label} 조건:
+          </span>
+          {activeScreen.tags.map(tag => (
+            <span key={tag} style={{
+              fontSize: 10, padding: '2px 8px', borderRadius: 99,
+              background: activeScreen.color + '18',
+              border: `1px solid ${activeScreen.color}44`,
+              color: activeScreen.color,
+              fontWeight: 600,
+            }}>{tag}</span>
+          ))}
+        </div>
+      )}
 
       <section className="two-col">
         <article className="panel glass reveal">
