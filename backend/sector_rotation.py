@@ -90,7 +90,7 @@ VALUE_SECTORS  = {"금융", "방산"}
 _cache_lock = threading.Lock()
 _cache: Optional[dict] = None
 _cache_ts: float = 0.0
-CACHE_TTL = 3600  # seconds
+CACHE_TTL = 28800  # 8시간 (매일 장마감 후 1회 갱신 권장)
 
 
 # ---------------------------------------------------------------------------
@@ -128,12 +128,17 @@ def _macro_score() -> Tuple[float, dict]:
     try:
         import yfinance as yf
 
-        raw = yf.download("^TNX DX-Y.NYB ^VIX", period="60d", interval="1d", progress=False)
+        raw = yf.download(
+            "^TNX DX-Y.NYB ^VIX ^IXIC KRW=X",
+            period="60d", interval="1d", progress=False,
+        )
         closes = raw["Close"]
 
-        tnx = closes["^TNX"].dropna()
-        dxy = closes["DX-Y.NYB"].dropna()
-        vix = closes["^VIX"].dropna()
+        tnx    = closes["^TNX"].dropna()
+        dxy    = closes["DX-Y.NYB"].dropna()
+        vix    = closes["^VIX"].dropna()
+        nasdaq = closes["^IXIC"].dropna()
+        krw    = closes["KRW=X"].dropna()  # USD per 1 KRW → invert for USD/KRW
 
         def _dir(series, n: int = 20) -> float:
             if len(series) < n + 1:
@@ -142,9 +147,10 @@ def _macro_score() -> Tuple[float, dict]:
             past = _safe(series.iloc[-n])
             return (now_ - past) / (abs(past) + 1e-9)
 
-        tnx_dir = _dir(tnx)
-        dxy_dir = _dir(dxy)
-        vix_val = _safe(vix.iloc[-1]) if len(vix) > 0 else 20.0
+        tnx_dir    = _dir(tnx)
+        dxy_dir    = _dir(dxy)
+        nasdaq_dir = _dir(nasdaq)
+        vix_val    = _safe(vix.iloc[-1]) if len(vix) > 0 else 20.0
 
         growth_score = 50.0
         growth_score -= tnx_dir * 200   # 금리 상승 → 성장주 불리
@@ -152,13 +158,23 @@ def _macro_score() -> Tuple[float, dict]:
         growth_score -= max(0.0, (vix_val - 20.0) * 0.5)  # VIX 20 초과 → 위험
         growth_score = round(max(0.0, min(100.0, growth_score)), 1)
 
+        # 달러/원: KRW=X는 USD 기준 KRW 수량 (ex. 1380.5)
+        us_krw_val   = round(_safe(krw.iloc[-1]),  1) if len(krw)    > 0 else None
+        nasdaq_val   = round(_safe(nasdaq.iloc[-1]), 0) if len(nasdaq) > 0 else None
+        nasdaq_chg5  = round(_dir(nasdaq, n=5)  * 100, 2)
+        us_krw_chg5  = round(_dir(krw, n=5)     * 100, 2) if len(krw) >= 6 else 0.0
+
         detail = {
-            "tnx":       round(_safe(tnx.iloc[-1]), 3) if len(tnx) > 0 else None,
-            "dxy":       round(_safe(dxy.iloc[-1]), 3) if len(dxy) > 0 else None,
-            "vix":       round(vix_val, 2),
-            "tnx20dChg": round(tnx_dir * 100, 2),
-            "dxy20dChg": round(dxy_dir * 100, 2),
+            "tnx":        round(_safe(tnx.iloc[-1]), 3) if len(tnx) > 0 else None,
+            "dxy":        round(_safe(dxy.iloc[-1]), 3) if len(dxy) > 0 else None,
+            "vix":        round(vix_val, 2),
+            "tnx20dChg":  round(tnx_dir * 100, 2),
+            "dxy20dChg":  round(dxy_dir * 100, 2),
             "growthScore": growth_score,
+            "nasdaq":     int(nasdaq_val) if nasdaq_val is not None else None,
+            "nasdaqChg5d": nasdaq_chg5,
+            "usKrw":      us_krw_val,
+            "usKrwChg5d": us_krw_chg5,
         }
         return growth_score, detail
 
@@ -240,7 +256,7 @@ def _get_flow_scores() -> Dict[str, Dict[str, float]]:
 def _get_pv_scores() -> Dict[str, Dict[str, float]]:
     fallback = {
         s: {"momentum": 50.0, "volume": 50.0,
-            "momentum_pct": 0.0, "volume_surge_pct": 0.0}
+            "momentum_pct": 0.0, "volume_surge_pct": 0.0, "top_stocks": []}
         for s in SECTORS
     }
     try:
@@ -253,9 +269,11 @@ def _get_pv_scores() -> Dict[str, Dict[str, float]]:
 
         raw_mom: Dict[str, float] = {}
         raw_vol: Dict[str, float] = {}
+        sector_top3: Dict[str, list] = {}
 
         for sector, codes in SECTORS.items():
             moms, vols = [], []
+            code_14d: Dict[str, float] = {}
             for code in codes:
                 try:
                     df = pstock.get_market_ohlcv_by_date(start_str, end_str, code)
@@ -277,11 +295,25 @@ def _get_pv_scores() -> Dict[str, Dict[str, float]]:
                     else:
                         surge = 0.0
                     vols.append(_safe(surge))
+
+                    # 14거래일 수익률 (leadStocks용)
+                    n14 = min(14, len(close) - 1)
+                    if n14 > 0:
+                        chg14 = (close.iloc[-1] - close.iloc[-n14]) / (close.iloc[-n14] + 1e-9) * 100
+                        code_14d[code] = round(_safe(chg14), 2)
+
                 except Exception:
                     continue
 
             raw_mom[sector] = sum(moms) / max(len(moms), 1) if moms else 0.0
             raw_vol[sector] = sum(vols) / max(len(vols), 1) if vols else 0.0
+
+            # 14일 수익률 상위 3종목
+            top3 = sorted(code_14d.items(), key=lambda x: x[1], reverse=True)[:3]
+            sector_top3[sector] = [
+                {"code": c, "name": CODE_NAMES.get(c, c), "change14d": v}
+                for c, v in top3
+            ]
 
         mom_norm = _normalize(raw_mom)
         vol_norm = _normalize(raw_vol)
@@ -292,6 +324,7 @@ def _get_pv_scores() -> Dict[str, Dict[str, float]]:
                 "volume":            vol_norm.get(sector, 50.0),
                 "momentum_pct":      round(raw_mom.get(sector, 0.0), 2),
                 "volume_surge_pct":  round(raw_vol.get(sector, 0.0), 2),
+                "top_stocks":        sector_top3.get(sector, []),
             }
             for sector in SECTORS
         }
@@ -405,6 +438,7 @@ def compute_sector_rotation(force: bool = False) -> dict:
             "leadNames":      [CODE_NAMES.get(c, c) for c in SECTOR_ROLES.get(sector, {}).get("주도주", SECTORS[sector][:2])[:2]],
             "componentNames": [CODE_NAMES.get(c, c) for c in SECTOR_ROLES.get(sector, {}).get("소부장", SECTORS[sector][2:4])[:2]],
             "trends":         SECTOR_TRENDS.get(sector, {"tags": [], "theme": ""}),
+            "leadStocks":     pv.get("top_stocks", []),
         })
 
     sectors_out.sort(key=lambda x: x["score"], reverse=True)

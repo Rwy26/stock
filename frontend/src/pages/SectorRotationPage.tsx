@@ -10,6 +10,10 @@ interface MacroDetail {
   tnx20dChg?: number
   dxy20dChg?: number
   growthScore?: number
+  nasdaq?: number | null
+  nasdaqChg5d?: number
+  usKrw?: number | null
+  usKrwChg5d?: number
   error?: string
 }
 
@@ -353,12 +357,10 @@ function LifecyclePipeline({ sectors }: { sectors: SectorItem[] }) {
 // 원형 도넛 → 3×3 사각형 그리드 (동=1위, 시계방향)
 // 각 셀: 섹터 태그 + 점수 + 생애주기 + 대표 종목 3개(14거래일 수익률)
 
-function SectorGrid({ sectors }: { sectors: SectorItem[] }) {
+function SectorGrid({ sectors, macro }: { sectors: SectorItem[]; macro: MacroDetail }) {
   if (sectors.length < 2) return null
 
   const displayed = sectors.slice(0, 8)
-  const best = displayed[0]
-  const bestColor = SCORE_COLOR(best.score)
 
   // E(1위) → SE(2위) → S(3위) → SW(4위) → W(5위) → NW(6위) → N(7위) → NE(8위)
   const AREA_MAP = ['e', 'se', 's', 'sw', 'w', 'nw', 'n', 'ne'] as const
@@ -386,25 +388,67 @@ function SectorGrid({ sectors }: { sectors: SectorItem[] }) {
         width: '100%',
       }}>
 
-        {/* ── 중앙: 주도 섹터 요약 ── */}
+        {/* ── 중앙: 매크로 패널 ── */}
         <div style={{
           gridArea: 'c',
-          background: `linear-gradient(135deg, ${bestColor}1c, rgba(4,7,18,0.98))`,
-          border: `2px solid ${bestColor}55`,
+          background: 'linear-gradient(135deg, rgba(99,102,241,0.10), rgba(4,7,18,0.98))',
+          border: '1px solid rgba(99,102,241,0.28)',
           borderRadius: 10,
           display: 'flex', flexDirection: 'column',
-          alignItems: 'center', justifyContent: 'center',
-          padding: '14px 8px',
-          textAlign: 'center',
+          padding: '12px 12px',
           minHeight: 148,
-          gap: 3,
+          gap: 0,
         }}>
-          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.25)', letterSpacing: 2 }}>주도섹터</span>
-          <span style={{ fontSize: 13, fontWeight: 700, color: '#f1f5f9', lineHeight: 1.3 }}>{best.sector}</span>
-          <span style={{ fontSize: 34, fontWeight: 800, color: bestColor, lineHeight: 1 }}>{best.score}</span>
-          <span style={{ fontSize: 10, color: LIFECYCLE_COLORS[best.lifecycleStage] ?? '#6b7280' }}>
-            {best.lifecycle}
-          </span>
+          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.3)', letterSpacing: 2, marginBottom: 8 }}>MACRO</span>
+
+          {/* 나스닥 */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)' }}>나스닥</span>
+            <div style={{ textAlign: 'right' }}>
+              <span style={{ fontSize: 15, fontWeight: 700, color: '#f1f5f9' }}>
+                {macro.nasdaq != null ? macro.nasdaq.toLocaleString() : '—'}
+              </span>
+              {macro.nasdaqChg5d != null && (
+                <span style={{ fontSize: 10, marginLeft: 4, color: macro.nasdaqChg5d >= 0 ? '#34d399' : '#f87171' }}>
+                  {macro.nasdaqChg5d >= 0 ? '+' : ''}{macro.nasdaqChg5d.toFixed(1)}%
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div style={{ height: 1, background: 'rgba(255,255,255,0.07)', marginBottom: 6 }} />
+
+          {/* 달러/원 */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)' }}>달러/원</span>
+            <div style={{ textAlign: 'right' }}>
+              <span style={{ fontSize: 15, fontWeight: 700, color: '#f1f5f9' }}>
+                {macro.usKrw != null ? macro.usKrw.toLocaleString() : '—'}
+              </span>
+              {macro.usKrwChg5d != null && (
+                <span style={{ fontSize: 10, marginLeft: 4, color: macro.usKrwChg5d >= 0 ? '#f87171' : '#34d399' }}>
+                  {macro.usKrwChg5d >= 0 ? '+' : ''}{macro.usKrwChg5d.toFixed(1)}%
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div style={{ height: 1, background: 'rgba(255,255,255,0.07)', marginBottom: 6 }} />
+
+          {/* 미 10Y 국채 */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)' }}>미 10Y</span>
+            <div style={{ textAlign: 'right' }}>
+              <span style={{ fontSize: 15, fontWeight: 700, color: '#f1f5f9' }}>
+                {macro.tnx != null ? macro.tnx + '%' : '—'}
+              </span>
+              {macro.tnx20dChg != null && (
+                <span style={{ fontSize: 10, marginLeft: 4, color: macro.tnx20dChg >= 0 ? '#f87171' : '#34d399' }}>
+                  {macro.tnx20dChg >= 0 ? '+' : ''}{macro.tnx20dChg.toFixed(1)}
+                </span>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* ── 8개 섹터 셀 ── */}
@@ -495,7 +539,7 @@ function SectorGrid({ sectors }: { sectors: SectorItem[] }) {
 
 const CACHE_KEY = 'apolloSectorCache'
 const CACHE_TS_KEY = 'apolloSectorCacheTs'
-const REFRESH_INTERVAL = 60 * 60 * 1000  // 1시간
+const REFRESH_INTERVAL = 8 * 60 * 60 * 1000  // 8시간 (KRX 일일 데이터 기준)
 
 function loadCached(): { data: RotationData | null; stale: boolean; savedAt: number } {
   try {
@@ -652,7 +696,7 @@ export function SectorRotationPage() {
 
       {data && (
         <>
-          <SectorGrid sectors={data.sectors} />
+          <SectorGrid sectors={data.sectors} macro={data.macroDetail} />
 
           {/* TOP 3 highlights */}
           {data.topSectors.length > 0 && (
@@ -726,9 +770,9 @@ export function SectorRotationPage() {
             fontSize: 11, color: 'rgba(255,255,255,0.25)',
             borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 12, lineHeight: 1.6,
           }}>
-            ※ 수급 데이터: KRX(pykrx) / 매크로: Yahoo Finance / 뉴스 레이어: 업데이트 예정 (현재 50점 고정)
+            ※ 수급 데이터: KRX 공식 데이터(pykrx) — 블룸버그돈 트거미널이 한국 주식에 사용하는 같은 한국거래소 원천
             <br />
-            ※ 캐시 TTL 1시간 | 강제 갱신 시 30~60초 소요 | 투자 참고용 정보이며 투자 권유가 아닙니다
+            ※ 매크로: Yahoo Finance(TNX/DXY/VIX) · 캐시 TTL 8시간 | 강제 갱신 시 30~60초 소요 | 투자 참고용 정보이며 투자 권유가 아닙니다
           </div>
         </>
       )}
