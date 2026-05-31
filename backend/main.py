@@ -3341,7 +3341,7 @@ def get_macro_us_bonds():
         import pandas as pd    # type: ignore
         import math
 
-        raw = yf.download("^TNX ^TYX", period="180d", interval="1d",
+        raw = yf.download("^TNX ^TYX", period="72d", interval="1d",
                           progress=False, auto_adjust=False)
         close = raw["Close"]
         opn   = raw["Open"]
@@ -3438,7 +3438,7 @@ def get_macro_dxy():
         import yfinance as yf  # type: ignore
         import math
 
-        raw = yf.download("DX-Y.NYB", period="180d", interval="1d",
+        raw = yf.download("DX-Y.NYB", period="72d", interval="1d",
                           progress=False, auto_adjust=False)
 
         def ts(idx):
@@ -3469,6 +3469,33 @@ def get_macro_dxy():
 
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"DXY 데이터 조회 실패: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Sector Rotation Engine
+# ---------------------------------------------------------------------------
+try:
+    import sector_rotation as _sector_rotation  # type: ignore
+except Exception:  # pragma: no cover
+    _sector_rotation = None  # type: ignore[assignment]
+
+
+@app.get("/api/sector-rotation")
+def get_sector_rotation(force: bool = False):
+    """KOSPI 섹터 로테이션 나침반.
+
+    7-Layer 점수: 매크로(15%) + 외국인수급(25%) + 기관수급(20%)
+                  + 모멘텀(20%) + 뉴스(5%) + 거래대금(10%) + 스마트머니(5%)
+
+    ?force=true 로 캐시 무시 강제 재계산 (약 20~40초 소요)
+    인증 불필요.
+    """
+    if _sector_rotation is None:
+        raise HTTPException(status_code=503, detail="sector_rotation 모듈 로드 실패")
+    try:
+        return _sector_rotation.compute_sector_rotation(force=force)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"섹터 로테이션 계산 실패: {exc}") from exc
 
 
 DIST_DIR = REPO_ROOT / "frontend" / "dist"

@@ -19,6 +19,7 @@ import { BolinzerPage } from './pages/BolinzerPage'
 import { InvestmentRulesPage } from './pages/InvestmentRulesPage'
 import { AiChartPage } from './pages/AiChartPage'
 import { AiCachePage } from './pages/AiCachePage'
+import { SectorRotationPage } from './pages/SectorRotationPage'
 
 export default function App() {
   return (
@@ -49,6 +50,7 @@ export default function App() {
           <Route path="investment-rules" element={<InvestmentRulesPage />} />
           <Route path="ai-chart" element={<AiChartPage />} />
           <Route path="ai-cache" element={<AiCachePage />} />
+          <Route path="sector-rotation" element={<SectorRotationPage />} />
         </Route>
 
         <Route path="login" element={<LoginPage />} />

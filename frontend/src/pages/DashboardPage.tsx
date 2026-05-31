@@ -219,7 +219,7 @@ export function DashboardPage() {
         <article className="panel glass reveal" style={{ gridColumn: 'span 2' }}>
           <div className="panel-head">
             <h3>미 국채 금리</h3>
-            <p className="subtle">10년물(파랑) · 30년물(주황) · 도미넌스 10Y/30Y(초록) — 일봉 180일</p>
+            <p className="subtle">10년물(파랑) · 30년물(주황) · 도미넌스 10Y/30Y(초록) — 일봉 72일</p>
           </div>
           <UsBondsChart />
         </article>
@@ -227,7 +227,7 @@ export function DashboardPage() {
         <article className="panel glass reveal">
           <div className="panel-head">
             <h3>달러 인덱스 (DXY)</h3>
-            <p className="subtle">USD Index 일봉 180일</p>
+            <p className="subtle">USD Index 일봉 72일</p>
           </div>
           <DxyChart />
         </article>
