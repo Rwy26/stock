@@ -359,39 +359,57 @@ function LifecyclePipeline({ sectors }: { sectors: SectorItem[] }) {
   )
 }
 
-// ─── Trend Sparkline ─────────────────────────────────────────────────────────
+// ─── Mini Chart (Google Finance style) ──────────────────────────────────────
 // chg5d: 최근 5거래일 변화율, chg20d: 최근 20거래일 변화율
-// 패턴: 상승 / 상승후하락 / 하락후상승 / 하락·횡보
-function TrendLine({ chg5d = 0, chg20d = 0, color }: { chg5d?: number; chg20d?: number; color: string }) {
-  const T = 0.8  // % threshold
-  const recentUp = chg5d > T
-  const recentDn = chg5d < -T
-  const prevUp   = chg20d > T
-  const prevDn   = chg20d < -T
+// 3-anchor bezier area chart: start(day-20) → mid(day-5) → end(today)
+function MiniChart({ chg5d = 0, chg20d = 0, color, id }: {
+  chg5d?: number; chg20d?: number; color: string; id: string
+}) {
+  const W = 64, H = 28, PX = 2, PY = 3
 
-  let d: string
-  let label: string
-  if (prevUp && recentUp) {
-    d = 'M2,17 C10,14 28,7 42,3'           // 상승 ↗
-    label = '상승'
-  } else if (prevUp && recentDn) {
-    d = 'M2,14 C10,5 22,4 32,9 C36,12 40,16 42,17'  // 상승후하락 ∧
-    label = '상승후하락'
-  } else if (prevDn && recentUp) {
-    d = 'M2,6 C6,12 18,18 26,18 C32,18 38,10 42,4'  // 하락후상승 ∨
-    label = '하락후상승'
-  } else {
-    d = 'M2,4 C12,7 30,14 42,17'            // 하락·횡보 ↘
-    label = '하락·횡보'
-  }
+  // 3 anchor pct values relative to day-20 baseline
+  const p0 = 0                   // day -20
+  const p1 = chg20d - chg5d      // day -5
+  const p2 = chg20d              // day  0
+
+  const allV = [p0, p1, p2]
+  const span = Math.max(Math.abs(p2 - p0), Math.abs(p1), 0.5)  // min span to prevent flat
+  const minV = Math.min(...allV) - span * 0.18
+  const maxV = Math.max(...allV) + span * 0.18
+  const range = maxV - minV
+
+  const toY = (v: number) => PY + ((maxV - v) / range) * (H - PY * 2)
+
+  const x0 = PX, x1 = W / 2, x2 = W - PX
+  const y0 = toY(p0), y1 = toY(p1), y2 = toY(p2)
+  const yBase = Math.min(toY(0), H - PY)  // baseline clipped to bottom
+
+  // smooth bezier through 3 points (midpoint control points)
+  const mx = (x0 + x1) / 2, mx2 = (x1 + x2) / 2
+  const linePath = `M${x0},${y0} C${mx},${y0} ${mx},${y1} ${x1},${y1} C${mx2},${y1} ${mx2},${y2} ${x2},${y2}`
+  const areaPath = `${linePath} L${x2},${H} L${x0},${H} Z`
+
+  const gid = `gf-${id}`
 
   return (
-    <svg
-      width="44" height="20" viewBox="0 0 44 20"
-      style={{ flex: '0 0 44px', opacity: 0.85 }}
-      aria-label={label}
-    >
-      <path d={d} fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`}
+      style={{ flex: `0 0 ${W}px`, display: 'block', overflow: 'visible' }}>
+      <defs>
+        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"   stopColor={color} stopOpacity="0.45" />
+          <stop offset="100%" stopColor={color} stopOpacity="0.03" />
+        </linearGradient>
+      </defs>
+      {/* baseline dashed */}
+      <line x1={PX} y1={yBase} x2={W - PX} y2={yBase}
+        stroke="rgba(255,255,255,0.18)" strokeWidth="0.8" strokeDasharray="2.5,2.5" />
+      {/* area fill */}
+      <path d={areaPath} fill={`url(#${gid})`} />
+      {/* line */}
+      <path d={linePath} fill="none" stroke={color} strokeWidth="1.7"
+        strokeLinecap="round" strokeLinejoin="round" />
+      {/* end dot */}
+      <circle cx={x2} cy={y2} r="2.4" fill={color} />
     </svg>
   )
 }
@@ -431,68 +449,76 @@ function SectorGrid({ sectors, macro }: { sectors: SectorItem[]; macro: MacroDet
         width: '100%',
       }}>
 
-        {/* ── 중앙: 매크로 패널 ── */}
+        {/* ── 중앙: 매크로 패널 (Google Finance style) ── */}
         <div style={{
           gridArea: 'c',
-          background: 'linear-gradient(135deg, rgba(99,102,241,0.10), rgba(4,7,18,0.98))',
-          border: '1px solid rgba(99,102,241,0.28)',
+          background: 'linear-gradient(160deg, rgba(15,17,35,0.98), rgba(4,7,18,0.99))',
+          border: '1px solid rgba(99,102,241,0.25)',
           borderRadius: 10,
           display: 'flex', flexDirection: 'column',
-          padding: '10px 12px',
+          padding: '9px 10px',
           minHeight: 148,
-          justifyContent: 'space-around',
+          gap: 4,
         }}>
           {([
             {
+              id: 'nasdaq',
               label: '나스닥',
-              val: macro.nasdaq != null ? macro.nasdaq.toLocaleString() : '—',
+              val: macro.nasdaq != null ? macro.nasdaq.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—',
               chg: macro.nasdaqChg5d,
               chg5d: macro.nasdaqChg5d ?? 0,
               chg20d: macro.nasdaqChg20d ?? 0,
-              // 상승 좋음
-              chgColor: (c: number) => c >= 0 ? '#34d399' : '#f87171',
-              lineColor: macro.nasdaqChg5d != null && macro.nasdaqChg5d >= 0 ? '#34d399' : '#f87171',
+              color: (macro.nasdaqChg5d ?? 0) >= 0 ? '#34d399' : '#f87171',
             },
             {
+              id: 'krw',
               label: '달러/원',
-              val: macro.usKrw != null ? macro.usKrw.toLocaleString() : '—',
+              val: macro.usKrw != null ? macro.usKrw.toLocaleString(undefined, { maximumFractionDigits: 1 }) : '—',
               chg: macro.usKrwChg5d,
               chg5d: macro.usKrwChg5d ?? 0,
               chg20d: macro.usKrwChg20d ?? 0,
-              // 달러 강세(상승) = 위험 → 빨강
-              chgColor: (c: number) => c >= 0 ? '#f87171' : '#34d399',
-              lineColor: macro.usKrwChg5d != null && macro.usKrwChg5d >= 0 ? '#f87171' : '#34d399',
+              color: (macro.usKrwChg5d ?? 0) >= 0 ? '#f87171' : '#34d399',
             },
             {
+              id: 'oil',
               label: '유가(WTI)',
               val: macro.oil != null ? macro.oil.toFixed(1) : '—',
               chg: macro.oilChg5d,
               chg5d: macro.oilChg5d ?? 0,
               chg20d: macro.oilChg20d ?? 0,
-              chgColor: (c: number) => c >= 0 ? '#fbbf24' : '#60a5fa',
-              lineColor: macro.oilChg5d != null && macro.oilChg5d >= 0 ? '#fbbf24' : '#60a5fa',
+              color: (macro.oilChg5d ?? 0) >= 0 ? '#fbbf24' : '#60a5fa',
             },
             {
+              id: 'tnx',
               label: '미 10Y',
               val: macro.tnx != null ? macro.tnx + '%' : '—',
               chg: macro.tnxChg5d,
               chg5d: macro.tnxChg5d ?? 0,
               chg20d: macro.tnx20dChg ?? 0,
-              // 금리 상승 = 성장주 불리 → 빨강
-              chgColor: (c: number) => c >= 0 ? '#f87171' : '#34d399',
-              lineColor: macro.tnxChg5d != null && macro.tnxChg5d >= 0 ? '#f87171' : '#34d399',
+              color: (macro.tnxChg5d ?? 0) >= 0 ? '#f87171' : '#34d399',
             },
-          ] as const).map(({ label, val, chg, chg5d, chg20d, chgColor, lineColor }) => (
-            <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.42)', width: 50, flexShrink: 0 }}>{label}</span>
-              <TrendLine chg5d={chg5d} chg20d={chg20d} color={lineColor} />
-              <div style={{ flex: 1, textAlign: 'right' }}>
-                <span style={{ fontSize: 13, fontWeight: 700, color: '#f1f5f9' }}>{val}</span>
+          ] as const).map(({ id, label, val, chg, chg5d, chg20d, color }) => (
+            <div key={id} style={{
+              flex: 1,
+              display: 'flex', flexDirection: 'column', justifyContent: 'center',
+              borderBottom: id !== 'tnx' ? '1px solid rgba(255,255,255,0.05)' : 'none',
+              paddingBottom: id !== 'tnx' ? 3 : 0,
+            }}>
+              {/* top row: label + change% */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 1 }}>
+                <span style={{ fontSize: 9.5, color: 'rgba(255,255,255,0.38)', letterSpacing: 0.2 }}>{label}</span>
                 {chg != null && (
-                  <span style={{ fontSize: 10, marginLeft: 4, color: chgColor(chg), fontWeight: 600 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color }}>
                     {chg >= 0 ? '+' : ''}{chg.toFixed(1)}%
                   </span>
                 )}
+              </div>
+              {/* bottom row: chart + value */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <MiniChart chg5d={chg5d} chg20d={chg20d} color={color} id={id} />
+                <span style={{ fontSize: 13.5, fontWeight: 700, color: '#f1f5f9', flex: 1, textAlign: 'right', letterSpacing: -0.3 }}>
+                  {val}
+                </span>
               </div>
             </div>
           ))}

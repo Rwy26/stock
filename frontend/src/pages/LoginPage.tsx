@@ -22,32 +22,32 @@ export function LoginPage() {
     if (host !== '127.0.0.1' && host !== 'localhost') return
 
     let cancelled = false
-    setBusy(true)
-    fetchJson<{ accessToken: string; user?: { role?: string } }>('/api/dev/auto-login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    })
-      .then((res) => {
+    const run = async () => {
+      if (cancelled) return
+      setBusy(true)
+      try {
+        const res = await fetchJson<{ accessToken: string; user?: { role?: string } }>('/api/dev/auto-login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        })
         if (cancelled) return
         setAccessToken(res.accessToken)
         if (res.user?.role) setUserRole(res.user.role)
-        return fetchJson<{
+        const profile = await fetchJson<{
           nickname: string | null
           kis: { appKey: string | null; accountPrefix: string | null; hasAppSecret: boolean }
         }>('/api/profile')
-      })
-      .then((profile) => {
         if (cancelled || !profile) return
         const needsSetup = !profile.nickname || !profile.kis?.appKey || !profile.kis?.accountPrefix || !profile.kis?.hasAppSecret
         navigate(needsSetup ? '/profile-setup' : '/', { replace: true })
-      })
-      .catch(() => {
+      } catch {
         // Keep UX minimal: no extra modals/toasts.
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setBusy(false)
-      })
+      }
+    }
+    void run()
 
     return () => {
       cancelled = true

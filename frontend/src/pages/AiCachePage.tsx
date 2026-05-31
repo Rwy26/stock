@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { fetchJson } from '../lib/api'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -68,15 +68,16 @@ export function AiCachePage() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [filterSignal, setFilterSignal] = useState<string>('ALL')
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true)
     fetchJson<CacheResponse>('/api/ai/analysis-cache')
       .then((r) => { setItems(r.items); setError(null) })
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false))
-  }
+  }, [])
 
-  useEffect(() => { load() }, [])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => void load(), [])
 
   const openDetail = (code: string) => {
     setDetailLoading(true)
