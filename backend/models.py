@@ -121,6 +121,33 @@ class Watchlist(Base):
     __table_args__ = (Index("uq_watchlist_user_stock", "user_id", "stock_code", unique=True),)
 
 
+class StockInterest(Base):
+    """사용자별 종목 관심도 추적.
+
+    mention_count: 해당 종목이 이슈 리스트에 등장한 누적 횟수
+    interest_weight: mention_count 기반 자동 계산 가중치 (1.0~5.0)
+        1회=1.0, 2회≈1.9, 3회≈2.4, 5회≈2.9, 10회≈3.5
+    analysis_depth:
+        1 (기본): score_total만 저장, details=None
+        2 (심화): details JSON 풀 저장 + 기술 지표
+        3 (전문): details + DART 실적 + 60m 단기 신호 포함
+    tags: 관심 이유 메모 (JSON 배열)
+    """
+    __tablename__ = "stock_interest"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    stock_code: Mapped[str] = mapped_column(ForeignKey("stocks.code"), index=True)
+    mention_count: Mapped[int] = mapped_column(Integer, default=1)
+    interest_weight: Mapped[float] = mapped_column(Float, default=1.0)
+    analysis_depth: Mapped[int] = mapped_column(Integer, default=1)  # 1|2|3
+    tags: Mapped[dict | None] = mapped_column(JSON, nullable=True)   # ["바이오","이슈"]
+    last_mentioned_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (Index("uq_stock_interest_user_code", "user_id", "stock_code", unique=True),)
+
+
 class LoginHistory(Base):
     __tablename__ = "login_history"
 

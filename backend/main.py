@@ -2350,7 +2350,24 @@ def search_stocks(
             like_name = f"%{q_norm}%"
             stmt = stmt.where((models.Stock.code.like(like_code)) | (models.Stock.name.like(like_name)))
 
-        # 스크린 정렬 / 필터
+        # ── 스크린별 최소 점수 필터 ──────────────────────────────────────────
+        # 각 스크린이 서로 다른 모집단을 선택하도록 조건 구분
+        if screen_norm == "leading":
+            # 주도 섹터: 이미 강한 종합 우량주
+            stmt = stmt.where(models.IndicatorScore.score_total >= 60)
+        elif screen_norm == "big_buy":
+            # 대량 매수: 수급이 급등했으나 아직 주도주 아닌 종목 (조기 매집 포착)
+            stmt = stmt.where(models.IndicatorScore.score_flow >= 7)
+            stmt = stmt.where(models.IndicatorScore.score_total < 60)
+        elif screen_norm == "bottom_escape":
+            # 바닥 탈출: 기술적 반등 신호가 있으나 아직 종합 점수 낮은 종목 (실질 바닥 탈출)
+            stmt = stmt.where(models.IndicatorScore.score_tech >= 6)
+            stmt = stmt.where(models.IndicatorScore.score_total < 55)
+        elif screen_norm == "crash_risk":
+            # 급락 위험: Negative Filter 역점수 낮음 = 위험 신호 다수
+            stmt = stmt.where(models.IndicatorScore.score_growth <= 3)
+
+        # ── 스크린 정렬 ──────────────────────────────────────────────────────
         if screen_norm == "crash_risk":
             # 급락 위험: 점수 낮은 종목 우선 (위험 신호 상위)
             sort_col = _score_col(SCREEN_SORT.get(screen_norm, "score_total"))
