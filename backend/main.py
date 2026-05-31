@@ -1386,18 +1386,41 @@ def get_watchlist(current_user=Depends(get_current_user)):
                 raise HTTPException(status_code=400, detail="KIS 연결 필요")
 
         rows = db.execute(
-            select(models.Watchlist.stock_code, models.Stock.name)
+            select(models.Watchlist.stock_code, models.Stock.name, models.StockInterest.tags)
             .join(models.Stock, models.Stock.code == models.Watchlist.stock_code)
+            .outerjoin(
+                models.StockInterest,
+                (models.StockInterest.stock_code == models.Watchlist.stock_code)
+                & (models.StockInterest.user_id == user_id),
+            )
             .where(models.Watchlist.user_id == user_id)
             .order_by(desc(models.Watchlist.created_at))
         ).all()
 
+        _SIGNAL_TAGS = {"외국인수급", "기관수급"}
+
+        def _extract_sector(raw_tags) -> str:
+            import json as _json
+            tags = raw_tags
+            if isinstance(tags, str):
+                try:
+                    tags = _json.loads(tags)
+                except Exception:
+                    return "기타"
+            if not isinstance(tags, list) or not tags:
+                return "기타"
+            for tag in tags:
+                segment = str(tag).split("|")[0].strip()
+                if segment not in _SIGNAL_TAGS:
+                    return segment
+            return "기타수급"
+
         items: list[dict] = []
-        for stock_code, name in rows:
+        for stock_code, name, raw_tags in rows:
             try:
                 price, change_rate = _get_realtime_price_and_change(db, profile, stock_code)
-            except Exception as exc:
-                raise HTTPException(status_code=503, detail=f"KIS 시세 조회 실패: {exc}") from exc
+            except Exception:
+                price, change_rate = 0, 0.0
             score = _get_latest_score_total(db, stock_code)
             items.append(
                 {
@@ -1406,6 +1429,7 @@ def get_watchlist(current_user=Depends(get_current_user)):
                     "price": float(price),
                     "changeRate": float(change_rate),
                     "score": int(score),
+                    "sector": _extract_sector(raw_tags),
                 }
             )
 
