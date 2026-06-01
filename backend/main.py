@@ -1787,6 +1787,20 @@ _THEME_WATCHLIST_RULES: list[dict] = [
     },
 ]
 
+_THEME_WATCHLIST_NAME_ALIASES: dict[str, str] = {
+    _normalize_stock_name("제주반도체"): "080220",
+    _normalize_stock_name("원익IPS"): "240810",
+    _normalize_stock_name("하나머티리얼즈"): "166090",
+    _normalize_stock_name("ISC"): "095340",
+    _normalize_stock_name("에프에스티"): "036810",
+    _normalize_stock_name("한국피아이엠"): "477010",
+    _normalize_stock_name("한국항공우주"): "047810",
+    _normalize_stock_name("한화시스템"): "272210",
+    _normalize_stock_name("비나텍"): "126340",
+    _normalize_stock_name("LS마린솔루션"): "060370",
+    _normalize_stock_name("우리기술"): "032820",
+}
+
 
 def _as_tag_list(raw_tags) -> list[str]:
     tags = raw_tags
@@ -1809,6 +1823,21 @@ def _resolve_stock_input_for_theme_update(db: Session, *, user_id: int, raw_inpu
     query = str(raw_input or "").strip()
     if not query:
         return None
+
+    alias_code = _THEME_WATCHLIST_NAME_ALIASES.get(_normalize_stock_name(query))
+    if alias_code:
+        try:
+            return _resolve_stock_input_via_kis(db, user_id=user_id, raw_input=alias_code)
+        except Exception:
+            return {
+                "code": alias_code,
+                "name": query,
+                "market": "테마",
+                "verified": False,
+                "inputType": "theme-alias",
+                "verificationSources": ["ManualThemeAlias"],
+                "verificationMessage": "사용자 제공 테마 목록의 수동 별칭으로 반영",
+            }
 
     # Always require KIS-verified resolution for theme auto-updates.
     try:
