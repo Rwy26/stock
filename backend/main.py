@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse
 from fastapi.security import HTTPBearer
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
+import httpx
 
 import kis_client
 
@@ -462,19 +463,75 @@ def _resolve_stock_input_via_kis(db: Session, *, user_id: int, raw_input: str) -
             return 0.95
         return float(SequenceMatcher(a=norm_query, b=norm_kis).ratio())
 
+    def _google_finance_lookup(code: str, market_hint: str | None = None) -> dict | None:
+        if not re.fullmatch(r"\d{6}", str(code or "").strip()):
+            return None
+
+        exchange_candidates: list[str] = []
+        mh = str(market_hint or "").strip().upper()
+        if mh == "KOSDAQ":
+            exchange_candidates = ["KOSDAQ", "KRX"]
+        else:
+            exchange_candidates = ["KRX", "KOSDAQ"]
+
+        headers = {"User-Agent": "Mozilla/5.0"}
+        for exchange in exchange_candidates:
+            url = f"https://www.google.com/finance/quote/{code}:{exchange}?hl=ko"
+            try:
+                resp = httpx.get(url, headers=headers, timeout=6.0, follow_redirects=True)
+            except Exception:
+                continue
+            if resp.status_code != 200:
+                continue
+
+            title_match = re.search(r"<title>\s*([^<(]+)\((\d{6})\)\s*주가 및 뉴스\s*-\s*Google Finance\s*</title>", resp.text, re.I)
+            if not title_match:
+                continue
+
+            name = str(title_match.group(1) or "").strip()
+            page_code = str(title_match.group(2) or "").strip()
+            if page_code != str(code):
+                continue
+            if not name:
+                continue
+
+            return {
+                "name": name,
+                "code": page_code,
+                "exchange": exchange,
+                "url": str(resp.url),
+            }
+        return None
+
     # 1) 코드 입력 우선 처리: KIS로 즉시 유효성 검증
     if re.fullmatch(r"[0-9A-Za-z]{6}", query):
         try:
             quote = _quote_by_code(query)
             kis_name = str(getattr(quote, "name", "") or "").strip()
-            if not kis_name:
-                raise HTTPException(status_code=502, detail="KIS 종목명 확인 실패: 코드 검증 불가")
+            market_name = str(getattr(quote, "market_name", "") or "")
+            google_hit = _google_finance_lookup(str(quote.code), market_name)
+            if not kis_name and not google_hit:
+                raise HTTPException(status_code=502, detail="KIS/Google 종목명 확인 실패: 코드 검증 불가")
+            resolved_name = kis_name or str(google_hit.get("name") if google_hit else "").strip()
+            if google_hit and kis_name and (_normalize_stock_name(kis_name) != _normalize_stock_name(str(google_hit.get("name") or ""))):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "KIS와 Google Finance 종목명이 일치하지 않아 코드 입력을 확정하지 않았습니다",
+                        "code": str(quote.code),
+                        "kisName": kis_name,
+                        "googleName": str(google_hit.get("name") or ""),
+                        "googleUrl": str(google_hit.get("url") or ""),
+                    },
+                )
             return {
                 "code": str(quote.code),
-                "name": kis_name,
-                "market": str(getattr(quote, "market_name", "") or ""),
+                "name": resolved_name,
+                "market": market_name,
                 "verified": True,
                 "inputType": "code",
+                "verificationSources": [src for src in ["KIS" if kis_name else None, "GoogleFinance" if google_hit else None] if src],
+                "verificationMessage": "KIS/Google Finance 교차검증 완료" if google_hit else "KIS 검증 완료",
             }
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"유효하지 않은 종목코드 또는 KIS 조회 실패: {exc}") from exc
@@ -491,29 +548,44 @@ def _resolve_stock_input_via_kis(db: Session, *, user_id: int, raw_input: str) -
     verified_matches: list[dict] = []
     live_candidates: list[dict] = []
     for code, db_name in candidates:
+        market_hint = None
+        stock_row = db.execute(select(models.Stock.market).where(models.Stock.code == str(code))).first()
+        if stock_row and stock_row[0] is not None:
+            market_hint = str(stock_row[0])
         try:
             quote = _quote_by_code(str(code))
         except Exception:
-            continue
-        kis_name = str(getattr(quote, "name", "") or "").strip()
-        if not kis_name:
-            # KIS name is mandatory for safe name->code resolution.
+            quote = None
+        kis_name = str(getattr(quote, "name", "") or "").strip() if quote is not None else ""
+        google_hit = _google_finance_lookup(str(code), market_hint)
+        google_name = str(google_hit.get("name") or "").strip() if google_hit else ""
+        verified_name = kis_name or google_name
+        if not verified_name:
             continue
         live_candidates.append(
             {
                 "code": str(code),
-                "name": kis_name,
-                "market": str(getattr(quote, "market_name", "") or ""),
+                "name": verified_name,
+                "market": str(getattr(quote, "market_name", "") or "") if quote is not None else str(market_hint or ""),
+                "verificationSources": [src for src in ["KIS" if kis_name else None, "GoogleFinance" if google_name else None] if src],
             }
         )
         norm_kis = _normalize_stock_name(kis_name)
-        conf = _kis_name_confidence(norm_query, norm_kis)
-        if conf >= 0.92:
+        norm_google = _normalize_stock_name(google_name)
+        kis_conf = _kis_name_confidence(norm_query, norm_kis)
+        google_conf = _kis_name_confidence(norm_query, norm_google)
+        agreed = bool(norm_kis and norm_google and norm_kis == norm_google)
+        google_only = bool((not norm_kis) and google_conf >= 0.96)
+        kis_only = bool((not norm_google) and kis_conf >= 0.96)
+        corroborated = bool(kis_conf >= 0.92 and google_conf >= 0.92)
+        if agreed or google_only or kis_only or corroborated:
             verified_matches.append(
                 {
                     "code": str(code),
-                    "name": kis_name,
-                    "market": str(getattr(quote, "market_name", "") or ""),
+                    "name": verified_name,
+                    "market": str(getattr(quote, "market_name", "") or "") if quote is not None else str(market_hint or ""),
+                    "verificationSources": [src for src in ["KIS" if kis_name else None, "GoogleFinance" if google_name else None] if src],
+                    "verificationMessage": "KIS/Google Finance 교차검증 완료" if (kis_name and google_name) else ("Google Finance 검증 완료" if google_name else "KIS 검증 완료"),
                 }
             )
 
@@ -525,6 +597,8 @@ def _resolve_stock_input_via_kis(db: Session, *, user_id: int, raw_input: str) -
             "market": one["market"],
             "verified": True,
             "inputType": "name",
+            "verificationSources": one.get("verificationSources", []),
+            "verificationMessage": one.get("verificationMessage", "온라인 검증 완료"),
         }
 
     if len(verified_matches) > 1:
