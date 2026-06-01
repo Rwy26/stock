@@ -26,6 +26,9 @@ class KisQuote:
     change: float
     change_rate: float
     as_of: str
+    volume: int = 0
+    trading_value: float = 0.0
+    trade_strength: float = 0.0
 
 
 @dataclass
@@ -173,6 +176,11 @@ def inquire_price(
     price = _to_float(output.get("stck_prpr"))
     change = _to_float(output.get("prdy_vrss"))
     change_rate = _to_float(output.get("prdy_ctrt"))
+    volume = int(_to_float(output.get("acml_vol") or output.get("ACML_VOL")))
+    trading_value = _to_float(output.get("acml_tr_pbmn") or output.get("ACML_TR_PBMN"))
+    trade_strength = _to_float(
+        output.get("cttr") or output.get("CTTR") or output.get("tday_rltv") or output.get("TDAY_RLTV")
+    )
 
     as_of = output.get("stck_cntg_hour") or datetime.now().isoformat()
 
@@ -182,6 +190,9 @@ def inquire_price(
         change=change,
         change_rate=change_rate,
         as_of=str(as_of),
+        volume=volume,
+        trading_value=trading_value,
+        trade_strength=trade_strength,
     )
 
 

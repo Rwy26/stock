@@ -2350,6 +2350,90 @@ def search_stocks(
         """IndicatorScore 에서 col_name 컬럼을 가져오되, 없으면 score_total."""
         return getattr(models.IndicatorScore, col_name, models.IndicatorScore.score_total)
 
+    def _to_int(value: object) -> int:
+        try:
+            return int(float(str(value or 0).replace(",", "").strip() or 0))
+        except Exception:
+            return 0
+
+    def _big_buy_signal_score(score_flow: int, flow_row: object | None, quote: object) -> int:
+        """대량매수 전용 점수 (0~100): 수급 + 체결강도 + 거래대금 통합."""
+        score = 0
+
+        if score_flow >= 9:
+            score += 25
+        elif score_flow >= 8:
+            score += 22
+        elif score_flow >= 7:
+            score += 18
+        elif score_flow >= 6:
+            score += 14
+        elif score_flow >= 5:
+            score += 10
+
+        foreign_days = _to_int(getattr(flow_row, "foreign_net_buy_days", 0))
+        inst_days = _to_int(getattr(flow_row, "inst_net_buy_days", 0))
+        best_days = max(foreign_days, inst_days)
+        if best_days >= 7:
+            score += 20
+        elif best_days >= 5:
+            score += 15
+        elif best_days >= 3:
+            score += 10
+        elif best_days >= 1:
+            score += 5
+
+        foreign_qty = max(_to_int(getattr(flow_row, "foreign_net_qty", 0)), 0)
+        inst_qty = max(_to_int(getattr(flow_row, "inst_net_qty", 0)), 0)
+        net_buy_qty = foreign_qty + inst_qty
+        if net_buy_qty >= 2_000_000:
+            score += 20
+        elif net_buy_qty >= 800_000:
+            score += 16
+        elif net_buy_qty >= 300_000:
+            score += 12
+        elif net_buy_qty >= 100_000:
+            score += 8
+        elif net_buy_qty >= 30_000:
+            score += 4
+
+        volume = max(_to_int(getattr(quote, "volume", 0)), 1)
+        net_buy_ratio = net_buy_qty / volume
+        if net_buy_ratio >= 0.08:
+            score += 15
+        elif net_buy_ratio >= 0.04:
+            score += 10
+        elif net_buy_ratio >= 0.02:
+            score += 6
+        elif net_buy_ratio >= 0.01:
+            score += 3
+
+        program_days = _to_int(getattr(flow_row, "program_buy_days", 0))
+        if program_days >= 5:
+            score += 10
+        elif program_days >= 3:
+            score += 6
+        elif program_days >= 1:
+            score += 2
+
+        trade_strength = float(getattr(quote, "trade_strength", 0.0) or 0.0)
+        if trade_strength >= 180:
+            score += 10
+        elif trade_strength >= 140:
+            score += 6
+        elif trade_strength >= 110:
+            score += 3
+
+        trading_value = float(getattr(quote, "trading_value", 0.0) or 0.0)
+        if trading_value >= 150_000_000_000:
+            score += 8
+        elif trading_value >= 50_000_000_000:
+            score += 5
+        elif trading_value >= 20_000_000_000:
+            score += 3
+
+        return min(score, 100)
+
     db: Session = apollo_db.get_session_factory()()
     try:
         profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
@@ -2361,7 +2445,12 @@ def search_stocks(
             raise HTTPException(status_code=503, detail="지표 점수 데이터가 없습니다")
 
         stmt = (
-            select(models.Stock.code, models.Stock.name, models.IndicatorScore.score_total)
+            select(
+                models.Stock.code,
+                models.Stock.name,
+                models.IndicatorScore.score_total,
+                models.IndicatorScore.score_flow,
+            )
             .join(models.IndicatorScore, models.IndicatorScore.stock_code == models.Stock.code)
             .where(models.IndicatorScore.scoring_date == score_date)
         )
@@ -2380,9 +2469,8 @@ def search_stocks(
             # 주도 섹터: 이미 강한 종합 우량주
             stmt = stmt.where(models.IndicatorScore.score_total >= 60)
         elif screen_norm == "big_buy":
-            # 대량 매수: 수급이 급등했으나 아직 주도주 아닌 종목 (조기 매집 포착)
-            stmt = stmt.where(models.IndicatorScore.score_flow >= 7)
-            stmt = stmt.where(models.IndicatorScore.score_total < 60)
+            # 대량 매수: 수급 상위 후보를 넓게 가져와 실시간 시그널 점수로 재선별
+            stmt = stmt.where(models.IndicatorScore.score_flow >= 5)
         elif screen_norm == "bottom_escape":
             # 바닥 탈출: 기술적 반등 신호가 있으나 아직 종합 점수 낮은 종목 (실질 바닥 탈출)
             stmt = stmt.where(models.IndicatorScore.score_tech >= 6)
@@ -2402,10 +2490,28 @@ def search_stocks(
         else:
             stmt = stmt.order_by(desc(models.IndicatorScore.score_total), models.Stock.code)
 
-        rows = db.execute(stmt.limit(30)).all()
+        candidate_limit = 120 if screen_norm == "big_buy" else 30
+        rows = db.execute(stmt.limit(candidate_limit)).all()
+
+        flow_map: dict[str, object] = {}
+        if screen_norm == "big_buy" and rows:
+            codes = [str(code) for code, _name, _score_total, _score_flow in rows]
+            flow_date = db.execute(
+                select(func.max(models.DailyInvestorFlow.trading_date)).where(
+                    models.DailyInvestorFlow.trading_date <= score_date
+                )
+            ).scalar_one_or_none()
+            if flow_date and codes:
+                flow_rows = db.execute(
+                    select(models.DailyInvestorFlow).where(
+                        models.DailyInvestorFlow.trading_date == flow_date,
+                        models.DailyInvestorFlow.stock_code.in_(codes),
+                    )
+                ).scalars().all()
+                flow_map = {str(r.stock_code): r for r in flow_rows}
 
         items: list[dict] = []
-        for code, name, score_total in rows:
+        for code, name, score_total, score_flow in rows:
             try:
                 quote = kis_client.inquire_price(
                     app_key=str(profile.app_key),
@@ -2419,17 +2525,71 @@ def search_stocks(
             except Exception as exc:
                 raise HTTPException(status_code=503, detail=f"KIS 시세 조회 실패: {exc}") from exc
 
-            items.append(
-                {
-                    "name": str(name),
-                    "code": str(code),
-                    "price": float(quote.price),
-                    "changeRate": float(quote.change_rate),
-                    "score": int(score_total or 0),
-                }
-            )
+            if screen_norm == "big_buy":
+                flow_row = flow_map.get(str(code))
+                big_buy_score = _big_buy_signal_score(int(score_flow or 0), flow_row, quote)
+                if big_buy_score < 58:
+                    continue
 
-        return {"items": items, "screen": screen_norm or None}
+                foreign_qty = max(_to_int(getattr(flow_row, "foreign_net_qty", 0)), 0)
+                inst_qty = max(_to_int(getattr(flow_row, "inst_net_qty", 0)), 0)
+                net_buy_qty = foreign_qty + inst_qty
+                volume = max(_to_int(getattr(quote, "volume", 0)), 1)
+
+                items.append(
+                    {
+                        "name": str(name),
+                        "code": str(code),
+                        "price": float(quote.price),
+                        "changeRate": float(quote.change_rate),
+                        "score": int(score_total or 0),
+                        "scoreFlow": int(score_flow or 0),
+                        "bigBuyScore": int(big_buy_score),
+                        "netBuyQty": int(net_buy_qty),
+                        "netBuyRatio": round(net_buy_qty / volume, 4),
+                        "tradeStrength": float(getattr(quote, "trade_strength", 0.0) or 0.0),
+                        "tradingValue": float(getattr(quote, "trading_value", 0.0) or 0.0),
+                    }
+                )
+            else:
+                items.append(
+                    {
+                        "name": str(name),
+                        "code": str(code),
+                        "price": float(quote.price),
+                        "changeRate": float(quote.change_rate),
+                        "score": int(score_total or 0),
+                    }
+                )
+
+        if screen_norm == "big_buy":
+            items.sort(
+                key=lambda x: (
+                    int(x.get("bigBuyScore", 0)),
+                    int(x.get("scoreFlow", 0)),
+                    int(x.get("score", 0)),
+                    float(x.get("changeRate", 0.0)),
+                ),
+                reverse=True,
+            )
+            items = items[:30]
+
+        response = {"items": items, "screen": screen_norm or None}
+        if screen_norm == "big_buy":
+            response["criteria"] = {
+                "minBigBuyScore": 58,
+                "factors": [
+                    "score_flow",
+                    "foreign_inst_streak",
+                    "foreign_inst_net_qty",
+                    "net_buy_ratio_vs_volume",
+                    "program_buy_days",
+                    "trade_strength",
+                    "trading_value",
+                ],
+            }
+
+        return response
     finally:
         db.close()
 

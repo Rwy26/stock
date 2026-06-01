@@ -776,25 +776,42 @@ def compute_stock_score(
     tech_score, tech_conds = score_breakout(df, supply_demand=sd_effective, df_60m=df_60m)
     result.score_tech = tech_score
 
-    # ── 수급 점수: 외국인+기관 순매수 연속일 + 프로그램 매수 직접 반영 ──────
+    # ── 수급 점수: 연속 순매수 + 순매수량 + 프로그램 매수 반영 ──────────────
     # 우선순위: sd_effective의 KIS 수급 데이터 → earnings_turnaround_supply 조건
     fnd = int(sd_effective.get("foreign_net_buy_days") or 0)
     ind = int(sd_effective.get("inst_net_buy_days") or 0)
+    fnq = int(sd_effective.get("foreign_net_qty") or 0)
+    inq = int(sd_effective.get("inst_net_qty") or 0)
     pgd = int(sd_effective.get("program_buy_days") or 0)
-    if fnd > 0 or ind > 0 or pgd > 0:
-        # 외국인 7일+ 또는 기관 7일+ → 10점, 감소형 스케일
+    if fnd > 0 or ind > 0 or fnq > 0 or inq > 0 or pgd > 0:
+        flow_score = 0
+
         combined_best = max(fnd, ind)
         if combined_best >= 7:
-            flow_score = 10
+            flow_score += 5
         elif combined_best >= 5:
-            flow_score = 8
+            flow_score += 4
         elif combined_best >= 3:
-            flow_score = 6
+            flow_score += 3
         elif combined_best >= 1:
-            flow_score = 4
-        else:
-            flow_score = 2 if pgd >= 3 else 1
-        result.score_flow = flow_score
+            flow_score += 2
+
+        net_buy_qty = max(fnq, 0) + max(inq, 0)
+        if net_buy_qty >= 1_500_000:
+            flow_score += 4
+        elif net_buy_qty >= 700_000:
+            flow_score += 3
+        elif net_buy_qty >= 250_000:
+            flow_score += 2
+        elif net_buy_qty >= 80_000:
+            flow_score += 1
+
+        if pgd >= 5:
+            flow_score += 2
+        elif pgd >= 3:
+            flow_score += 1
+
+        result.score_flow = min(flow_score, 10)
     else:
         # fallback: earnings_turnaround_supply 조건
         flow_cond = next((c for c in tech_conds if c.name == "earnings_turnaround_supply"), None)
@@ -881,6 +898,8 @@ def compute_stock_score(
         "supply_demand_used": {
             "foreign_net_buy_days": sd_effective.get("foreign_net_buy_days"),
             "inst_net_buy_days":    sd_effective.get("inst_net_buy_days"),
+            "foreign_net_qty":       sd_effective.get("foreign_net_qty"),
+            "inst_net_qty":          sd_effective.get("inst_net_qty"),
             "program_buy_days":     sd_effective.get("program_buy_days"),
         },
     }
