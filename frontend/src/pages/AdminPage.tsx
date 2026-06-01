@@ -48,7 +48,7 @@ type AdminKisProfile = {
   appKey: string | null
   accountPrefix: string | null
   accountProductCode?: string | null
-  tradeType: '실계좌' | '모의투자'
+  tradeType: '실계좌' | string
   hasAppSecret: boolean
 }
 
@@ -90,7 +90,6 @@ export function AdminPage() {
   const [kisAppKey, setKisAppKey] = useState('')
   const [kisAccountPrefix, setKisAccountPrefix] = useState('')
   const [kisAccountProductCode, setKisAccountProductCode] = useState('01')
-  const [kisTradeType, setKisTradeType] = useState<'실계좌' | '모의투자'>('실계좌')
   const [kisAppSecret, setKisAppSecret] = useState('')
 
   const [autoUserId, setAutoUserId] = useState<number | null>(null)
@@ -240,7 +239,6 @@ export function AdminPage() {
                           setKisAppKey(prof.appKey ?? '')
                           setKisAccountPrefix(prof.accountPrefix ?? '')
                           setKisAccountProductCode(prof.accountProductCode ?? '01')
-                          setKisTradeType(prof.tradeType)
                           setKisAppSecret('')
                         } catch (e) {
                           setActionMessage(e instanceof Error ? e.message : String(e))
@@ -380,13 +378,6 @@ export function AdminPage() {
             </div>
             <div className="form-row">
               <label>
-                거래 구분
-                <select value={kisTradeType} onChange={(e) => setKisTradeType(e.target.value === '모의투자' ? '모의투자' : '실계좌')}>
-                  <option value="실계좌">실계좌</option>
-                  <option value="모의투자">모의투자</option>
-                </select>
-              </label>
-              <label>
                 액션
                 <button
                   className="btn"
@@ -400,7 +391,7 @@ export function AdminPage() {
                         appKey: kisAppKey.trim() || null,
                         accountPrefix: kisAccountPrefix.trim() || null,
                         accountProductCode: kisAccountProductCode.trim() || null,
-                        tradeType: kisTradeType,
+                        tradeType: '실계좌',
                       }
                       const secret = kisAppSecret.trim()
                       if (secret) body.appSecret = secret
@@ -431,7 +422,6 @@ export function AdminPage() {
                     setKisAppKey('')
                     setKisAccountPrefix('')
                     setKisAccountProductCode('01')
-                    setKisTradeType('실계좌')
                     setKisAppSecret('')
                   }}
                   style={{ marginLeft: 8 }}

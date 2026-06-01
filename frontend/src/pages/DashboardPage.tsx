@@ -24,7 +24,7 @@ type DashboardResponse = {
 type KisTokenStatusResponse = {
   ok: boolean
   hasProfile: boolean
-  tradeType: '실계좌' | '모의투자' | string
+  tradeType: '실계좌' | string
   expiresIn: number | null
   asOf: string
   error?: string

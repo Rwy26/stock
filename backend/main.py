@@ -155,26 +155,26 @@ def _kis_refresh_loop() -> None:
                 db: Session = apollo_db.get_session_factory()()
                 try:
                     rows = db.execute(
-                        select(models.KisProfile.app_key, models.KisProfile.app_secret, models.KisProfile.is_paper)
+                        select(models.KisProfile.app_key, models.KisProfile.app_secret)
                         .where(models.KisProfile.app_key.is_not(None), models.KisProfile.app_secret.is_not(None))
                     ).all()
                 finally:
                     db.close()
 
-                unique_profiles: dict[tuple[str, bool], str] = {}
-                for app_key, app_secret, is_paper in rows:
+                unique_profiles: dict[str, str] = {}
+                for app_key, app_secret in rows:
                     ak = (str(app_key).strip() if app_key is not None else "")
                     sec = (str(app_secret).strip() if app_secret is not None else "")
                     if not ak or not sec:
                         continue
-                    unique_profiles[(ak, bool(is_paper))] = sec
+                    unique_profiles[ak] = sec
 
-                for (ak, is_paper), sec in unique_profiles.items():
+                for ak, sec in unique_profiles.items():
                     try:
                         _token, remaining = kis_client.get_access_token(
                             app_key=ak,
                             app_secret=sec,
-                            is_paper=is_paper,
+                            is_paper=False,
                             live_base_url=settings.kis_live_base_url,
                             paper_base_url=settings.kis_paper_base_url,
                             timeout_seconds=5.0,
@@ -183,7 +183,7 @@ def _kis_refresh_loop() -> None:
                             kis_client.get_access_token(
                                 app_key=ak,
                                 app_secret=sec,
-                                is_paper=is_paper,
+                                is_paper=False,
                                 force_refresh=True,
                                 live_base_url=settings.kis_live_base_url,
                                 paper_base_url=settings.kis_paper_base_url,
@@ -361,6 +361,126 @@ def _normalize_stock_name(name: str | None) -> str:
     return re.sub(r"[^0-9a-zA-Z가-힣]", "", raw)
 
 
+def _effective_kis_is_paper(_profile=None) -> bool:
+    """운영 정책: KIS는 항상 실전(라이브)만 사용."""
+    return False
+
+
+def _resolve_stock_input_via_kis(db: Session, *, user_id: int, raw_input: str) -> dict:
+    """종목명/코드 입력을 KIS로 검증해 단일 종목으로 확정한다."""
+    if models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    query = (raw_input or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+
+    profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == int(user_id))).scalar_one_or_none()
+    if not (profile and getattr(profile, "app_key", None) and getattr(profile, "app_secret", None)):
+        raise HTTPException(status_code=400, detail="KIS 연결 필요")
+
+    def _quote_by_code(code: str):
+        return kis_client.inquire_price(
+            app_key=str(profile.app_key),
+            app_secret=str(profile.app_secret),
+            is_paper=_effective_kis_is_paper(profile),
+            code=code,
+            live_base_url=settings.kis_live_base_url,
+            paper_base_url=settings.kis_paper_base_url,
+            timeout_seconds=5.0,
+        )
+
+    # 1) 코드 입력 우선 처리: KIS로 즉시 유효성 검증
+    if re.fullmatch(r"[0-9A-Za-z]{6}", query):
+        try:
+            quote = _quote_by_code(query)
+            stock_row = db.execute(select(models.Stock.name).where(models.Stock.code == str(quote.code))).first()
+            db_name = str(stock_row[0]).strip() if stock_row and stock_row[0] is not None else ""
+            resolved_name = str(getattr(quote, "name", "") or "").strip() or db_name or query
+            return {
+                "code": str(quote.code),
+                "name": resolved_name,
+                "market": str(getattr(quote, "market_name", "") or ""),
+                "verified": True,
+                "inputType": "code",
+            }
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"유효하지 않은 종목코드 또는 KIS 조회 실패: {exc}") from exc
+
+    # 2) 종목명 입력: DB 후보를 찾고 KIS로 재검증해 오인식 방지
+    norm_query = _normalize_stock_name(query)
+    if not norm_query:
+        raise HTTPException(status_code=400, detail="유효한 종목명을 입력하세요")
+
+    candidates = db.execute(
+        select(models.Stock.code, models.Stock.name)
+        .where(models.Stock.name.like(f"%{query}%"))
+        .order_by(models.Stock.code)
+        .limit(20)
+    ).all()
+    if not candidates:
+        raise HTTPException(status_code=404, detail="DB에서 해당 종목명을 찾지 못했습니다")
+
+    verified_matches: list[dict] = []
+    live_candidates: list[dict] = []
+    for code, db_name in candidates:
+        try:
+            quote = _quote_by_code(str(code))
+        except Exception:
+            continue
+        kis_name = str(getattr(quote, "name", "") or "").strip()
+        live_candidates.append(
+            {
+                "code": str(code),
+                "name": (kis_name or str(db_name)),
+                "market": str(getattr(quote, "market_name", "") or ""),
+            }
+        )
+        norm_kis = _normalize_stock_name(kis_name)
+        norm_db = _normalize_stock_name(str(db_name))
+        if norm_kis:
+            is_match = norm_query == norm_kis or norm_query in norm_kis or norm_kis in norm_query
+        else:
+            # KIS명이 비어도 코드 유효성(KIS 통과) + DB명 매칭이면 허용
+            is_match = bool(norm_db) and (norm_query == norm_db or norm_query in norm_db or norm_db in norm_query)
+        if is_match:
+            verified_matches.append(
+                {
+                    "code": str(code),
+                    "name": (kis_name or str(db_name)),
+                    "market": str(getattr(quote, "market_name", "") or ""),
+                }
+            )
+
+    if len(verified_matches) == 1:
+        one = verified_matches[0]
+        return {
+            "code": one["code"],
+            "name": one["name"],
+            "market": one["market"],
+            "verified": True,
+            "inputType": "name",
+        }
+
+    if len(verified_matches) > 1:
+        raise HTTPException(status_code=409, detail={"message": "동일/유사 종목명 후보가 여러 개입니다", "candidates": verified_matches})
+
+    if len(live_candidates) == 1:
+        one = live_candidates[0]
+        return {
+            "code": one["code"],
+            "name": one["name"],
+            "market": one["market"],
+            "verified": True,
+            "inputType": "name",
+        }
+
+    if len(live_candidates) > 1:
+        raise HTTPException(status_code=409, detail={"message": "KIS 확인 후보가 여러 개입니다", "candidates": live_candidates})
+
+    raise HTTPException(status_code=404, detail="KIS 기준으로 입력 종목을 확정하지 못했습니다")
+
+
 def _to_float_amount(v) -> float:
     try:
         return float(str(v).replace(",", "").strip() or 0)
@@ -378,13 +498,12 @@ def _to_int_amount(v) -> int:
 def _fetch_kis_balance(profile, *, timeout_seconds: float = 10.0) -> dict | None:
     """Fetch KIS balance/holdings for the given profile (read-only).
 
-    This is safe for both paper and live profiles because it performs inquiry only.
-    Ordering APIs remain guarded by AUTOTRADING_LIVE_ORDERS.
+    운영 정책상 실전 KIS만 사용한다.
     """
 
     app_key = (str(getattr(profile, "app_key", "") or "").strip())
     app_secret = (str(getattr(profile, "app_secret", "") or "").strip())
-    is_paper = bool(getattr(profile, "is_paper", False))
+    is_paper = _effective_kis_is_paper(profile)
     stored = (str(getattr(profile, "account_prefix", "") or "").strip())
     cano, prdt_cd = _parse_kis_account(stored)
     if prdt_cd is None:
@@ -571,7 +690,7 @@ def _place_market_order_and_log(
 
     app_key = (str(getattr(profile, "app_key", "") or "").strip())
     app_secret = (str(getattr(profile, "app_secret", "") or "").strip())
-    is_paper = bool(getattr(profile, "is_paper", False))
+    is_paper = _effective_kis_is_paper(profile)
     stored = (str(getattr(profile, "account_prefix", "") or "").strip())
     cano, prdt_cd = _parse_kis_account(stored)
     if prdt_cd is None:
@@ -1449,38 +1568,20 @@ def get_watchlist(current_user=Depends(get_current_user)):
 def add_watchlist_item(payload: dict = Body(...), current_user=Depends(get_current_user)):
     if apollo_db is None or models is None:
         raise HTTPException(status_code=500, detail="DB module not available")
-    code = (payload.get("code") or "").strip()
-    if not code:
-        raise HTTPException(status_code=400, detail="code is required")
+    raw_input = (payload.get("code") or payload.get("query") or payload.get("input") or "").strip()
+    if not raw_input:
+        raise HTTPException(status_code=400, detail="code or query is required")
 
     user_id = int(current_user.id)
     with apollo_db.session_scope() as session:
-        profile = session.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
-        has_kis_profile = bool(profile and getattr(profile, "app_key", None) and getattr(profile, "app_secret", None))
-
-        # 신뢰성 강화: strict 모드에서는 반드시 KIS로 코드 유효성 확인.
-        if settings.kis_strict_price and not has_kis_profile:
-            raise HTTPException(status_code=400, detail="KIS 연결 필요")
-
-        quote = None
-        if has_kis_profile:
-            try:
-                quote = kis_client.inquire_price(
-                    app_key=str(profile.app_key),
-                    app_secret=str(profile.app_secret),
-                    is_paper=bool(getattr(profile, "is_paper", False)),
-                    code=code,
-                    live_base_url=settings.kis_live_base_url,
-                    paper_base_url=settings.kis_paper_base_url,
-                    timeout_seconds=5.0,
-                )
-            except Exception as exc:
-                if settings.kis_strict_price:
-                    raise HTTPException(status_code=400, detail=f"유효하지 않은 종목코드 또는 시세 조회 실패: {exc}") from exc
+        resolved = _resolve_stock_input_via_kis(session, user_id=user_id, raw_input=raw_input)
+        code = str(resolved.get("code") or "").strip()
+        if not code:
+            raise HTTPException(status_code=400, detail="종목 식별 실패")
 
         stock = session.execute(select(models.Stock).where(models.Stock.code == code)).scalar_one_or_none()
-        kis_name = str(getattr(quote, "name", "") or "").strip()
-        kis_market = str(getattr(quote, "market_name", "") or "").strip()
+        kis_name = str(resolved.get("name") or "").strip()
+        kis_market = str(resolved.get("market") or "").strip()
         if stock is None:
             # KIS 종목명을 우선 사용하고, 없으면 placeholder 생성.
             session.add(models.Stock(code=code, name=(kis_name or code), market=(kis_market or None)))
@@ -1555,7 +1656,7 @@ def _get_realtime_price_and_change(
 
     app_key = getattr(profile, "app_key", None)
     app_secret = getattr(profile, "app_secret", None)
-    is_paper = bool(getattr(profile, "is_paper", False))
+    is_paper = _effective_kis_is_paper(profile)
 
     if app_key and app_secret:
         try:
@@ -1753,13 +1854,13 @@ def kis_token_status(current_user=Depends(get_current_user)):
         profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
         app_key = (str(profile.app_key).strip() if profile and profile.app_key else "")
         app_secret = (str(profile.app_secret).strip() if profile and profile.app_secret else "")
-        is_paper = bool(profile.is_paper) if profile else False
+        is_paper = _effective_kis_is_paper(profile)
 
         if not app_key or not app_secret:
             return {
                 "ok": True,
                 "hasProfile": False,
-                "tradeType": ("모의투자" if is_paper else "실계좌"),
+                "tradeType": "실계좌",
                 "expiresIn": None,
                 "asOf": datetime.now().isoformat(),
             }
@@ -1776,7 +1877,7 @@ def kis_token_status(current_user=Depends(get_current_user)):
             return {
                 "ok": True,
                 "hasProfile": True,
-                "tradeType": ("모의투자" if is_paper else "실계좌"),
+                "tradeType": "실계좌",
                 "expiresIn": int(expires_in),
                 "asOf": datetime.now().isoformat(),
             }
@@ -1784,7 +1885,7 @@ def kis_token_status(current_user=Depends(get_current_user)):
             return {
                 "ok": False,
                 "hasProfile": True,
-                "tradeType": ("모의투자" if is_paper else "실계좌"),
+                "tradeType": "실계좌",
                 "expiresIn": None,
                 "error": str(exc),
                 "asOf": datetime.now().isoformat(),
@@ -1897,7 +1998,7 @@ def admin_scoring_run(
                     codes,
                     kis_app_key=settings.kis_app_key if hasattr(settings, "kis_app_key") else "",
                     kis_app_secret=settings.kis_app_secret if hasattr(settings, "kis_app_secret") else "",
-                    kis_is_paper=True,
+                    kis_is_paper=False,
                     kis_live_base_url=settings.kis_live_base_url,
                     kis_paper_base_url=settings.kis_paper_base_url,
                     dart_api_key=settings.dart_api_key,
@@ -2052,7 +2153,7 @@ def admin_supply_demand_preview(
             [code],
             kis_app_key=getattr(settings, "kis_app_key", ""),
             kis_app_secret=getattr(settings, "kis_app_secret", ""),
-            kis_is_paper=True,
+            kis_is_paper=False,
             kis_live_base_url=settings.kis_live_base_url,
             kis_paper_base_url=settings.kis_paper_base_url,
             dart_api_key=settings.dart_api_key,
@@ -2537,7 +2638,7 @@ def search_stocks(
                 quote = kis_client.inquire_price(
                     app_key=str(profile.app_key),
                     app_secret=str(profile.app_secret),
-                    is_paper=bool(getattr(profile, "is_paper", False)),
+                    is_paper=_effective_kis_is_paper(profile),
                     code=str(code),
                     live_base_url=settings.kis_live_base_url,
                     paper_base_url=settings.kis_paper_base_url,
@@ -2645,7 +2746,7 @@ def stock_detail(code: str, current_user=Depends(get_current_user)):
             quote = kis_client.inquire_price(
                 app_key=str(profile.app_key),
                 app_secret=str(profile.app_secret),
-                is_paper=bool(getattr(profile, "is_paper", False)),
+                is_paper=_effective_kis_is_paper(profile),
                 code=stock_code,
                 live_base_url=settings.kis_live_base_url,
                 paper_base_url=settings.kis_paper_base_url,
@@ -2759,7 +2860,7 @@ def kis_health(current_user=Depends(get_current_user)):
             _token, expires_in = kis_client.get_access_token(
                 app_key=str(profile.app_key),
                 app_secret=str(profile.app_secret),
-                is_paper=bool(profile.is_paper),
+                is_paper=_effective_kis_is_paper(profile),
                 live_base_url=settings.kis_live_base_url,
                 paper_base_url=settings.kis_paper_base_url,
             )
@@ -2768,8 +2869,8 @@ def kis_health(current_user=Depends(get_current_user)):
 
         return {
             "ok": True,
-            "isPaper": bool(profile.is_paper),
-            "baseUrl": (settings.kis_paper_base_url if profile.is_paper else settings.kis_live_base_url),
+            "isPaper": False,
+            "baseUrl": settings.kis_live_base_url,
             "tokenExpiresIn": int(expires_in),
         }
     finally:
@@ -2791,7 +2892,7 @@ def kis_quote(code: str, current_user=Depends(get_current_user)):
             quote = kis_client.inquire_price(
                 app_key=str(profile.app_key),
                 app_secret=str(profile.app_secret),
-                is_paper=bool(profile.is_paper),
+                is_paper=_effective_kis_is_paper(profile),
                 code=code,
                 live_base_url=settings.kis_live_base_url,
                 paper_base_url=settings.kis_paper_base_url,
@@ -3029,7 +3130,7 @@ def admin_get_user_kis_profile(user_id: int, _admin=Depends(require_admin)):
             "appKey": (profile.app_key if profile else None),
             "accountPrefix": cano,
             "accountProductCode": (prdt or "01") if cano else None,
-            "tradeType": ("모의투자" if (profile and profile.is_paper) else "실계좌"),
+            "tradeType": "실계좌",
             "hasAppSecret": bool(profile and profile.app_secret),
         }
     finally:
@@ -3046,7 +3147,7 @@ def admin_upsert_user_kis_profile(user_id: int, payload: dict = Body(...), _admi
     app_secret_raw = payload.get("appSecret", None)
     account_prefix_raw = payload.get("accountPrefix", payload.get("accountNo", None))
     account_prdt_raw = payload.get("accountProductCode", payload.get("accountPrdtCd", None))
-    trade_type_raw = payload.get("tradeType", None)
+    _trade_type_raw = payload.get("tradeType", None)
 
     with apollo_db.session_scope() as session:
         user = session.execute(select(models.User).where(models.User.id == int(user_id))).scalar_one_or_none()
@@ -3078,9 +3179,7 @@ def admin_upsert_user_kis_profile(user_id: int, payload: dict = Body(...), _admi
 
             profile.account_prefix = _format_kis_account(next_cano, next_prdt)
 
-        if trade_type_raw is not None:
-            trade_type = str(trade_type_raw).strip() or "실계좌"
-            profile.is_paper = trade_type != "실계좌"
+        profile.is_paper = False
 
         if app_secret_raw is not None:
             # Do not return the secret via any endpoint; only allow overwriting when explicitly provided.
@@ -3370,7 +3469,6 @@ def admin_engine_tick_once(payload: dict = Body(...), _admin=Depends(require_adm
     """Run a single engine tick for validation/debug.
 
     Safety:
-    - Block when paper trading profile is used (would place paper orders).
     - Block when AUTOTRADING_LIVE_ORDERS=1 (would allow real orders).
 
     Intended for confirming that config changes are picked up by the engine loop.
@@ -3436,8 +3534,8 @@ def admin_engine_tick_once(payload: dict = Body(...), _admin=Depends(require_adm
             raise HTTPException(status_code=404, detail="User not found")
 
         profile = session.execute(select(models.KisProfile).where(models.KisProfile.user_id == int(user_id))).scalar_one_or_none()
-        if profile is not None and bool(getattr(profile, "is_paper", False)):
-            raise HTTPException(status_code=400, detail="Manual tick is disabled for paper trading profiles")
+        if profile is not None:
+            profile.is_paper = False
 
         # Log a marker so we can correlate config->tick outside market hours.
         try:
@@ -3509,7 +3607,7 @@ def get_profile(current_user=Depends(get_current_user)):
                 "hasAppSecret": has_app_secret,
                 "accountPrefix": cano,
                 "accountProductCode": (prdt or "01") if cano else None,
-                "tradeType": ("모의투자" if (profile and profile.is_paper) else "실계좌"),
+                "tradeType": "실계좌",
             },
         }
     finally:
@@ -3528,8 +3626,8 @@ def upsert_profile(payload: dict = Body(...), current_user=Depends(get_current_u
     app_secret = (str(raw_secret).strip() if raw_secret is not None else "")
     account_prefix_raw = (payload.get("accountPrefix") or payload.get("accountNo") or "").strip() or None
     account_prdt_raw = (payload.get("accountProductCode") or payload.get("accountPrdtCd") or "").strip() or None
-    trade_type = (payload.get("tradeType") or "").strip() or "실계좌"
-    is_paper = trade_type != "실계좌"
+    trade_type = "실계좌"
+    is_paper = False
 
     with apollo_db.session_scope() as session:
         user = session.execute(select(models.User).where(models.User.id == user_id)).scalar_one_or_none()
@@ -3551,9 +3649,28 @@ def upsert_profile(payload: dict = Body(...), current_user=Depends(get_current_u
         if account_prdt_raw:
             prdt = account_prdt_raw
         profile.account_prefix = _format_kis_account(cano, prdt)
-        profile.is_paper = is_paper
+        profile.is_paper = False
 
     return {"ok": True}
+
+
+@app.post("/api/stocks/resolve")
+def resolve_stock_input(payload: dict = Body(...), current_user=Depends(get_current_user)):
+    """종목명/종목코드 입력을 KIS 기준으로 단일 종목으로 확정한다."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    query = (payload.get("query") or payload.get("input") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+
+    user_id = int(current_user.id)
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        resolved = _resolve_stock_input_via_kis(db, user_id=user_id, raw_input=query)
+        return {"ok": True, **resolved}
+    finally:
+        db.close()
 
 
 @app.post("/api/admin/stocks/validate-master")
@@ -3627,7 +3744,7 @@ def admin_validate_stock_master(
                 quote = kis_client.inquire_price(
                     app_key=str(profile.app_key),
                     app_secret=str(profile.app_secret),
-                    is_paper=bool(getattr(profile, "is_paper", False)),
+                    is_paper=_effective_kis_is_paper(profile),
                     code=code,
                     live_base_url=settings.kis_live_base_url,
                     paper_base_url=settings.kis_paper_base_url,

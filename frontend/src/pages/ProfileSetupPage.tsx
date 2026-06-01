@@ -11,7 +11,6 @@ export function ProfileSetupPage() {
   const [hasAppSecret, setHasAppSecret] = useState(false)
   const [accountPrefix, setAccountPrefix] = useState('')
   const [accountProductCode, setAccountProductCode] = useState('01')
-  const [tradeType, setTradeType] = useState<'실계좌' | '모의투자'>('실계좌')
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -22,7 +21,7 @@ export function ProfileSetupPage() {
         hasAppSecret: boolean
         accountPrefix: string | null
         accountProductCode?: string | null
-        tradeType: '실계좌' | '모의투자'
+        tradeType: '실계좌' | string
       }
     }>('/api/profile')
       .then((data) => {
@@ -31,7 +30,6 @@ export function ProfileSetupPage() {
         if (typeof data.kis?.hasAppSecret === 'boolean') setHasAppSecret(data.kis.hasAppSecret)
         if (data.kis?.accountPrefix != null) setAccountPrefix(data.kis.accountPrefix)
         if (data.kis?.accountProductCode != null) setAccountProductCode(data.kis.accountProductCode)
-        if (data.kis?.tradeType != null) setTradeType(data.kis.tradeType)
       })
       .catch(() => {
         // Keep UX minimal: no extra modals/toasts.
@@ -83,13 +81,6 @@ export function ProfileSetupPage() {
               onChange={(e) => setAccountProductCode(e.target.value)}
             />
           </label>
-          <label>
-            거래 구분
-            <select value={tradeType} onChange={(e) => setTradeType(e.target.value as '실계좌' | '모의투자')}>
-              <option>실계좌</option>
-              <option>모의투자</option>
-            </select>
-          </label>
         </div>
 
         <div className="auth-actions">
@@ -102,7 +93,7 @@ export function ProfileSetupPage() {
               fetchJson<{ ok: boolean }>('/api/profile', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ nickname, appKey, appSecret, accountPrefix, accountProductCode, tradeType }),
+                body: JSON.stringify({ nickname, appKey, appSecret, accountPrefix, accountProductCode, tradeType: '실계좌' }),
               })
                 .then(() => navigate('/'))
                 .catch(() => {

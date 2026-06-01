@@ -61,8 +61,8 @@ class Settings:
     # Auto-trading engine safety kill switch (1 = disable all engine ticks/orders).
     autotrading_kill_switch: bool = os.getenv("AUTOTRADING_KILL_SWITCH", "0").strip() in {"1", "true", "True", "YES", "yes"}
 
-    # Safety gate: allow real-money order placement when tradeType is live.
-    # Paper (VTS) orders are allowed without this flag.
+    # Safety gate: allow real-money order placement.
+    # This project is configured for live-only operation.
     autotrading_live_orders: bool = os.getenv("AUTOTRADING_LIVE_ORDERS", "0").strip() in {"1", "true", "True", "YES", "yes"}
 
     # Local-only convenience: issue an access token without password.
