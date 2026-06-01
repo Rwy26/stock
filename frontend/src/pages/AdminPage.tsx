@@ -59,6 +59,38 @@ type AdminAutomation = {
   svEnabled: boolean
 }
 
+type StockValidationIssue = {
+  code: string
+  dbName?: string
+  kisName?: string
+  error?: string
+  issue?: string
+}
+
+type StockValidationResult = {
+  ok: boolean
+  kisLinked: boolean
+  mode: string
+  checked: number
+  updated: number
+  inserted: number
+  autoFix: boolean
+  mismatchCount: number
+  invalidCount: number
+  dbInvalidCount: number
+  missingInDbCount: number
+  inputPairConflictCount: number
+  inputNameMismatchCount: number
+  unnamedFromKisCount: number
+  mismatches: StockValidationIssue[]
+  invalidCodes: StockValidationIssue[]
+  dbInvalids: StockValidationIssue[]
+  missingInDb: StockValidationIssue[]
+  inputPairConflicts: Array<{ code: string; nameA: string; nameB: string }>
+  inputNameMismatches: Array<{ code: string; inputName: string; kisName: string }>
+  unnamedFromKis: Array<{ code: string; dbName: string }>
+}
+
 function formatDate(value: string | null | undefined): string {
   if (!value) return '-'
   const date = new Date(value)
@@ -98,6 +130,10 @@ export function AdminPage() {
   const [autoSaEnabled, setAutoSaEnabled] = useState(false)
   const [autoPlusEnabled, setAutoPlusEnabled] = useState(false)
   const [autoSvEnabled, setAutoSvEnabled] = useState(false)
+
+  const [stockValidationInput, setStockValidationInput] = useState('')
+  const [stockValidationLoading, setStockValidationLoading] = useState(false)
+  const [stockValidationResult, setStockValidationResult] = useState<StockValidationResult | null>(null)
 
   const isAdminOnlyMessage = useMemo(() => {
     if (!error) return false
@@ -161,6 +197,67 @@ export function AdminPage() {
     if (normalized === 'tick') return { label: 'tick', cls: 'chip on' }
     if (normalized === 'error') return { label: 'error', cls: 'chip off' }
     return { label: event || '-', cls: 'chip' }
+  }
+
+  const runStockValidation = async (autoFix: boolean) => {
+    setActionMessage(null)
+    setError(null)
+    setStockValidationLoading(true)
+
+    try {
+      const lines = stockValidationInput
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+
+      const codes: string[] = []
+      const items: Array<{ code?: string; name?: string }> = []
+
+      for (const line of lines) {
+        const compact = line.replace(/\s+/g, ' ').trim()
+        if (/^[0-9]{6}$/.test(compact)) {
+          codes.push(compact)
+          continue
+        }
+
+        const sepParts = compact.split(/[\t,]/).map((x) => x.trim()).filter(Boolean)
+        const parts = sepParts.length >= 2 ? sepParts : compact.split(' ').map((x) => x.trim()).filter(Boolean)
+
+        if (parts.length >= 2) {
+          const first = parts[0]
+          const second = parts[1]
+          if (/^[0-9]{6}$/.test(first)) {
+            items.push({ code: first, name: second })
+            continue
+          }
+          if (/^[0-9]{6}$/.test(second)) {
+            items.push({ code: second, name: first })
+            continue
+          }
+        }
+      }
+
+      const payload: Record<string, unknown> = { auto_fix: autoFix }
+      if (items.length > 0) payload.items = items
+      if (codes.length > 0) payload.codes = Array.from(new Set(codes))
+      if (items.length === 0 && codes.length === 0) {
+        payload.limit = 200
+      }
+
+      const res = await fetchJson<StockValidationResult>('/api/admin/stocks/validate-master', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+
+      setStockValidationResult(res)
+      setActionMessage(autoFix ? '종목 마스터 자동 보정 검증을 완료했습니다.' : '종목 마스터 검증을 완료했습니다.')
+    } catch (e) {
+      setActionMessage(e instanceof Error ? e.message : String(e))
+      setStockValidationResult(null)
+    } finally {
+      setStockValidationLoading(false)
+    }
   }
 
   return (
@@ -675,6 +772,117 @@ export function AdminPage() {
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section className="panel glass reveal">
+        <div className="panel-head">
+          <h3>종목 마스터 유효성 검사</h3>
+          {stockValidationLoading ? <div className="hint">검증 중…</div> : null}
+        </div>
+        <p className="hint">
+          코드만 입력(예: 035420)하거나 이름/코드 쌍 입력(예: 카카오,035720). 비워두면 상위 200건을 검사합니다.
+        </p>
+        <label>
+          입력 목록
+          <textarea
+            rows={6}
+            value={stockValidationInput}
+            onChange={(e) => setStockValidationInput(e.target.value)}
+            placeholder={['035420', '카카오,035720', '한미약품,128940'].join('\n')}
+          />
+        </label>
+        <div className="form-row" style={{ marginTop: 10 }}>
+          <button
+            className="btn"
+            type="button"
+            disabled={stockValidationLoading}
+            onClick={() => {
+              void runStockValidation(false)
+            }}
+          >
+            검증 실행
+          </button>
+          <button
+            className="btn secondary"
+            type="button"
+            disabled={stockValidationLoading}
+            onClick={() => {
+              void runStockValidation(true)
+            }}
+          >
+            자동 보정 + 검증
+          </button>
+        </div>
+
+        {stockValidationResult ? (
+          <>
+            <div className="form-row" style={{ marginTop: 10 }}>
+              <div className="hint">mode: {stockValidationResult.mode}</div>
+              <div className="hint">kisLinked: {stockValidationResult.kisLinked ? 'YES' : 'NO'}</div>
+              <div className="hint">checked: {stockValidationResult.checked}</div>
+              <div className="hint">invalid: {stockValidationResult.invalidCount}</div>
+              <div className="hint">dbInvalid: {stockValidationResult.dbInvalidCount}</div>
+              <div className="hint">mismatch: {stockValidationResult.mismatchCount}</div>
+            </div>
+
+            <div className="table-wrap" style={{ marginTop: 10 }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>구분</th>
+                    <th>코드</th>
+                    <th>DB명</th>
+                    <th>KIS명/이슈</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(stockValidationResult.invalidCodes ?? []).slice(0, 20).map((row, idx) => (
+                    <tr key={`invalid-${idx}-${row.code}`}>
+                      <td>invalid</td>
+                      <td>{row.code}</td>
+                      <td>{row.dbName ?? '-'}</td>
+                      <td>{row.error ?? row.kisName ?? '-'}</td>
+                    </tr>
+                  ))}
+                  {(stockValidationResult.dbInvalids ?? []).slice(0, 20).map((row, idx) => (
+                    <tr key={`dbinvalid-${idx}-${row.code}`}>
+                      <td>dbInvalid</td>
+                      <td>{row.code}</td>
+                      <td>{row.dbName ?? '-'}</td>
+                      <td>{row.issue ?? '-'}</td>
+                    </tr>
+                  ))}
+                  {(stockValidationResult.mismatches ?? []).slice(0, 20).map((row, idx) => (
+                    <tr key={`mismatch-${idx}-${row.code}`}>
+                      <td>mismatch</td>
+                      <td>{row.code}</td>
+                      <td>{row.dbName ?? '-'}</td>
+                      <td>{row.kisName ?? '-'}</td>
+                    </tr>
+                  ))}
+                  {(stockValidationResult.missingInDb ?? []).slice(0, 20).map((row, idx) => (
+                    <tr key={`missing-${idx}-${row.code}`}>
+                      <td>missingInDb</td>
+                      <td>{row.code}</td>
+                      <td>{row.dbName ?? '-'}</td>
+                      <td>{row.kisName ?? '-'}</td>
+                    </tr>
+                  ))}
+                  {stockValidationResult.invalidCount === 0 &&
+                  stockValidationResult.dbInvalidCount === 0 &&
+                  stockValidationResult.mismatchCount === 0 &&
+                  stockValidationResult.missingInDbCount === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="hint">
+                        문제 항목이 없습니다.
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : null}
       </section>
 
       <section className="panel glass reveal">

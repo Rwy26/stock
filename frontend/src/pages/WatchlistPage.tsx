@@ -12,6 +12,8 @@ type StockRow = { name: string; code: string; price: number; changeRate: number;
 type SearchResponse = { items: StockRow[] }
 type TRect = { id: string; x: number; y: number; w: number; h: number }
 
+const WATCHLIST_CACHE_KEY = 'moon-watchlist-cache-v1'
+
 // ── Squarified Treemap ───────────────────────────────────────────────
 function squarify(
   items: Array<{ id: string; value: number }>,
@@ -62,12 +64,134 @@ function squarify(
   return out.map(r => ({ ...r, x: r.x + gap / 2, y: r.y + gap / 2, w: Math.max(r.w - gap, 0.5), h: Math.max(r.h - gap, 0.5) }))
 }
 
-// ── Score → Color (dark-gray → dark-red → bright-red) ────────────────
-function scoreColor(score: number): string {
-  const t = Math.min(Math.max(score, 0), 100) / 100
-  const sat = (t * 84).toFixed(0)
-  const light = (9 + t * 34).toFixed(0)
-  return `hsl(0,${sat}%,${light}%)`
+// ── Return → Heat Color (TradingView-like diverging palette) ─────────
+function changeColor(changeRate: number): string {
+  const clamped = Math.max(-3, Math.min(3, changeRate))
+  const absRate = Math.abs(clamped)
+  const deadzone = 0.15
+  if (absRate <= deadzone) return 'hsl(216, 20%, 16%)'
+
+  const t = (absRate - deadzone) / (3 - deadzone)
+  if (clamped > 0) {
+    const sat = Math.round(45 + t * 30)
+    const light = Math.round(18 + t * 24)
+    return `hsl(141, ${sat}%, ${light}%)`
+  }
+
+  const sat = Math.round(52 + t * 28)
+  const light = Math.round(17 + t * 28)
+  return `hsl(2, ${sat}%, ${light}%)`
+}
+
+const STOCK_ABBR_OVERRIDES: Record<string, string> = {
+  '삼성전자': '삼전',
+  '현대자동차': '현차',
+  'SK하이닉스': '하닉',
+  'LG에너지솔루션': '엘엔솔',
+  '포스코퓨처엠': '포퓨엠',
+  '하나금융지주': '하나금융',
+}
+
+const CORE_SUFFIXES = [
+  '전자', '전기', '전선', '자동차', '모비스', '에너지', '화학', '금융', '증권',
+  '보험', '생명', '제약', '바이오', '로보틱스', '로봇', '반도체', '미디어',
+  '인터내셔널', '솔루션',
+]
+
+function splitTokens(label: string): string[] {
+  return label
+    .replace(/\(주\)|㈜|주식회사|유한회사/g, ' ')
+    .split(/[\s·/\\|,()\-]+/)
+    .map(t => t.trim())
+    .filter(Boolean)
+}
+
+function isHangulToken(token: string): boolean {
+  return /[가-힣]/.test(token)
+}
+
+function cutLoanword(token: string): string {
+  const noSpace = token.replace(/\s+/g, '')
+  if (noSpace.length <= 3) return noSpace
+  return noSpace.slice(0, 3)
+}
+
+function shortenSingleHangulWord(token: string): string {
+  for (const suffix of CORE_SUFFIXES) {
+    if (token.endsWith(suffix) && token.length > suffix.length) {
+      const head = token[0]
+      return `${head}${suffix[0]}`
+    }
+  }
+
+  if (token.length >= 5) return token.slice(0, 3)
+  if (token.length === 4) return token.slice(0, 2)
+  return token
+}
+
+function makeInitialism(tokens: string[], targetLen = 3): string {
+  const initials = tokens.map(t => t[0]).join('')
+  if (initials.length >= targetLen) return initials.slice(0, targetLen)
+
+  const sorted = [...tokens].sort((a, b) => b.length - a.length)
+  let out = initials
+  for (const tok of sorted) {
+    for (let i = 1; i < tok.length && out.length < targetLen; i++) {
+      out += tok[i]
+    }
+    if (out.length >= targetLen) break
+  }
+  return out
+}
+
+function abbreviateKoreanName(name: string, max = 4): string {
+  const raw = name.trim()
+  if (!raw) return ''
+  if (raw.length <= max) return raw
+  if (STOCK_ABBR_OVERRIDES[raw]) return STOCK_ABBR_OVERRIDES[raw]
+
+  const tokens = splitTokens(raw)
+  if (!tokens.length) return raw.slice(0, max)
+
+  // Rule 1: multi-word initialism with 3-syllable preference.
+  if (tokens.length >= 2) {
+    const core = tokens
+      .map(t => {
+        if (!isHangulToken(t)) return cutLoanword(t)
+        return t
+      })
+      .filter(Boolean)
+    const byInitial = makeInitialism(core, Math.min(3, max))
+    if (byInitial.length >= 2) return byInitial.slice(0, max)
+  }
+
+  const merged = tokens.join('')
+
+  // Rule 2/3: single-word core morpheme extraction with 2/3/4 rhythm.
+  if (isHangulToken(merged)) {
+    const short = shortenSingleHangulWord(merged)
+    if (short.length >= 2) return short.slice(0, max)
+    return merged.slice(0, Math.min(3, max))
+  }
+
+  // Rule 4: loanword truncation to Korean-friendly 2~3 syllables.
+  return cutLoanword(merged).slice(0, max)
+}
+
+function toKoreanSectorAbbr(sector: string): string {
+  const s = (sector || '').trim()
+  if (!s) return '기타'
+  const map: Record<string, string> = {
+    '반도체': '반도체',
+    '로봇·AI수혜': '로봇·AI',
+    '기타수급': '기타수급',
+    '2차전지·ESS': '2차전지',
+    '자동차·로봇': '자동차·로봇',
+    'MLCC·반도체기판': 'MLCC·기판',
+    '금융': '금융',
+    '바이오': '바이오',
+  }
+  return map[s] ?? abbreviateKoreanName(s, 6)
 }
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -75,28 +199,89 @@ const SEC_GAP = 3   // gap between sector blocks
 const STK_GAP = 1   // gap between stock tiles
 const SEC_H   = 22  // sector label bar height
 
+// Space allocation uses deadzone + asymptotic compression to avoid extreme area gaps.
+const AREA_MIN_WEIGHT   = 1
+const AREA_MAX_BOOST    = 3.2
+const AREA_DEADZONE     = 15
+const AREA_CURVE_FACTOR = 3.6
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.min(Math.max(n, lo), hi)
+}
+
+function scoreToAreaWeight(score: number): number {
+  const s = Math.min(Math.max(score, 0), 100)
+  if (s <= AREA_DEADZONE) return AREA_MIN_WEIGHT
+  const normalized = (s - AREA_DEADZONE) / (100 - AREA_DEADZONE)
+  const asymptotic = 1 - Math.exp(-AREA_CURVE_FACTOR * normalized)
+  return AREA_MIN_WEIGHT + AREA_MAX_BOOST * asymptotic
+}
+
+function stockDisplayStrength(item: WatchItem): number {
+  const base = scoreToAreaWeight(item.score)
+  const upBoost = 1 + Math.max(item.changeRate, 0) * 0.2
+  const downPenalty = 1 + Math.max(-item.changeRate, 0) * 0.28
+  return (base * upBoost) / downPenalty
+}
+
 export function WatchlistPage() {
   const [data, setData]           = useState<WatchlistResponse | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
   const [busyCode, setBusyCode]   = useState<string | null>(null)
   const [q, setQ]                 = useState('')
   const [searchRows, setSearchRows] = useState<StockRow[]>([])
   const [addBusyCode, setAddBusyCode] = useState<string | null>(null)
   const [showSearch, setShowSearch]   = useState(false)
   const [hovered, setHovered]     = useState<string | null>(null)
+  const [cachedItems, setCachedItems] = useState<WatchItem[]>(() => {
+    try {
+      const raw = localStorage.getItem(WATCHLIST_CACHE_KEY)
+      if (!raw) return []
+      const parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return []
+      return parsed as WatchItem[]
+    } catch {
+      return []
+    }
+  })
   const containerRef              = useRef<HTMLDivElement>(null)
   const [dims, setDims]           = useState({ w: 900, h: 620 })
 
   const refresh = useCallback(() => {
-    fetchJson<WatchlistResponse>('/api/watchlist').then(p => setData(p)).catch(() => setData(null))
+    setIsLoading(true)
+    fetchJson<WatchlistResponse>('/api/watchlist')
+      .then(p => {
+        setData(p)
+        setCachedItems(p.items)
+        try {
+          localStorage.setItem(WATCHLIST_CACHE_KEY, JSON.stringify(p.items))
+        } catch {
+          // ignore storage write errors
+        }
+      })
+      .catch(() => setData(null))
+      .finally(() => setIsLoading(false))
   }, [])
 
   // Poll every 30 s
   useEffect(() => {
     let dead = false
-    const load = () =>
+    const load = () => {
+      if (!dead) setIsLoading(true)
       fetchJson<WatchlistResponse>('/api/watchlist')
-        .then(p => { if (!dead) setData(p) })
+        .then(p => {
+          if (dead) return
+          setData(p)
+          setCachedItems(p.items)
+          try {
+            localStorage.setItem(WATCHLIST_CACHE_KEY, JSON.stringify(p.items))
+          } catch {
+            // ignore storage write errors
+          }
+        })
         .catch(() => { if (!dead) setData(null) })
+        .finally(() => { if (!dead) setIsLoading(false) })
+    }
     load()
     const id = setInterval(load, 30_000)
     return () => { dead = true; clearInterval(id) }
@@ -124,7 +309,8 @@ export function WatchlistPage() {
     return () => ro.disconnect()
   }, [])
 
-  const items     = useMemo(() => data?.items ?? [], [data])
+  const items     = useMemo(() => data?.items ?? cachedItems, [data, cachedItems])
+  const showingCachedLayout = data === null && cachedItems.length > 0
   const itemCodes = useMemo(() => new Set(items.map(x => x.code)), [items])
 
   // Two-level squarified treemap: sectors → stocks
@@ -138,28 +324,80 @@ export function WatchlistPage() {
       secMap.get(s)!.push(it)
     }
 
-    const secs = Array.from(secMap.entries()).map(([sec, stocks]) => ({
-      id: sec, sec, stocks,
-      value: stocks.reduce((s, i) => s + Math.max(i.score, 1), 0),
-    }))
+    const secs = Array.from(secMap.entries()).map(([sec, stocks]) => {
+      const total = stocks.length || 1
+      const avgChange = stocks.reduce((s, i) => s + i.changeRate, 0) / total
+      const downRatio = stocks.filter(s => s.changeRate < 0).length / total
+      const isEtc = sec.includes('기타')
+      const isDownSector = isEtc || avgChange <= -0.4 || downRatio >= 0.65
+      const rankedStocks = [...stocks].sort((a, b) => stockDisplayStrength(b) - stockDisplayStrength(a))
 
-    const secRects = squarify(
-      secs.map(s => ({ id: s.id, value: s.value })),
-      0, 0, dims.w, dims.h, SEC_GAP,
-    )
+      const positiveRatio = stocks.filter(s => s.changeRate > 0).length / total
+      const strongRatio = clamp(0.44 + positiveRatio * 0.34 + Math.max(avgChange, 0) * 0.05, 0.3, 1)
+      const weakRatio = clamp(0.28 + positiveRatio * 0.16, 0.2, 0.55)
+      const visibleRatio = isDownSector ? weakRatio : strongRatio
+      const visibleCount = clamp(Math.round(stocks.length * visibleRatio), Math.min(2, stocks.length), stocks.length)
+      const visibleStocks = rankedStocks.slice(0, visibleCount)
+      const value = visibleStocks.reduce((s, i) => s + stockDisplayStrength(i), 0)
+
+      return {
+        id: sec,
+        sec,
+        stocks,
+        visibleStocks,
+        value,
+        avgChange,
+        isDownSector,
+      }
+    })
+
+    const upperSecs = secs
+      .filter(s => !s.isDownSector)
+      .sort((a, b) => b.value - a.value)
+    const lowerSecs = secs
+      .filter(s => s.isDownSector)
+      .sort((a, b) => b.value - a.value)
+
+    let secRects: TRect[] = []
+    if (!upperSecs.length || !lowerSecs.length) {
+      secRects = squarify(
+        secs.map(s => ({ id: s.id, value: s.value })),
+        0, 0, dims.w, dims.h, SEC_GAP,
+      )
+    } else {
+      const topValue = upperSecs.reduce((s, x) => s + x.value, 0)
+      const bottomValue = lowerSecs.reduce((s, x) => s + x.value, 0)
+      const bottomShare = clamp(bottomValue / (topValue + bottomValue), 0.22, 0.48)
+      const bottomH = Math.round(dims.h * bottomShare)
+      const topH = Math.max(dims.h - bottomH - SEC_GAP, 120)
+      const adjustedBottomH = Math.max(dims.h - topH - SEC_GAP, 90)
+
+      const topRects = squarify(
+        upperSecs.map(s => ({ id: s.id, value: s.value })),
+        0, 0, dims.w, topH, SEC_GAP,
+      )
+      const bottomRects = squarify(
+        lowerSecs.map(s => ({ id: s.id, value: s.value })),
+        0, topH + SEC_GAP, dims.w, adjustedBottomH, SEC_GAP,
+      )
+      secRects = [...topRects, ...bottomRects]
+    }
 
     return secRects.map(sr => {
       const sd    = secs.find(s => s.id === sr.id)!
       const stkH  = Math.max(sr.h - SEC_H, 0)
       const tiles = stkH > 4
         ? squarify(
-            sd.stocks.map(s => ({ id: s.code, value: Math.max(s.score, 1) })),
+            sd.visibleStocks.map(s => ({ id: s.code, value: stockDisplayStrength(s) })),
             0, SEC_H, sr.w, stkH, STK_GAP,
           )
         : []
+      const stockMap = new Map(sd.visibleStocks.map(s => [s.code, s]))
       return {
         ...sr, sec: sd.sec,
-        stocks: tiles.map(r => ({ ...r, item: sd.stocks.find(s => s.code === r.id)! })),
+        totalCount: sd.stocks.length,
+        shownCount: sd.visibleStocks.length,
+        stocks: tiles.map(r => ({ ...r, item: stockMap.get(r.id)! })).filter(r => !!r.item),
       }
     })
   }, [items, dims])
@@ -244,10 +482,10 @@ export function WatchlistPage() {
           minHeight: 420,
           borderRadius: 14,
           overflow: 'hidden',
-          background: '#07070f',
+          background: 'linear-gradient(180deg, #0b1220 0%, #090f1a 100%)',
         }}
       >
-        {data === null && (
+        {data === null && !cachedItems.length && (
           <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', color: 'rgba(255,255,255,0.28)', fontSize: '0.9rem' }}>
             데이터를 불러오는 중…
           </div>
@@ -255,6 +493,38 @@ export function WatchlistPage() {
         {data !== null && !items.length && (
           <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', color: 'rgba(255,255,255,0.28)', fontSize: '0.9rem' }}>
             관심 종목이 없습니다
+          </div>
+        )}
+
+        {showingCachedLayout && (
+          <div style={{
+            position: 'absolute', top: 8, right: 10,
+            zIndex: 20,
+            background: 'rgba(8,12,20,0.82)',
+            border: '1px solid rgba(255,255,255,0.14)',
+            borderRadius: 8,
+            color: 'rgba(255,255,255,0.78)',
+            fontSize: '0.68rem',
+            fontWeight: 700,
+            padding: '4px 8px',
+          }}>
+            캐시 배치 표시 중
+          </div>
+        )}
+
+        {isLoading && items.length > 0 && (
+          <div style={{
+            position: 'absolute', top: 8, left: 10,
+            zIndex: 20,
+            background: 'rgba(18,83,56,0.82)',
+            border: '1px solid rgba(134,239,172,0.45)',
+            borderRadius: 8,
+            color: 'rgba(220,252,231,0.9)',
+            fontSize: '0.68rem',
+            fontWeight: 700,
+            padding: '4px 8px',
+          }}>
+            최신 데이터 동기화 중…
           </div>
         )}
 
@@ -266,8 +536,8 @@ export function WatchlistPage() {
               position: 'absolute',
               left: sec.x, top: sec.y, width: sec.w, height: sec.h,
               boxSizing: 'border-box',
-              border: '1px solid rgba(255,255,255,0.08)',
-              borderRadius: 3,
+                border: '1px solid rgba(255,255,255,0.12)',
+                borderRadius: 2,
               overflow: 'hidden',
             }}
           >
@@ -276,16 +546,16 @@ export function WatchlistPage() {
               style={{
                 position: 'absolute', inset: '0 0 auto 0', height: SEC_H,
                 display: 'flex', alignItems: 'center', padding: '0 7px',
-                background: 'rgba(7,7,15,0.78)',
+                background: 'rgba(10,15,24,0.84)',
                 zIndex: 2, pointerEvents: 'none',
-                fontSize: '0.64rem', fontWeight: 700,
-                letterSpacing: '0.06em', color: 'rgba(255,255,255,0.6)',
+                fontSize: '0.62rem', fontWeight: 800,
+                letterSpacing: '0.04em', color: 'rgba(255,255,255,0.72)',
                 whiteSpace: 'nowrap', overflow: 'hidden',
               }}
             >
-              {sec.sec}
+              {toKoreanSectorAbbr(sec.sec)}
               <span style={{ marginLeft: 5, opacity: 0.42, fontWeight: 400 }}>
-                {sec.stocks.length}
+                {sec.shownCount}/{sec.totalCount}
               </span>
             </div>
 
@@ -293,9 +563,10 @@ export function WatchlistPage() {
             {sec.stocks.map(({ id, x, y, w, h, item }) => {
               if (!item) return null
               const isHov     = hovered === id
-              const showCode  = w >= 34 && h >= 26
-              const showName  = w >= 52 && h >= 38
-              const showFull  = w >= 72 && h >= 56
+              const showTiny  = w >= 30 && h >= 22
+              const showName  = w >= 62 && h >= 38
+              const showFull  = w >= 84 && h >= 62
+              const shortName = abbreviateKoreanName(item.name)
 
               return (
                 <div
@@ -309,11 +580,11 @@ export function WatchlistPage() {
                   style={{
                     position: 'absolute', left: x, top: y, width: w, height: h,
                     boxSizing: 'border-box',
-                    background: scoreColor(item.score),
+                    background: changeColor(item.changeRate),
                     border: isHov
                       ? '1.5px solid rgba(255,255,255,0.55)'
-                      : '0.5px solid rgba(0,0,0,0.3)',
-                    borderRadius: 2,
+                      : '0.7px solid rgba(0,0,0,0.34)',
+                    borderRadius: 1,
                     overflow: 'hidden',
                     cursor: 'pointer',
                     display: 'flex', flexDirection: 'column',
@@ -336,21 +607,21 @@ export function WatchlistPage() {
                     >×</button>
                   )}
 
-                  {showCode && !showName && (
+                  {showTiny && !showName && (
                     <span style={{
-                      fontSize: '0.6rem', fontWeight: 700,
-                      color: 'rgba(255,255,255,0.75)',
-                      userSelect: 'none', letterSpacing: '0.03em',
+                      fontSize: '0.62rem', fontWeight: 800,
+                      color: 'rgba(255,255,255,0.84)',
+                      userSelect: 'none', letterSpacing: '0.01em',
                     }}>
-                      {item.code}
+                      {shortName}
                     </span>
                   )}
 
                   {showName && (
                     <>
                       <span style={{
-                        fontSize: showFull ? '0.78rem' : '0.68rem',
-                        fontWeight: 700,
+                        fontSize: showFull ? '0.8rem' : '0.66rem',
+                        fontWeight: 800,
                         color: 'rgba(255,255,255,0.92)',
                         textAlign: 'center',
                         padding: '0 4px',
@@ -366,22 +637,18 @@ export function WatchlistPage() {
                       {showFull && (
                         <>
                           <span style={{
-                            fontSize: '0.7rem', fontWeight: 600, marginTop: 3,
+                            fontSize: '0.72rem', fontWeight: 700, marginTop: 2,
                             userSelect: 'none',
-                            color: item.changeRate > 0
-                              ? '#86efac'
-                              : item.changeRate < 0
-                              ? '#fca5a5'
-                              : 'rgba(255,255,255,0.5)',
+                            color: 'rgba(255,255,255,0.92)',
                           }}>
                             {item.price > 0 ? formatPercent(item.changeRate) : '—'}
                           </span>
                           <span style={{
-                            fontSize: '0.58rem', marginTop: 2,
+                            fontSize: '0.56rem', fontWeight: 700, marginTop: 2,
                             userSelect: 'none',
-                            color: 'rgba(255,255,255,0.38)',
+                            color: 'rgba(255,255,255,0.62)',
                           }}>
-                            {item.score}점
+                            {shortName}
                           </span>
                         </>
                       )}
@@ -393,25 +660,33 @@ export function WatchlistPage() {
           </div>
         ))}
 
-        {/* Score legend */}
+        {/* Change-rate legend */}
         {items.length > 0 && (
           <div style={{
             position: 'absolute', bottom: 8, right: 10,
             display: 'flex', alignItems: 'center', gap: 4,
             pointerEvents: 'none',
           }}>
-            <span style={{ fontSize: '0.6rem', color: 'rgba(255,255,255,0.32)' }}>낮음</span>
-            {[0, 15, 30, 45, 60, 75, 90].map(v => (
+            {[-3, -2, -1, 0, 1, 2, 3].map(v => (
               <div
                 key={v}
                 style={{
-                  width: 16, height: 10, borderRadius: 2,
-                  background: scoreColor(v),
-                  border: '0.5px solid rgba(255,255,255,0.1)',
+                  minWidth: 36,
+                  height: 18,
+                  borderRadius: 2,
+                  background: changeColor(v),
+                  border: '0.5px solid rgba(255,255,255,0.14)',
+                  color: 'rgba(255,255,255,0.9)',
+                  fontSize: '0.62rem',
+                  fontWeight: 700,
+                  display: 'grid',
+                  placeItems: 'center',
+                  padding: '0 4px',
                 }}
-              />
+              >
+                {v > 0 ? `+${v}%` : `${v}%`}
+              </div>
             ))}
-            <span style={{ fontSize: '0.6rem', color: 'rgba(255,255,255,0.32)' }}>높음 (점수)</span>
           </div>
         )}
       </div>

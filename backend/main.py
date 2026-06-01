@@ -9,6 +9,7 @@ import secrets
 import string
 import threading
 import time
+from difflib import SequenceMatcher
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -361,6 +362,68 @@ def _normalize_stock_name(name: str | None) -> str:
     return re.sub(r"[^0-9a-zA-Z가-힣]", "", raw)
 
 
+def _stock_name_similarity_score(norm_query: str, norm_name: str) -> float:
+    if not norm_query or not norm_name:
+        return 0.0
+    if norm_query == norm_name:
+        return 1.0
+    if norm_query in norm_name or norm_name in norm_query:
+        return 0.92
+    return float(SequenceMatcher(a=norm_query, b=norm_name).ratio())
+
+
+def _select_stock_name_candidates(db: Session, query: str, *, limit: int = 30) -> list[tuple[str, str]]:
+    """입력 종목명에 대해 DB 후보를 정규화/유사도 기준으로 추려 반환한다."""
+
+    if models is None:
+        return []
+
+    norm_query = _normalize_stock_name(query)
+    if not norm_query:
+        return []
+
+    rough_rows = db.execute(
+        select(models.Stock.code, models.Stock.name)
+        .where(models.Stock.name.like(f"%{query}%"))
+        .order_by(models.Stock.code)
+        .limit(80)
+    ).all()
+
+    scored: list[tuple[float, str, str]] = []
+    seen_codes: set[str] = set()
+
+    for code, name in rough_rows:
+        code_s = str(code or "").strip()
+        name_s = str(name or "").strip()
+        if not code_s or not name_s:
+            continue
+        score = _stock_name_similarity_score(norm_query, _normalize_stock_name(name_s))
+        if score >= 0.65:
+            scored.append((score, code_s, name_s))
+            seen_codes.add(code_s)
+
+    # 1차 후보가 부족하면 전체 마스터 일부를 훑어 정규화 유사 후보를 보강한다.
+    if len(scored) < min(limit, 8):
+        broad_rows = db.execute(
+            select(models.Stock.code, models.Stock.name)
+            .order_by(models.Stock.code)
+            .limit(5000)
+        ).all()
+        for code, name in broad_rows:
+            code_s = str(code or "").strip()
+            if not code_s or code_s in seen_codes:
+                continue
+            name_s = str(name or "").strip()
+            if not name_s:
+                continue
+            score = _stock_name_similarity_score(norm_query, _normalize_stock_name(name_s))
+            if score >= 0.75:
+                scored.append((score, code_s, name_s))
+
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [(code, name) for _score, code, name in scored[: max(1, limit)]]
+
+
 def _effective_kis_is_paper(_profile=None) -> bool:
     """운영 정책: KIS는 항상 실전(라이브)만 사용."""
     return False
@@ -412,12 +475,7 @@ def _resolve_stock_input_via_kis(db: Session, *, user_id: int, raw_input: str) -
     if not norm_query:
         raise HTTPException(status_code=400, detail="유효한 종목명을 입력하세요")
 
-    candidates = db.execute(
-        select(models.Stock.code, models.Stock.name)
-        .where(models.Stock.name.like(f"%{query}%"))
-        .order_by(models.Stock.code)
-        .limit(20)
-    ).all()
+    candidates = _select_stock_name_candidates(db, query, limit=30)
     if not candidates:
         raise HTTPException(status_code=404, detail="DB에서 해당 종목명을 찾지 못했습니다")
 
@@ -1562,6 +1620,225 @@ def get_watchlist(current_user=Depends(get_current_user)):
         return {"items": items}
     finally:
         db.close()
+
+
+_THEME_WATCHLIST_RULES: list[dict] = [
+    {
+        "sector": "외국인 코스피",
+        "flow": "외국인",
+        "market": "코스피",
+        "names": [
+            "현대로템", "대우건설", "POSCO홀딩스", "LIG넥스원", "LS", "KB금융", "효성중공업", "한화시스템",
+        ],
+    },
+    {
+        "sector": "외국인 코스닥",
+        "flow": "외국인",
+        "market": "코스닥",
+        "names": [
+            "제주반도체", "이오테크닉스", "원익IPS", "비나텍", "티씨케이", "RFHIC", "ISC", "심텍", "HPSP", "하나머티리얼즈", "쎄트렉아이", "유진테크",
+        ],
+    },
+    {
+        "sector": "기관 코스피",
+        "flow": "기관",
+        "market": "코스피",
+        "names": [
+            "LS ELECTRIC", "이수페타시스", "효성중공업", "한국항공우주", "기아", "대한전선",
+        ],
+    },
+    {
+        "sector": "기관 코스닥",
+        "flow": "기관",
+        "market": "코스닥",
+        "names": [
+            "성호전자", "우리기술", "한국피아이엠", "두산테스나", "에스앤에스텍", "에프에스티", "LS마린솔루션", "NHN KCP",
+        ],
+    },
+    {
+        "sector": "LG그룹주",
+        "flow": "특징",
+        "market": "테마",
+        "names": ["LG전자"],
+    },
+    {
+        "sector": "인터넷",
+        "flow": "특징",
+        "market": "테마",
+        "names": ["NAVER"],
+    },
+    {
+        "sector": "피지컬AI",
+        "flow": "특징",
+        "market": "테마",
+        "names": ["기아"],
+    },
+]
+
+
+def _as_tag_list(raw_tags) -> list[str]:
+    tags = raw_tags
+    if isinstance(tags, str):
+        try:
+            tags = json.loads(tags)
+        except Exception:
+            return []
+    if not isinstance(tags, list):
+        return []
+    out: list[str] = []
+    for t in tags:
+        s = str(t).strip()
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+def _resolve_stock_input_for_theme_update(db: Session, *, user_id: int, raw_input: str) -> dict | None:
+    query = str(raw_input or "").strip()
+    if not query:
+        return None
+
+    # Prefer KIS-verified resolution. If unavailable, fall back to DB candidate.
+    try:
+        return _resolve_stock_input_via_kis(db, user_id=user_id, raw_input=query)
+    except Exception:
+        pass
+
+    candidates = _select_stock_name_candidates(db, query, limit=10)
+    if not candidates:
+        return None
+
+    norm_query = _normalize_stock_name(query)
+    best_code = ""
+    best_name = ""
+    best_score = 0.0
+    for code, name in candidates:
+        score = _stock_name_similarity_score(norm_query, _normalize_stock_name(name))
+        if score > best_score:
+            best_score = score
+            best_code = str(code)
+            best_name = str(name)
+
+    if not best_code or best_score < 0.78:
+        return None
+    return {"code": best_code, "name": best_name, "market": "", "verified": False, "inputType": "name-db"}
+
+
+@app.post("/api/watchlist/theme-update")
+def apply_watchlist_theme_update(payload: dict = Body(default={}), current_user=Depends(get_current_user)):
+    """주어진 테마 스냅샷으로 관심종목/섹터 태그를 갱신한다.
+
+    - 기본(replace=true): 기존 자동 테마 항목 중 이번 스냅샷에서 빠진 종목은 관심종목에서 제거
+    - 테마 태그("...|테마", "테마자동")를 upsert해 watchlist 섹터 분류를 최신화
+    """
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    user_id = int(current_user.id)
+    replace = bool(payload.get("replace", True))
+
+    added_watchlist = 0
+    updated_interest = 0
+    unresolved: list[str] = []
+    managed_codes: set[str] = set()
+
+    with apollo_db.session_scope() as session:
+        for rule in _THEME_WATCHLIST_RULES:
+            sector = str(rule.get("sector") or "기타").strip() or "기타"
+            flow = str(rule.get("flow") or "특징").strip() or "특징"
+            market = str(rule.get("market") or "테마").strip() or "테마"
+            names = list(rule.get("names") or [])
+
+            for raw_name in names:
+                resolved = _resolve_stock_input_for_theme_update(session, user_id=user_id, raw_input=str(raw_name))
+                if not resolved:
+                    unresolved.append(str(raw_name))
+                    continue
+
+                code = str(resolved.get("code") or "").strip()
+                name = str(resolved.get("name") or raw_name).strip()
+                if not code:
+                    unresolved.append(str(raw_name))
+                    continue
+                managed_codes.add(code)
+
+                stock = session.execute(select(models.Stock).where(models.Stock.code == code)).scalar_one_or_none()
+                if stock is None:
+                    session.add(models.Stock(code=code, name=(name or code), market=(resolved.get("market") or None)))
+                else:
+                    if name and (_normalize_stock_name(getattr(stock, "name", "")) != _normalize_stock_name(name)):
+                        stock.name = name
+
+                exists_watch = session.execute(
+                    select(models.Watchlist.id).where(models.Watchlist.user_id == user_id, models.Watchlist.stock_code == code)
+                ).first()
+                if not exists_watch:
+                    session.add(models.Watchlist(user_id=user_id, stock_code=code))
+                    added_watchlist += 1
+
+                interest = session.execute(
+                    select(models.StockInterest)
+                    .where(models.StockInterest.user_id == user_id, models.StockInterest.stock_code == code)
+                ).scalar_one_or_none()
+
+                new_tags = [f"{sector}|테마", "테마자동", f"{flow}수급", f"{market}시장"]
+                if interest is None:
+                    session.add(
+                        models.StockInterest(
+                            user_id=user_id,
+                            stock_code=code,
+                            mention_count=1,
+                            interest_weight=1.2,
+                            analysis_depth=2,
+                            tags=new_tags,
+                        )
+                    )
+                    updated_interest += 1
+                else:
+                    merged = new_tags + [t for t in _as_tag_list(getattr(interest, "tags", None)) if t not in new_tags]
+                    interest.tags = merged
+                    mention = int(getattr(interest, "mention_count", 0) or 0) + 1
+                    interest.mention_count = mention
+                    interest.analysis_depth = max(int(getattr(interest, "analysis_depth", 1) or 1), 2)
+                    interest.interest_weight = float(min(5.0, max(float(getattr(interest, "interest_weight", 1.0) or 1.0), 1.0 + 0.18 * mention)))
+                    updated_interest += 1
+
+        removed_watchlist = 0
+        if replace:
+            rows = session.execute(
+                select(models.Watchlist.stock_code, models.StockInterest.tags)
+                .outerjoin(
+                    models.StockInterest,
+                    (models.StockInterest.stock_code == models.Watchlist.stock_code)
+                    & (models.StockInterest.user_id == user_id),
+                )
+                .where(models.Watchlist.user_id == user_id)
+            ).all()
+
+            auto_codes_to_remove: list[str] = []
+            for stock_code, raw_tags in rows:
+                tags = _as_tag_list(raw_tags)
+                if "테마자동" in tags and stock_code not in managed_codes:
+                    auto_codes_to_remove.append(str(stock_code))
+
+            for code in auto_codes_to_remove:
+                w = session.execute(
+                    select(models.Watchlist)
+                    .where(models.Watchlist.user_id == user_id, models.Watchlist.stock_code == code)
+                ).scalar_one_or_none()
+                if w is not None:
+                    session.delete(w)
+                    removed_watchlist += 1
+
+    return {
+        "ok": True,
+        "replace": replace,
+        "addedWatchlist": added_watchlist,
+        "updatedInterest": updated_interest,
+        "removedWatchlist": removed_watchlist,
+        "managedCount": len(managed_codes),
+        "unresolved": unresolved,
+    }
 
 
 @app.post("/api/watchlist")
@@ -3710,8 +3987,7 @@ def admin_validate_stock_master(
     db: Session = apollo_db.get_session_factory()()
     try:
         profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == admin_id)).scalar_one_or_none()
-        if not (profile and getattr(profile, "app_key", None) and getattr(profile, "app_secret", None)):
-            raise HTTPException(status_code=400, detail="관리자 KIS 연결 필요")
+        kis_available = bool(profile and getattr(profile, "app_key", None) and getattr(profile, "app_secret", None))
 
         if codes:
             # 주어진 codes를 전부 검사 (DB 미등록 코드 포함)
@@ -3728,6 +4004,7 @@ def admin_validate_stock_master(
         inserted = 0
         mismatches: list[dict] = []
         invalid_codes: list[dict] = []
+        db_invalids: list[dict] = []
         missing_in_db: list[dict] = []
         input_name_mismatches: list[dict] = []
         unnamed_from_kis: list[dict] = []
@@ -3737,8 +4014,27 @@ def admin_validate_stock_master(
                 continue
             checked += 1
 
+            if not re.fullmatch(r"[0-9]{6}", str(code)):
+                invalid_codes.append({
+                    "code": code,
+                    "dbName": "",
+                    "dbMissing": True,
+                    "error": "invalid stock code format (expected 6 digits)",
+                })
+                continue
+
             stock = stock_by_code.get(code)
             db_name = str(getattr(stock, "name", "") or "").strip() if stock is not None else ""
+            if stock is not None and not db_name:
+                db_invalids.append({
+                    "code": code,
+                    "issue": "empty_db_name",
+                })
+
+            if not kis_available:
+                if stock is None:
+                    missing_in_db.append({"code": code, "kisName": ""})
+                continue
 
             try:
                 quote = kis_client.inquire_price(
@@ -3762,6 +4058,13 @@ def admin_validate_stock_master(
             kis_name = str(getattr(quote, "name", "") or "").strip()
             if not kis_name:
                 unnamed_from_kis.append({"code": code, "dbName": db_name})
+                if stock is None or not db_name:
+                    invalid_codes.append({
+                        "code": code,
+                        "dbName": db_name,
+                        "dbMissing": stock is None,
+                        "error": "KIS name is empty and DB name is missing",
+                    })
                 continue
 
             input_name = pair_name_by_code.get(code)
@@ -3803,18 +4106,22 @@ def admin_validate_stock_master(
 
         return {
             "ok": True,
+            "kisLinked": kis_available,
+            "mode": "KIS+DB" if kis_available else "DB_ONLY",
             "checked": checked,
             "updated": updated,
             "inserted": inserted,
             "autoFix": auto_fix,
             "mismatchCount": len(mismatches),
             "invalidCount": len(invalid_codes),
+            "dbInvalidCount": len(db_invalids),
             "missingInDbCount": len(missing_in_db),
             "inputPairConflictCount": len(pair_conflicts),
             "inputNameMismatchCount": len(input_name_mismatches),
             "unnamedFromKisCount": len(unnamed_from_kis),
             "mismatches": mismatches,
             "invalidCodes": invalid_codes,
+            "dbInvalids": db_invalids,
             "missingInDb": missing_in_db,
             "inputPairConflicts": pair_conflicts,
             "inputNameMismatches": input_name_mismatches,
