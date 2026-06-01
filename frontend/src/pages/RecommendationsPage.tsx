@@ -17,6 +17,10 @@ type RecommendationsResponse = {
   priceError?: string | null
 }
 
+type WatchlistResponse = {
+  items: Array<{ code: string }>
+}
+
 // ─── KING types ───────────────────────────────────────────────────────────────
 
 type KingSector = {
@@ -149,10 +153,25 @@ function KingPanel() {
 export function RecommendationsPage() {
   const [data, setData] = useState<RecommendationsResponse | null>(null)
   const [busyCode, setBusyCode] = useState<string | null>(null)
+  const [watchCodes, setWatchCodes] = useState<Set<string>>(new Set())
   const [tab, setTab] = useState<'standard' | 'king'>('standard')
 
   useEffect(() => {
     let cancelled = false
+
+    const refreshWatchlist = () => {
+      fetchJson<WatchlistResponse>('/api/watchlist')
+        .then((payload) => {
+          if (!cancelled) {
+            setWatchCodes(new Set(payload.items.map((item) => item.code)))
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setWatchCodes(new Set())
+          }
+        })
+    }
 
     const refresh = () => {
       fetchJson<RecommendationsResponse>('/api/recommendations')
@@ -165,10 +184,13 @@ export function RecommendationsPage() {
     }
 
     refresh()
+    refreshWatchlist()
     const intervalId = window.setInterval(refresh, 30_000)
+    const watchlistIntervalId = window.setInterval(refreshWatchlist, 30_000)
     return () => {
       cancelled = true
       window.clearInterval(intervalId)
+      window.clearInterval(watchlistIntervalId)
     }
   }, [])
 
@@ -287,7 +309,9 @@ export function RecommendationsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {items.map((item) => (
+                  {items.map((item) => {
+                    const alreadyAdded = watchCodes.has(item.code)
+                    return (
                     <tr key={`${item.code}-${item.rank}`}>
                       <td>{item.rank}</td>
                       <td>{item.name}</td>
@@ -301,7 +325,8 @@ export function RecommendationsPage() {
                         <button
                           className="btn secondary"
                           type="button"
-                          disabled={busyCode === item.code}
+                          disabled={busyCode === item.code || alreadyAdded}
+                          title={alreadyAdded ? '이미 관심종목에 추가됨' : '관심종목에 추가'}
                           onClick={() => {
                             setBusyCode(item.code)
                             fetchJson<{ ok: boolean }>('/api/watchlist', {
@@ -309,15 +334,23 @@ export function RecommendationsPage() {
                               headers: { 'Content-Type': 'application/json' },
                               body: JSON.stringify({ code: item.code }),
                             })
+                              .then(() => {
+                                setWatchCodes((prev) => {
+                                  const next = new Set(prev)
+                                  next.add(item.code)
+                                  return next
+                                })
+                              })
                               .catch(() => {})
                               .finally(() => setBusyCode(null))
                           }}
                         >
-                          [+]
+                          {alreadyAdded ? '[>]' : '[+]'}
                         </button>
                       </td>
                     </tr>
-                  ))}
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
