@@ -345,7 +345,7 @@ export function RecommendationsPage() {
                               .finally(() => setBusyCode(null))
                           }}
                         >
-                          {alreadyAdded ? '[>]' : '[+]'}
+                          {alreadyAdded ? '[v]' : '[+]'}
                         </button>
                       </td>
                     </tr>

@@ -14,6 +14,10 @@ type SearchResponse = {
   items: StockRow[]
 }
 
+type WatchlistResponse = {
+  items: Array<{ code: string }>
+}
+
 type StockDetail = StockRow & {
   indicators: {
     value: number
@@ -88,6 +92,7 @@ export function StockSearchPage() {
   const [rows, setRows] = useState<StockRow[]>([])
   const [selected, setSelected] = useState<StockDetail | null>(null)
   const [watchlistBusy, setWatchlistBusy] = useState(false)
+  const [watchCodes, setWatchCodes] = useState<Set<string>>(new Set())
 
   const activeScreen = SCREENS.find(s => s.key === screen) ?? null
 
@@ -122,7 +127,33 @@ export function StockSearchPage() {
     return () => window.clearTimeout(handle)
   }, [q, market, sort, screen])
 
+  useEffect(() => {
+    let cancelled = false
+
+    const refreshWatchlist = () => {
+      fetchJson<WatchlistResponse>('/api/watchlist')
+        .then((payload) => {
+          if (!cancelled) {
+            setWatchCodes(new Set(payload.items.map((item) => item.code)))
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setWatchCodes(new Set())
+          }
+        })
+    }
+
+    refreshWatchlist()
+    const id = window.setInterval(refreshWatchlist, 30_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [])
+
   const detailIndicators = selected?.indicators
+  const selectedAlreadyAdded = selected ? watchCodes.has(selected.code) : false
 
   return (
     <>
@@ -329,7 +360,8 @@ export function StockSearchPage() {
                 className="btn"
                 type="button"
                 style={{ width: '100%' }}
-                disabled={!selected || watchlistBusy}
+                disabled={!selected || watchlistBusy || selectedAlreadyAdded}
+                title={selectedAlreadyAdded ? '이미 관심종목에 추가됨' : '관심종목에 추가'}
                 onClick={() => {
                   if (!selected) return
                   setWatchlistBusy(true)
@@ -338,13 +370,20 @@ export function StockSearchPage() {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ code: selected.code }),
                   })
+                    .then(() => {
+                      setWatchCodes((prev) => {
+                        const next = new Set(prev)
+                        next.add(selected.code)
+                        return next
+                      })
+                    })
                     .catch(() => {
                       // Keep UX minimal: no extra modals/toasts; button simply re-enables.
                     })
                     .finally(() => setWatchlistBusy(false))
                 }}
               >
-                ☆ 관심 추가
+                {selectedAlreadyAdded ? 'v 관심 추가됨' : '☆ 관심 추가'}
               </button>
               <p className="hint" style={{ marginTop: 10 }}>
                 점수 상세는 지표별로 확장 예정
