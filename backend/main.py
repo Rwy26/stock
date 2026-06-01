@@ -453,16 +453,25 @@ def _resolve_stock_input_via_kis(db: Session, *, user_id: int, raw_input: str) -
             timeout_seconds=5.0,
         )
 
+    def _kis_name_confidence(norm_query: str, norm_kis: str) -> float:
+        if not norm_query or not norm_kis:
+            return 0.0
+        if norm_query == norm_kis:
+            return 1.0
+        if norm_query in norm_kis or norm_kis in norm_query:
+            return 0.95
+        return float(SequenceMatcher(a=norm_query, b=norm_kis).ratio())
+
     # 1) 코드 입력 우선 처리: KIS로 즉시 유효성 검증
     if re.fullmatch(r"[0-9A-Za-z]{6}", query):
         try:
             quote = _quote_by_code(query)
-            stock_row = db.execute(select(models.Stock.name).where(models.Stock.code == str(quote.code))).first()
-            db_name = str(stock_row[0]).strip() if stock_row and stock_row[0] is not None else ""
-            resolved_name = str(getattr(quote, "name", "") or "").strip() or db_name or query
+            kis_name = str(getattr(quote, "name", "") or "").strip()
+            if not kis_name:
+                raise HTTPException(status_code=502, detail="KIS 종목명 확인 실패: 코드 검증 불가")
             return {
                 "code": str(quote.code),
-                "name": resolved_name,
+                "name": kis_name,
                 "market": str(getattr(quote, "market_name", "") or ""),
                 "verified": True,
                 "inputType": "code",
@@ -487,25 +496,23 @@ def _resolve_stock_input_via_kis(db: Session, *, user_id: int, raw_input: str) -
         except Exception:
             continue
         kis_name = str(getattr(quote, "name", "") or "").strip()
+        if not kis_name:
+            # KIS name is mandatory for safe name->code resolution.
+            continue
         live_candidates.append(
             {
                 "code": str(code),
-                "name": (kis_name or str(db_name)),
+                "name": kis_name,
                 "market": str(getattr(quote, "market_name", "") or ""),
             }
         )
         norm_kis = _normalize_stock_name(kis_name)
-        norm_db = _normalize_stock_name(str(db_name))
-        if norm_kis:
-            is_match = norm_query == norm_kis or norm_query in norm_kis or norm_kis in norm_query
-        else:
-            # KIS명이 비어도 코드 유효성(KIS 통과) + DB명 매칭이면 허용
-            is_match = bool(norm_db) and (norm_query == norm_db or norm_query in norm_db or norm_db in norm_query)
-        if is_match:
+        conf = _kis_name_confidence(norm_query, norm_kis)
+        if conf >= 0.92:
             verified_matches.append(
                 {
                     "code": str(code),
-                    "name": (kis_name or str(db_name)),
+                    "name": kis_name,
                     "market": str(getattr(quote, "market_name", "") or ""),
                 }
             )
@@ -523,20 +530,10 @@ def _resolve_stock_input_via_kis(db: Session, *, user_id: int, raw_input: str) -
     if len(verified_matches) > 1:
         raise HTTPException(status_code=409, detail={"message": "동일/유사 종목명 후보가 여러 개입니다", "candidates": verified_matches})
 
-    if len(live_candidates) == 1:
-        one = live_candidates[0]
-        return {
-            "code": one["code"],
-            "name": one["name"],
-            "market": one["market"],
-            "verified": True,
-            "inputType": "name",
-        }
-
     if len(live_candidates) > 1:
-        raise HTTPException(status_code=409, detail={"message": "KIS 확인 후보가 여러 개입니다", "candidates": live_candidates})
+        raise HTTPException(status_code=409, detail={"message": "KIS 후보는 있으나 종목명이 정확히 일치하지 않습니다", "candidates": live_candidates})
 
-    raise HTTPException(status_code=404, detail="KIS 기준으로 입력 종목을 확정하지 못했습니다")
+    raise HTTPException(status_code=404, detail="KIS 종목명 검증 기준으로 입력 종목을 확정하지 못했습니다")
 
 
 def _to_float_amount(v) -> float:
@@ -1336,6 +1333,32 @@ def _shutdown_kis_refresh() -> None:
     _recommendations_stop.set()
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+WATCHLIST_ICON_MAP_PATH = REPO_ROOT / "backend" / "watchlist_icon_map.json"
+
+
+def _load_watchlist_icon_map() -> dict:
+    try:
+        with WATCHLIST_ICON_MAP_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {"stocks": {}, "sectors": {}, "fallback": "⬤"}
+
+
+def _icon_from_map(*, name: str | None, sector: str | None) -> str:
+    cfg = _load_watchlist_icon_map()
+    stock_map = cfg.get("stocks") if isinstance(cfg.get("stocks"), dict) else {}
+    sector_map = cfg.get("sectors") if isinstance(cfg.get("sectors"), dict) else {}
+
+    n = str(name or "").strip()
+    s = str(sector or "").strip()
+    if n and n in stock_map:
+        return str(stock_map[n])
+    if s and s in sector_map:
+        return str(sector_map[s])
+    return str(cfg.get("fallback") or "⬤")
 
 app.add_middleware(
     CORSMiddleware,
@@ -1582,22 +1605,35 @@ def get_watchlist(current_user=Depends(get_current_user)):
         ).all()
 
         _SIGNAL_TAGS = {"외국인수급", "기관수급"}
+        _META_TAG_HEADS = {"아이콘"}
 
         def _extract_sector(raw_tags) -> str:
-            import json as _json
-            tags = raw_tags
-            if isinstance(tags, str):
-                try:
-                    tags = _json.loads(tags)
-                except Exception:
-                    return "기타"
-            if not isinstance(tags, list) or not tags:
+            tags = _as_tag_list(raw_tags)
+            if not tags:
                 return "기타"
             for tag in tags:
                 segment = str(tag).split("|")[0].strip()
-                if segment not in _SIGNAL_TAGS:
+                if not segment:
+                    continue
+                if segment in _SIGNAL_TAGS:
+                    continue
+                if segment in _META_TAG_HEADS:
+                    continue
+                if segment == "테마자동":
+                    continue
+                if segment.endswith("시장"):
+                    continue
                     return segment
             return "기타수급"
+
+        def _extract_icon(raw_tags, *, name: str, sector: str) -> str:
+            tags = _as_tag_list(raw_tags)
+            for tag in tags:
+                if str(tag).startswith("아이콘|"):
+                    v = str(tag).split("|", 1)[1].strip()
+                    if v:
+                        return v
+            return _icon_from_map(name=name, sector=sector)
 
         items: list[dict] = []
         for stock_code, name, raw_tags in rows:
@@ -1606,6 +1642,7 @@ def get_watchlist(current_user=Depends(get_current_user)):
             except Exception:
                 price, change_rate = 0, 0.0
             score = _get_latest_score_total(db, stock_code)
+            sector = _extract_sector(raw_tags)
             items.append(
                 {
                     "name": name,
@@ -1613,7 +1650,8 @@ def get_watchlist(current_user=Depends(get_current_user)):
                     "price": float(price),
                     "changeRate": float(change_rate),
                     "score": int(score),
-                    "sector": _extract_sector(raw_tags),
+                    "sector": sector,
+                    "icon": _extract_icon(raw_tags, name=str(name or ""), sector=sector),
                 }
             )
 
@@ -1698,30 +1736,11 @@ def _resolve_stock_input_for_theme_update(db: Session, *, user_id: int, raw_inpu
     if not query:
         return None
 
-    # Prefer KIS-verified resolution. If unavailable, fall back to DB candidate.
+    # Always require KIS-verified resolution for theme auto-updates.
     try:
         return _resolve_stock_input_via_kis(db, user_id=user_id, raw_input=query)
     except Exception:
-        pass
-
-    candidates = _select_stock_name_candidates(db, query, limit=10)
-    if not candidates:
         return None
-
-    norm_query = _normalize_stock_name(query)
-    best_code = ""
-    best_name = ""
-    best_score = 0.0
-    for code, name in candidates:
-        score = _stock_name_similarity_score(norm_query, _normalize_stock_name(name))
-        if score > best_score:
-            best_score = score
-            best_code = str(code)
-            best_name = str(name)
-
-    if not best_code or best_score < 0.78:
-        return None
-    return {"code": best_code, "name": best_name, "market": "", "verified": False, "inputType": "name-db"}
 
 
 @app.post("/api/watchlist/theme-update")
@@ -1781,7 +1800,8 @@ def apply_watchlist_theme_update(payload: dict = Body(default={}), current_user=
                     .where(models.StockInterest.user_id == user_id, models.StockInterest.stock_code == code)
                 ).scalar_one_or_none()
 
-                new_tags = [f"{sector}|테마", "테마자동", f"{flow}수급", f"{market}시장"]
+                icon = _icon_from_map(name=name, sector=sector)
+                new_tags = [f"{sector}|테마", f"아이콘|{icon}", "테마자동", f"{flow}수급", f"{market}시장"]
                 if interest is None:
                     session.add(
                         models.StockInterest(

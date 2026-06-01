@@ -5,7 +5,7 @@ import { formatNumber, formatPercent } from '../lib/format'
 // ── Types ────────────────────────────────────────────────────────────
 type WatchItem = {
   name: string; code: string; price: number
-  changeRate: number; score: number; sector: string
+  changeRate: number; score: number; sector: string; icon?: string
 }
 type WatchlistResponse = { items: WatchItem[] }
 type StockRow = { name: string; code: string; price: number; changeRate: number; score: number }
@@ -73,13 +73,13 @@ function changeColor(changeRate: number): string {
 
   const t = (absRate - deadzone) / (3 - deadzone)
   if (clamped > 0) {
-    const sat = Math.round(45 + t * 30)
-    const light = Math.round(18 + t * 24)
+    const sat = Math.round(28 + t * 20)
+    const light = Math.round(16 + t * 14)
     return `hsl(141, ${sat}%, ${light}%)`
   }
 
-  const sat = Math.round(52 + t * 28)
-  const light = Math.round(17 + t * 28)
+  const sat = Math.round(30 + t * 18)
+  const light = Math.round(16 + t * 15)
   return `hsl(2, ${sat}%, ${light}%)`
 }
 
@@ -90,6 +90,26 @@ const STOCK_ABBR_OVERRIDES: Record<string, string> = {
   'LG에너지솔루션': '엘엔솔',
   '포스코퓨처엠': '포퓨엠',
   '하나금융지주': '하나금융',
+}
+
+const SECTOR_ICONS: Record<string, string> = {
+  '반도체': '💾',
+  'MLCC·기판': '🧩',
+  '로봇·AI': '🤖',
+  '자동차·로봇': '🚗',
+  '2차전지': '🔋',
+  '바이오': '🧬',
+  '금융': '🏦',
+  '우주항공': '🛰',
+  '전력기기': '⚡',
+  '조선': '🚢',
+  '외국인 코스피': '🌍',
+  '외국인 코스닥': '🌍',
+  '기관 코스피': '🏛',
+  '기관 코스닥': '🏛',
+  'LG그룹주': '🟣',
+  '인터넷': '🌐',
+  '피지컬AI': '🤖',
 }
 
 const CORE_SUFFIXES = [
@@ -192,6 +212,19 @@ function toKoreanSectorAbbr(sector: string): string {
     '바이오': '바이오',
   }
   return map[s] ?? abbreviateKoreanName(s, 6)
+}
+
+function stockIcon(item: WatchItem): string {
+  if (item.icon && item.icon.trim()) return item.icon.trim()
+
+  const name = (item.name || '').trim()
+  if (name === 'NAVER') return '🌐'
+
+  const sectorAbbr = toKoreanSectorAbbr(item.sector)
+  if (sectorAbbr && SECTOR_ICONS[sectorAbbr]) return SECTOR_ICONS[sectorAbbr]
+
+  if ((item.code || '').startsWith('0')) return '📈'
+  return '⬤'
 }
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -563,10 +596,12 @@ export function WatchlistPage() {
             {sec.stocks.map(({ id, x, y, w, h, item }) => {
               if (!item) return null
               const isHov     = hovered === id
-              const showTiny  = w >= 30 && h >= 22
+              const showTiny  = w >= 28 && h >= 20
               const showName  = w >= 62 && h >= 38
               const showFull  = w >= 84 && h >= 62
+              const showXL    = w >= 170 && h >= 110
               const shortName = abbreviateKoreanName(item.name)
+              const icon = stockIcon(item)
 
               return (
                 <div
@@ -609,9 +644,11 @@ export function WatchlistPage() {
 
                   {showTiny && !showName && (
                     <span style={{
-                      fontSize: '0.62rem', fontWeight: 800,
-                      color: 'rgba(255,255,255,0.84)',
-                      userSelect: 'none', letterSpacing: '0.01em',
+                      fontSize: '0.62rem',
+                      fontWeight: 800,
+                      color: 'rgba(255,255,255,0.86)',
+                      userSelect: 'none',
+                      letterSpacing: '0.01em',
                     }}>
                       {shortName}
                     </span>
@@ -620,7 +657,7 @@ export function WatchlistPage() {
                   {showName && (
                     <>
                       <span style={{
-                        fontSize: showFull ? '0.8rem' : '0.66rem',
+                        fontSize: showXL ? '1.14rem' : showFull ? '0.96rem' : '0.7rem',
                         fontWeight: 800,
                         color: 'rgba(255,255,255,0.92)',
                         textAlign: 'center',
@@ -630,25 +667,24 @@ export function WatchlistPage() {
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',
                         userSelect: 'none',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
                       }}>
+                        <span style={{ fontSize: showFull ? '0.85rem' : '0.72rem', lineHeight: 1 }}>
+                          {icon}
+                        </span>
                         {item.name}
                       </span>
 
                       {showFull && (
                         <>
                           <span style={{
-                            fontSize: '0.72rem', fontWeight: 700, marginTop: 2,
+                            fontSize: showXL ? '0.96rem' : '0.82rem', fontWeight: 700, marginTop: 3,
                             userSelect: 'none',
                             color: 'rgba(255,255,255,0.92)',
                           }}>
                             {item.price > 0 ? formatPercent(item.changeRate) : '—'}
-                          </span>
-                          <span style={{
-                            fontSize: '0.56rem', fontWeight: 700, marginTop: 2,
-                            userSelect: 'none',
-                            color: 'rgba(255,255,255,0.62)',
-                          }}>
-                            {shortName}
                           </span>
                         </>
                       )}
@@ -660,35 +696,6 @@ export function WatchlistPage() {
           </div>
         ))}
 
-        {/* Change-rate legend */}
-        {items.length > 0 && (
-          <div style={{
-            position: 'absolute', bottom: 8, right: 10,
-            display: 'flex', alignItems: 'center', gap: 4,
-            pointerEvents: 'none',
-          }}>
-            {[-3, -2, -1, 0, 1, 2, 3].map(v => (
-              <div
-                key={v}
-                style={{
-                  minWidth: 36,
-                  height: 18,
-                  borderRadius: 2,
-                  background: changeColor(v),
-                  border: '0.5px solid rgba(255,255,255,0.14)',
-                  color: 'rgba(255,255,255,0.9)',
-                  fontSize: '0.62rem',
-                  fontWeight: 700,
-                  display: 'grid',
-                  placeItems: 'center',
-                  padding: '0 4px',
-                }}
-              >
-                {v > 0 ? `+${v}%` : `${v}%`}
-              </div>
-            ))}
-          </div>
-        )}
       </div>
     </>
   )
