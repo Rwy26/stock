@@ -4,6 +4,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import secrets
 import string
 import threading
@@ -352,6 +353,12 @@ def _format_kis_account(cano: str | None, prdt: str | None) -> str | None:
         return c
     p = p.zfill(2)[:2]
     return f"{c}-{p}"
+
+
+def _normalize_stock_name(name: str | None) -> str:
+    """종목명 비교용 정규화: 공백/특수문자 제거 + 소문자."""
+    raw = str(name or "").strip().lower()
+    return re.sub(r"[^0-9a-zA-Z가-힣]", "", raw)
 
 
 def _to_float_amount(v) -> float:
@@ -1448,13 +1455,17 @@ def add_watchlist_item(payload: dict = Body(...), current_user=Depends(get_curre
 
     user_id = int(current_user.id)
     with apollo_db.session_scope() as session:
-        # In strict mode, validate code via KIS quote to ensure this is a real instrument.
-        if settings.kis_strict_price:
-            profile = session.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
-            if not (profile and getattr(profile, "app_key", None) and getattr(profile, "app_secret", None)):
-                raise HTTPException(status_code=400, detail="KIS 연결 필요")
+        profile = session.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
+        has_kis_profile = bool(profile and getattr(profile, "app_key", None) and getattr(profile, "app_secret", None))
+
+        # 신뢰성 강화: strict 모드에서는 반드시 KIS로 코드 유효성 확인.
+        if settings.kis_strict_price and not has_kis_profile:
+            raise HTTPException(status_code=400, detail="KIS 연결 필요")
+
+        quote = None
+        if has_kis_profile:
             try:
-                kis_client.inquire_price(
+                quote = kis_client.inquire_price(
                     app_key=str(profile.app_key),
                     app_secret=str(profile.app_secret),
                     is_paper=bool(getattr(profile, "is_paper", False)),
@@ -1464,12 +1475,22 @@ def add_watchlist_item(payload: dict = Body(...), current_user=Depends(get_curre
                     timeout_seconds=5.0,
                 )
             except Exception as exc:
-                raise HTTPException(status_code=400, detail=f"유효하지 않은 종목코드 또는 시세 조회 실패: {exc}") from exc
+                if settings.kis_strict_price:
+                    raise HTTPException(status_code=400, detail=f"유효하지 않은 종목코드 또는 시세 조회 실패: {exc}") from exc
 
         stock = session.execute(select(models.Stock).where(models.Stock.code == code)).scalar_one_or_none()
+        kis_name = str(getattr(quote, "name", "") or "").strip()
+        kis_market = str(getattr(quote, "market_name", "") or "").strip()
         if stock is None:
-            # Allow adding new codes; create a placeholder stock row.
-            session.add(models.Stock(code=code, name=code, market=None))
+            # KIS 종목명을 우선 사용하고, 없으면 placeholder 생성.
+            session.add(models.Stock(code=code, name=(kis_name or code), market=(kis_market or None)))
+        elif kis_name:
+            db_name = str(getattr(stock, "name", "") or "").strip()
+            # placeholder(code) 또는 불일치 명칭은 KIS 기준으로 자동 보정.
+            if (not db_name) or db_name == code or (_normalize_stock_name(db_name) != _normalize_stock_name(kis_name)):
+                stock.name = kis_name
+            if kis_market and (not getattr(stock, "market", None)):
+                stock.market = kis_market
 
         exists = session.execute(
             select(models.Watchlist.id).where(models.Watchlist.user_id == user_id, models.Watchlist.stock_code == code)
@@ -2903,30 +2924,9 @@ def refresh_token(current_user=Depends(get_current_user_for_refresh)):
             "id": int(current_user.id),
             "email": current_user.email,
             "nickname": current_user.nickname,
-            "role": current_user.role,
+            "role": getattr(current_user, "role", "user"),
         },
     }
-
-
-@app.post("/api/auth/logout")
-def logout(request: Request, current_user=Depends(get_current_user)):
-    """Record logout history (best-effort)."""
-
-    if apollo_db is None or models is None:
-        raise HTTPException(status_code=500, detail="DB module not available")
-
-    db: Session = apollo_db.get_session_factory()()
-    try:
-        try:
-            ip = request.client.host if request.client else None
-            user_agent = request.headers.get("user-agent")
-            db.add(models.LoginHistory(user_id=int(current_user.id), event="logout", ip=ip, user_agent=user_agent))
-            db.commit()
-        except Exception:
-            db.rollback()
-        return {"ok": True}
-    finally:
-        db.close()
 
 
 @app.get("/api/admin/users")
@@ -3554,6 +3554,157 @@ def upsert_profile(payload: dict = Body(...), current_user=Depends(get_current_u
         profile.is_paper = is_paper
 
     return {"ok": True}
+
+
+@app.post("/api/admin/stocks/validate-master")
+def admin_validate_stock_master(
+    payload: dict = Body(default={}),
+    _admin=Depends(require_admin),
+):
+    """DB 종목 마스터와 KIS 코드/종목명 정합성 점검 (옵션: 자동 보정)."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+
+    admin_id = int(_admin.id)
+    limit = max(1, min(int(payload.get("limit", 200)), 1000))
+    auto_fix = bool(payload.get("auto_fix", False))
+    codes = [str(c).strip() for c in (payload.get("codes") or []) if str(c).strip()]
+    raw_items = payload.get("items") or []
+
+    # 입력 name/code 쌍에서 코드 추출 + 중복코드 충돌 감지
+    pair_name_by_code: dict[str, str] = {}
+    pair_conflicts: list[dict] = []
+    if isinstance(raw_items, list):
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            c = str(item.get("code") or "").strip()
+            n = str(item.get("name") or "").strip()
+            if not c:
+                continue
+            prev = pair_name_by_code.get(c)
+            if prev is None:
+                pair_name_by_code[c] = n
+            elif _normalize_stock_name(prev) != _normalize_stock_name(n):
+                pair_conflicts.append({"code": c, "nameA": prev, "nameB": n})
+        if not codes:
+            codes = list(pair_name_by_code.keys())
+
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == admin_id)).scalar_one_or_none()
+        if not (profile and getattr(profile, "app_key", None) and getattr(profile, "app_secret", None)):
+            raise HTTPException(status_code=400, detail="관리자 KIS 연결 필요")
+
+        if codes:
+            # 주어진 codes를 전부 검사 (DB 미등록 코드 포함)
+            requested_codes = list(dict.fromkeys(codes))
+            stock_rows = db.execute(select(models.Stock).where(models.Stock.code.in_(requested_codes))).scalars().all()
+        else:
+            stock_rows = db.execute(select(models.Stock).order_by(models.Stock.code).limit(limit)).scalars().all()
+            requested_codes = [str(getattr(s, "code", "") or "").strip() for s in stock_rows]
+
+        stock_by_code = {str(getattr(s, "code", "") or "").strip(): s for s in stock_rows}
+
+        checked = 0
+        updated = 0
+        inserted = 0
+        mismatches: list[dict] = []
+        invalid_codes: list[dict] = []
+        missing_in_db: list[dict] = []
+        input_name_mismatches: list[dict] = []
+        unnamed_from_kis: list[dict] = []
+
+        for code in requested_codes:
+            if not code:
+                continue
+            checked += 1
+
+            stock = stock_by_code.get(code)
+            db_name = str(getattr(stock, "name", "") or "").strip() if stock is not None else ""
+
+            try:
+                quote = kis_client.inquire_price(
+                    app_key=str(profile.app_key),
+                    app_secret=str(profile.app_secret),
+                    is_paper=bool(getattr(profile, "is_paper", False)),
+                    code=code,
+                    live_base_url=settings.kis_live_base_url,
+                    paper_base_url=settings.kis_paper_base_url,
+                    timeout_seconds=5.0,
+                )
+            except Exception as exc:
+                invalid_codes.append({
+                    "code": code,
+                    "dbName": db_name,
+                    "dbMissing": stock is None,
+                    "error": str(exc),
+                })
+                continue
+
+            kis_name = str(getattr(quote, "name", "") or "").strip()
+            if not kis_name:
+                unnamed_from_kis.append({"code": code, "dbName": db_name})
+                continue
+
+            input_name = pair_name_by_code.get(code)
+            if input_name and _normalize_stock_name(input_name) != _normalize_stock_name(kis_name):
+                input_name_mismatches.append({
+                    "code": code,
+                    "inputName": input_name,
+                    "kisName": kis_name,
+                })
+
+            if stock is None:
+                missing_in_db.append({"code": code, "kisName": kis_name})
+                if auto_fix:
+                    market_name = str(getattr(quote, "market_name", "") or "").strip() or None
+                    new_stock = models.Stock(code=code, name=kis_name, market=market_name)
+                    db.add(new_stock)
+                    stock_by_code[code] = new_stock
+                    inserted += 1
+                continue
+
+            if _normalize_stock_name(db_name) != _normalize_stock_name(kis_name):
+                mismatch = {
+                    "code": code,
+                    "dbName": db_name,
+                    "kisName": kis_name,
+                    "autoFixed": False,
+                }
+                if auto_fix:
+                    stock.name = kis_name
+                    kis_market = str(getattr(quote, "market_name", "") or "").strip()
+                    if kis_market and (not getattr(stock, "market", None)):
+                        stock.market = kis_market
+                    mismatch["autoFixed"] = True
+                    updated += 1
+                mismatches.append(mismatch)
+
+        if auto_fix and (updated > 0 or inserted > 0):
+            db.commit()
+
+        return {
+            "ok": True,
+            "checked": checked,
+            "updated": updated,
+            "inserted": inserted,
+            "autoFix": auto_fix,
+            "mismatchCount": len(mismatches),
+            "invalidCount": len(invalid_codes),
+            "missingInDbCount": len(missing_in_db),
+            "inputPairConflictCount": len(pair_conflicts),
+            "inputNameMismatchCount": len(input_name_mismatches),
+            "unnamedFromKisCount": len(unnamed_from_kis),
+            "mismatches": mismatches,
+            "invalidCodes": invalid_codes,
+            "missingInDb": missing_in_db,
+            "inputPairConflicts": pair_conflicts,
+            "inputNameMismatches": input_name_mismatches,
+            "unnamedFromKis": unnamed_from_kis,
+        }
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------

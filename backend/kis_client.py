@@ -22,10 +22,12 @@ class KisError(RuntimeError):
 @dataclass(frozen=True)
 class KisQuote:
     code: str
+    name: str
     price: float
     change: float
     change_rate: float
     as_of: str
+    market_name: str = ""
     volume: int = 0
     trading_value: float = 0.0
     trade_strength: float = 0.0
@@ -167,6 +169,21 @@ def inquire_price(
 
     output = data.get("output") or {}
 
+    name = str(
+        output.get("hts_kor_isnm")
+        or output.get("HTS_KOR_ISNM")
+        or output.get("prdt_name")
+        or output.get("PRDT_NAME")
+        or ""
+    ).strip()
+    market_name = str(
+        output.get("bstp_kor_isnm")
+        or output.get("BSTP_KOR_ISNM")
+        or output.get("rprs_mrkt_kor_name")
+        or output.get("RPRS_MRKT_KOR_NAME")
+        or ""
+    ).strip()
+
     def _to_float(value: Any) -> float:
         try:
             return float(str(value).replace(",", ""))
@@ -186,10 +203,12 @@ def inquire_price(
 
     return KisQuote(
         code=code,
+        name=name,
         price=price,
         change=change,
         change_rate=change_rate,
         as_of=str(as_of),
+        market_name=market_name,
         volume=volume,
         trading_value=trading_value,
         trade_strength=trade_strength,
