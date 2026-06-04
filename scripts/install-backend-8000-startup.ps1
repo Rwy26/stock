@@ -1,7 +1,9 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
   [string]$StartupDir = '',
-  [string]$EntryName = 'MOON-STOCK-Backend-8000.cmd'
+  [string]$EntryName = 'MOON-STOCK-Backend-8000.cmd',
+  [switch]$EnableLog = $false,
+  [string]$LogDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,10 +24,25 @@ if (-not (Test-Path $batchPath)) {
 }
 
 $entryPath = Join-Path $StartupDir $EntryName
-$entryContent = @(
-  '@echo off',
-  ('call "{0}" >nul 2>&1' -f $batchPath)
-)
+
+if ($EnableLog) {
+  if (-not $LogDir) {
+    $LogDir = Join-Path $PWD 'logs'
+  }
+  $entryContent = @(
+    '@echo off',
+    ('if not exist "{0}" mkdir "{0}"' -f $LogDir),
+    'for /f %%i in (''powershell -NoProfile -Command "Get-Date -Format yyyyMMdd"'') do set "LOG_DATE=%%i"',
+    ('set "LOG_FILE={0}\\startup-backend-8000-%%LOG_DATE%%.log"' -f $LogDir),
+    'echo [%date% %time%] startup-run>>"%LOG_FILE%"',
+    ('call "{0}" >>"%%LOG_FILE%%" 2>&1' -f $batchPath)
+  )
+} else {
+  $entryContent = @(
+    '@echo off',
+    ('call "{0}" >nul 2>&1' -f $batchPath)
+  )
+}
 
 if ($PSCmdlet.ShouldProcess($entryPath, 'Create startup launcher')) {
   [System.IO.File]::WriteAllLines($entryPath, $entryContent, [System.Text.UTF8Encoding]::new($false))

@@ -3,9 +3,12 @@ param(
   [string]$KrxId,
   [string]$KrxPw,
   [ValidateSet('BackendEnv', 'UserEnv', 'Both')]
-  [string]$Target = 'Both',
+  [string]$Target = 'BackendEnv',
   [string]$BackendEnvPath = '',
-  [switch]$NoPrompt = $false
+  [switch]$NoPrompt = $false,
+  [switch]$FromStdin = $false,
+  [Parameter(ValueFromPipeline = $true)]
+  [string[]]$StdinLine
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,6 +59,60 @@ function Upsert-EnvLine([string[]]$lines, [string]$key, [string]$value) {
   return ,$out.ToArray()
 }
 
+function Read-ValuesFromStdin {
+  $raw = ''
+  if ($StdinLine -and $StdinLine.Count -gt 0) {
+    $raw = ($StdinLine -join "`n")
+  } else {
+    $raw = [Console]::In.ReadToEnd()
+  }
+  if ([string]::IsNullOrWhiteSpace($raw)) {
+    return @{}
+  }
+
+  $raw = $raw.Trim()
+
+  # 1) JSON: {"KRX_ID":"...","KRX_PW":"..."}
+  if ($raw.StartsWith('{')) {
+    try {
+      $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+      return @{
+        KRX_ID = ([string]$obj.KRX_ID)
+        KRX_PW = ([string]$obj.KRX_PW)
+      }
+    } catch {
+      throw 'Failed to parse STDIN JSON. Expected {"KRX_ID":"...","KRX_PW":"..."}.'
+    }
+  }
+
+  # 2) ENV lines: KRX_ID=... / KRX_PW=...
+  $out = @{}
+  foreach ($line in ($raw -split "`r?`n")) {
+    $s = [string]$line
+    if ([string]::IsNullOrWhiteSpace($s)) { continue }
+    $s = $s.Trim()
+    if ($s.StartsWith('#')) { continue }
+    $idx = $s.IndexOf('=')
+    if ($idx -le 0) { continue }
+    $k = $s.Substring(0, $idx).Trim()
+    $v = $s.Substring($idx + 1).Trim()
+    if ($k -in @('KRX_ID', 'KRX_PW')) {
+      $out[$k] = $v
+    }
+  }
+  return $out
+}
+
+if ($FromStdin) {
+  $stdinVals = Read-ValuesFromStdin
+  if (-not $KrxId -and $stdinVals.ContainsKey('KRX_ID')) {
+    $KrxId = [string]$stdinVals['KRX_ID']
+  }
+  if (-not $KrxPw -and $stdinVals.ContainsKey('KRX_PW')) {
+    $KrxPw = [string]$stdinVals['KRX_PW']
+  }
+}
+
 if (-not $KrxId) {
   $KrxId = [Environment]::GetEnvironmentVariable('KRX_ID', 'Process')
 }
@@ -75,7 +132,7 @@ if (-not $NoPrompt) {
 }
 
 if (-not $KrxId -or -not $KrxPw) {
-  throw 'KRX_ID and KRX_PW are required. Pass parameters, set env vars, or run without -NoPrompt to enter them interactively.'
+  throw 'KRX_ID and KRX_PW are required. Pass parameters, set env vars, use -FromStdin, or run without -NoPrompt to enter them interactively.'
 }
 
 if ($Target -in @('BackendEnv', 'Both')) {
