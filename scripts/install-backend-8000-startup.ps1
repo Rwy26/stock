@@ -33,9 +33,9 @@ if ($EnableLog) {
     '@echo off',
     ('if not exist "{0}" mkdir "{0}"' -f $LogDir),
     'for /f %%i in (''powershell -NoProfile -Command "Get-Date -Format yyyyMMdd"'') do set "LOG_DATE=%%i"',
-    ('set "LOG_FILE={0}\\startup-backend-8000-%%LOG_DATE%%.log"' -f $LogDir),
+    ('set "LOG_FILE={0}\\startup-backend-8000-%LOG_DATE%.log"' -f $LogDir),
     'echo [%date% %time%] startup-run>>"%LOG_FILE%"',
-    ('call "{0}" >>"%%LOG_FILE%%" 2>&1' -f $batchPath)
+    ('call "{0}" >>"%LOG_FILE%" 2>&1' -f $batchPath)
   )
 } else {
   $entryContent = @(
