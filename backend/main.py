@@ -1386,7 +1386,7 @@ def _startup_kis_refresh() -> None:
     try:
         if apollo_db is not None and models is not None:
             engine = apollo_db.get_engine()
-            models.AutomationEngineLog.__table__.create(bind=engine, checkfirst=True)
+            models.Base.metadata.create_all(bind=engine, checkfirst=True)
     except Exception:
         pass
 
@@ -1697,7 +1697,7 @@ def get_watchlist(current_user=Depends(get_current_user)):
                     continue
                 if segment.endswith("시장"):
                     continue
-                    return segment
+                return segment
             return "기타수급"
 
         def _extract_icon(raw_tags, *, name: str, sector: str) -> str:
