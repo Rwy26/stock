@@ -46,6 +46,15 @@ interface LeadStock {
   change14d: number
 }
 
+interface DominanceData {
+  prices: number[]
+  bbUpper: (number | null)[]
+  bbMiddle: (number | null)[]
+  bbLower: (number | null)[]
+  rsi: number[]
+  signals: { idx: number; type: 'buy' | 'sell' }[]
+}
+
 interface SectorItem {
   sector: string
   score: number
@@ -59,6 +68,7 @@ interface SectorItem {
   componentNames?: string[]
   trends?: { tags: string[]; theme: string }
   leadStocks?: LeadStock[]
+  dominance?: DominanceData | null
 }
 
 interface RotationData {
@@ -101,6 +111,16 @@ const SCORE_COLOR = (score: number) => {
 
 const STARS = (n: number) =>
   '★'.repeat(n) + '☆'.repeat(5 - n)
+
+// 추이 화살표: bil(억원) 또는 pct(%) 기준
+function trendArrow(v: number, type: 'bil' | 'pct'): { arrow: string; color: string } {
+  const [big, small] = type === 'bil' ? [500, 50] : [10, 2]
+  if (v >  big) return { arrow: '↑↑', color: '#34d399' }
+  if (v >  small) return { arrow: '↑',  color: '#86efac' }
+  if (v > -small) return { arrow: '→',  color: 'rgba(255,255,255,0.3)' }
+  if (v > -big)  return { arrow: '↓',  color: '#fca5a5' }
+  return             { arrow: '↓↓', color: '#f87171' }
+}
 
 const fmtBil = (v: number) => {
   if (v === 0) return '—'
@@ -150,6 +170,130 @@ function BreakdownBars({ bd }: { bd: SectorBreakdown }) {
   )
 }
 
+// ─── Dominance Chart (BB + RSI overlay) ──────────────────────────────────────
+// 볼린저 밴드 위에 RSI를 이중축으로 중첩. 좌축=가격(BB), 우축=RSI(0~100)
+// 매수신호(▲): 가격≤BB하단*1.01 AND RSI≤35 / 매도신호(▼): 가격≥BB상단*0.99 AND RSI≥65
+
+function DominanceChart({ data }: { data: DominanceData }) {
+  const W = 200, H = 46, PX = 2, PY = 3
+  const n = data.prices.length
+  if (n < 4) return null
+
+  const validU = data.bbUpper.filter((x): x is number => x != null)
+  const validL = data.bbLower.filter((x): x is number => x != null)
+  if (validU.length < 2 || validL.length < 2) return null
+
+  const priceMin   = Math.min(...validL)
+  const priceMax   = Math.max(...validU)
+  const priceRange = priceMax - priceMin || 1
+
+  const toX  = (i: number) => PX + (i / (n - 1)) * (W - 2 * PX)
+  const toYP = (v: number) => PY + (1 - (v - priceMin) / priceRange) * (H - 2 * PY)
+  const toYR = (r: number) => PY + (1 - r / 100) * (H - 2 * PY)
+
+  // BB 채움 다각형: 상단 순방향 + 하단 역방향
+  const fillPts: string[] = []
+  data.bbUpper.forEach((v, i) => { if (v != null) fillPts.push(`${toX(i)},${toYP(v)}`) })
+  for (let i = n - 1; i >= 0; i--) {
+    const v = data.bbLower[i]
+    if (v != null) fillPts.push(`${toX(i)},${toYP(v)}`)
+  }
+
+  // 경로 빌더 (null 구간 건너뜀)
+  const makePath = (arr: (number | null)[], toY: (v: number) => number) => {
+    let d = ''
+    arr.forEach((v, i) => {
+      if (v == null) return
+      d += d ? ` L${toX(i)},${toY(v)}` : `M${toX(i)},${toY(v)}`
+    })
+    return d
+  }
+
+  const pricePath = data.prices.map((v, i) =>
+    `${i === 0 ? 'M' : ' L'}${toX(i)},${toYP(v)}`).join('')
+  const rsiPath = data.rsi.map((v, i) =>
+    `${i === 0 ? 'M' : ' L'}${toX(i)},${toYR(v)}`).join('')
+
+  return (
+    <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`}
+      style={{ display: 'block' }}
+      preserveAspectRatio="none">
+      {/* BB 채움 */}
+      {fillPts.length > 3 && (
+        <polygon points={fillPts.join(' ')} fill="rgba(255,255,255,0.05)" />
+      )}
+      {/* RSI 70/30 가이드 (이중축 우측 스케일) */}
+      <line x1={PX} y1={toYR(70)} x2={W - PX} y2={toYR(70)}
+        stroke="rgba(249,115,22,0.4)" strokeWidth={0.7} strokeDasharray="3,3" />
+      <line x1={PX} y1={toYR(30)} x2={W - PX} y2={toYR(30)}
+        stroke="rgba(96,165,250,0.4)" strokeWidth={0.7} strokeDasharray="3,3" />
+      {/* RSI 과매수/과매도 배경 하이라이트 */}
+      <rect x={PX} y={PY} width={W - 2 * PX} height={toYR(70) - PY}
+        fill="rgba(249,115,22,0.04)" />
+      <rect x={PX} y={toYR(30)} width={W - 2 * PX} height={H - PY - toYR(30)}
+        fill="rgba(96,165,250,0.04)" />
+      {/* BB 밴드 */}
+      <path d={makePath(data.bbUpper, toYP)} fill="none"
+        stroke="rgba(248,113,113,0.55)" strokeWidth={0.9} strokeDasharray="3,2" />
+      <path d={makePath(data.bbLower, toYP)} fill="none"
+        stroke="rgba(96,165,250,0.55)" strokeWidth={0.9} strokeDasharray="3,2" />
+      <path d={makePath(data.bbMiddle, toYP)} fill="none"
+        stroke="rgba(255,255,255,0.18)" strokeWidth={0.7} strokeDasharray="2,3" />
+      {/* 가격선 (좌축 스케일) */}
+      <path d={pricePath} fill="none" stroke="rgba(255,255,255,0.72)" strokeWidth={1.4}
+        strokeLinecap="round" strokeLinejoin="round" />
+      {/* RSI 오버레이 (우축 스케일, twinx) */}
+      <path d={rsiPath} fill="none" stroke="rgba(167,139,250,0.78)" strokeWidth={1.0}
+        strokeLinecap="round" strokeLinejoin="round" />
+      {/* 매수/매도 시그널 마커 */}
+      {data.signals.map((sig, si) => {
+        if (sig.idx >= n) return null
+        const sx = toX(sig.idx)
+        const sy = toYP(data.prices[sig.idx])
+        return sig.type === 'buy'
+          ? <polygon key={si}
+              points={`${sx},${sy - 5} ${sx - 3.5},${sy + 2} ${sx + 3.5},${sy + 2}`}
+              fill="#4ade80" opacity={0.92} />
+          : <polygon key={si}
+              points={`${sx},${sy + 5} ${sx - 3.5},${sy - 2} ${sx + 3.5},${sy - 2}`}
+              fill="#f87171" opacity={0.92} />
+      })}
+    </svg>
+  )
+}
+
+// ─── Decline Reason ──────────────────────────────────────────────────────────
+
+interface DeclineCause { label: string; color: string }
+
+function getSectorCauses(item: SectorItem): DeclineCause[] {
+  const causes: DeclineCause[] = []
+  const { breakdown: bd, detail: dt, score } = item
+
+  if (score >= 55) {
+    // 상승 원인
+    if (dt.foreignBil > 0 && bd.foreign >= 55)
+      causes.push({ label: '외국인 매집', color: '#34d399' })
+    if (dt.institutionalBil > 0 && bd.institutional >= 55)
+      causes.push({ label: '기관 매집', color: '#60a5fa' })
+    if (dt.volumeSurgePct >= 20)
+      causes.push({ label: '거래대금 급증', color: '#fbbf24' })
+    if (bd.macro >= 65)
+      causes.push({ label: '매크로 순풍', color: '#a78bfa' })
+  } else {
+    // 하락 원인
+    if (dt.foreignBil < 0 && bd.foreign < 45)
+      causes.push({ label: '외국인 순매도', color: '#f87171' })
+    if (dt.institutionalBil < 0 && bd.institutional < 45)
+      causes.push({ label: '기관 순매도', color: '#fb923c' })
+    if (dt.volumeSurgePct < -20)
+      causes.push({ label: '거래대금 급감', color: '#94a3b8' })
+    if (bd.macro < 35)
+      causes.push({ label: '매크로 역풍', color: '#a78bfa' })
+  }
+  return causes
+}
+
 // ─── Sector Card ─────────────────────────────────────────────────────────────
 
 function SectorCard({ item, rank, expanded, onToggle }: {
@@ -175,7 +319,7 @@ function SectorCard({ item, rank, expanded, onToggle }: {
       }}
     >
       {/* Header row */}
-      <div style={{ display: 'grid', gridTemplateColumns: '28px 1fr auto auto auto', gap: 10, alignItems: 'center' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '28px auto 1fr auto auto auto', gap: 8, alignItems: 'center' }}>
         {/* Rank */}
         <span style={{
           fontSize: 13, fontWeight: 700, color: rank <= 3 ? '#fbbf24' : 'rgba(255,255,255,0.4)',
@@ -183,16 +327,31 @@ function SectorCard({ item, rank, expanded, onToggle }: {
         }}>#{rank}</span>
 
         {/* Sector name */}
-        <span style={{ fontSize: 15, fontWeight: 600, color: '#f1f5f9' }}>{item.sector}</span>
+        <span style={{ fontSize: 15, fontWeight: 600, color: '#f1f5f9', whiteSpace: 'nowrap' }}>{item.sector}</span>
 
-        {/* Lifecycle badge */}
-        <span style={{
-          fontSize: 11, padding: '3px 8px', borderRadius: 99,
-          background: lcBg, color: lcColor, border: `1px solid ${lcColor}40`,
-          whiteSpace: 'nowrap',
-        }}>
-          {item.lifecycle}
-        </span>
+        {/* Dominance chart (BB+RSI 이중축) */}
+        <div style={{ minWidth: 60, overflow: 'hidden', height: 46, display: 'flex', alignItems: 'center' }}>
+          {item.dominance && <DominanceChart data={item.dominance} />}
+        </div>
+
+        {/* Cause tags (생애주기 배지 자리) */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, alignItems: 'flex-start', justifyContent: 'center' }}>
+          {getSectorCauses(item).length > 0
+            ? getSectorCauses(item).map(c => (
+                <span key={c.label} style={{
+                  fontSize: 10, padding: '2px 8px', borderRadius: 99,
+                  background: c.color + '18', color: c.color,
+                  border: `1px solid ${c.color}40`,
+                  whiteSpace: 'nowrap', lineHeight: 1.5,
+                }}>{c.label}</span>
+              ))
+            : <span style={{
+                fontSize: 11, padding: '3px 8px', borderRadius: 99,
+                background: lcBg, color: lcColor, border: `1px solid ${lcColor}40`,
+                whiteSpace: 'nowrap',
+              }}>{item.lifecycle}</span>
+          }
+        </div>
 
         {/* Stars */}
         <span style={{ fontSize: 13, color: '#fbbf24', letterSpacing: -2 }}>{STARS(item.stars)}</span>
@@ -213,26 +372,22 @@ function SectorCard({ item, rank, expanded, onToggle }: {
         display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
         gap: 8, marginTop: 10, fontSize: 11,
       }}>
-        <div style={{ color: 'rgba(255,255,255,0.5)' }}>
-          외국인 <span style={{ color: item.detail.foreignBil >= 0 ? '#34d399' : '#f87171' }}>
-            {fmtBil(item.detail.foreignBil)}
-          </span>
-        </div>
-        <div style={{ color: 'rgba(255,255,255,0.5)' }}>
-          기관 <span style={{ color: item.detail.institutionalBil >= 0 ? '#34d399' : '#f87171' }}>
-            {fmtBil(item.detail.institutionalBil)}
-          </span>
-        </div>
-        <div style={{ color: 'rgba(255,255,255,0.5)' }}>
-          모멘텀 <span style={{ color: item.detail.momentumPct >= 0 ? '#34d399' : '#f87171' }}>
-            {fmtPct(item.detail.momentumPct)}
-          </span>
-        </div>
-        <div style={{ color: 'rgba(255,255,255,0.5)' }}>
-          거래대금 <span style={{ color: item.detail.volumeSurgePct >= 0 ? '#34d399' : '#f87171' }}>
-            {fmtPct(item.detail.volumeSurgePct)}
-          </span>
-        </div>
+        {[['외국인', item.detail.foreignBil, 'bil'], ['기관', item.detail.institutionalBil, 'bil'],
+          ['모멘텀', item.detail.momentumPct, 'pct'], ['거래대금', item.detail.volumeSurgePct, 'pct']
+         ].map(([label, val, type]) => {
+           const v = val as number
+           const t = type as 'bil' | 'pct'
+           const valStr = t === 'bil' ? fmtBil(v) : fmtPct(v)
+           const valColor = v >= 0 ? '#34d399' : '#f87171'
+           const { arrow, color: arrowColor } = trendArrow(v, t)
+           return (
+             <div key={label as string} style={{ color: 'rgba(255,255,255,0.5)' }}>
+               {label as string}{' '}
+               <span style={{ color: valColor }}>{valStr}</span>
+               {' '}<span style={{ fontSize: 11, color: arrowColor, fontWeight: 700 }}>{arrow}</span>
+             </div>
+           )
+         })}
       </div>
 
       {/* Expanded breakdown */}

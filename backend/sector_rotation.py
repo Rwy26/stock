@@ -117,6 +117,46 @@ def _normalize(mapping: Dict[str, float]) -> Dict[str, float]:
     return {k: round((v - mn) / (mx - mn) * 100, 1) for k, v in mapping.items()}
 
 
+def _compute_bb(
+    prices: List[float], period: int = 20, mult: float = 2.0
+) -> Tuple[List[Optional[float]], List[Optional[float]], List[Optional[float]]]:
+    """볼린저 밴드 (상단, 중앙, 하단) 반환."""
+    n = len(prices)
+    upper:  List[Optional[float]] = [None] * n
+    middle: List[Optional[float]] = [None] * n
+    lower:  List[Optional[float]] = [None] * n
+    for i in range(period - 1, n):
+        win  = prices[i - period + 1: i + 1]
+        mean = sum(win) / period
+        std  = math.sqrt(sum((x - mean) ** 2 for x in win) / period)
+        middle[i] = round(mean, 3)
+        upper[i]  = round(mean + mult * std, 3)
+        lower[i]  = round(mean - mult * std, 3)
+    return upper, middle, lower
+
+
+def _compute_rsi(prices: List[float], period: int = 14) -> List[float]:
+    """Wilder's Smoothed RSI."""
+    n = len(prices)
+    result = [50.0] * n
+    if n <= period:
+        return result
+    gains  = [max(0.0, prices[i] - prices[i - 1]) for i in range(1, n)]
+    losses = [max(0.0, prices[i - 1] - prices[i]) for i in range(1, n)]
+    avg_g  = sum(gains[:period])  / period
+    avg_l  = sum(losses[:period]) / period
+
+    def _val(g: float, l: float) -> float:
+        return 100.0 if l < 1e-10 else round(100.0 - 100.0 / (1.0 + g / l), 1)
+
+    result[period] = _val(avg_g, avg_l)
+    for i in range(period, n - 1):
+        avg_g = (avg_g * (period - 1) + gains[i])  / period
+        avg_l = (avg_l * (period - 1) + losses[i]) / period
+        result[i + 1] = _val(avg_g, avg_l)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Layer 1: Macro Score
 # ---------------------------------------------------------------------------
@@ -317,20 +357,22 @@ def _get_flow_scores() -> Dict[str, Dict[str, float]]:
 def _get_pv_scores() -> Dict[str, Dict[str, float]]:
     fallback = {
         s: {"momentum": 50.0, "volume": 50.0,
-            "momentum_pct": 0.0, "volume_surge_pct": 0.0, "top_stocks": []}
+            "momentum_pct": 0.0, "volume_surge_pct": 0.0, "top_stocks": [],
+            "dominance": None}
         for s in SECTORS
     }
     try:
         from pykrx import stock as pstock  # type: ignore
 
         today = date.today()
-        start = today - timedelta(days=50)
+        start = today - timedelta(days=90)
         start_str = _date_str(start)
         end_str = _date_str(today)
 
         raw_mom: Dict[str, float] = {}
         raw_vol: Dict[str, float] = {}
         sector_top3: Dict[str, list] = {}
+        code_close_series: Dict[str, List[float]] = {}
 
         for sector, codes in SECTORS.items():
             moms, vols = [], []
@@ -341,6 +383,7 @@ def _get_pv_scores() -> Dict[str, Dict[str, float]]:
                     if df is None or df.empty or len(df) < 5:
                         continue
                     close = df["종가"]
+                    code_close_series[code] = [float(x) for x in close.values]
                     volume = df["거래량"] * df["종가"]
 
                     n = min(20, len(close) - 1)
@@ -379,6 +422,54 @@ def _get_pv_scores() -> Dict[str, Dict[str, float]]:
         mom_norm = _normalize(raw_mom)
         vol_norm = _normalize(raw_vol)
 
+        # ── Dominance: BB(20) + RSI(14) 섹터 평균 정규화 가격 기준 ──────────────
+        sector_dominance: Dict[str, Optional[dict]] = {}
+        for sector, codes in SECTORS.items():
+            series_list = [code_close_series[c] for c in codes if c in code_close_series]
+            dom = None
+            if series_list:
+                min_len = min(len(s) for s in series_list)
+                if min_len >= 22:
+                    # 각 종목을 첫 가격=100 으로 정규화 후 평균
+                    normed = [
+                        [100.0 * v / s[0] for v in s[:min_len]]
+                        for s in series_list
+                    ]
+                    avg_px = [
+                        sum(row[i] for row in normed) / len(normed)
+                        for i in range(min_len)
+                    ]
+                    bb_u, bb_m, bb_l = _compute_bb(avg_px)
+                    rsi_v = _compute_rsi(avg_px)
+
+                    valid_idx = [i for i in range(len(avg_px)) if bb_u[i] is not None]
+                    last_n = valid_idx[-30:]
+                    if len(last_n) >= 4:
+                        p_out = [round(avg_px[i], 3) for i in last_n]
+                        u_out: List[Optional[float]] = [bb_u[i] for i in last_n]
+                        m_out: List[Optional[float]] = [bb_m[i] for i in last_n]
+                        l_out: List[Optional[float]] = [bb_l[i] for i in last_n]
+                        r_out = [round(rsi_v[i], 1) for i in last_n]
+                        signals = []
+                        for j, i in enumerate(last_n):
+                            u_v, l_v = bb_u[i], bb_l[i]
+                            if u_v is None or l_v is None:
+                                continue
+                            p, r = avg_px[i], rsi_v[i]
+                            if p <= l_v * 1.01 and r <= 35:
+                                signals.append({"idx": j, "type": "buy"})
+                            elif p >= u_v * 0.99 and r >= 65:
+                                signals.append({"idx": j, "type": "sell"})
+                        dom = {
+                            "prices":   p_out,
+                            "bbUpper":  u_out,
+                            "bbMiddle": m_out,
+                            "bbLower":  l_out,
+                            "rsi":      r_out,
+                            "signals":  signals,
+                        }
+            sector_dominance[sector] = dom
+
         return {
             sector: {
                 "momentum":          mom_norm.get(sector, 50.0),
@@ -386,6 +477,7 @@ def _get_pv_scores() -> Dict[str, Dict[str, float]]:
                 "momentum_pct":      round(raw_mom.get(sector, 0.0), 2),
                 "volume_surge_pct":  round(raw_vol.get(sector, 0.0), 2),
                 "top_stocks":        sector_top3.get(sector, []),
+                "dominance":         sector_dominance.get(sector),
             }
             for sector in SECTORS
         }
@@ -415,7 +507,9 @@ def _lifecycle(score: float, foreign: float, institutional: float) -> Tuple[str,
     # 42~70 중간 구간
     if institutional >= 55:
         return "기관매집", 2
-    return "외국인유입", 3
+    if foreign >= 55:
+        return "외국인유입", 3
+    return "관망", 1  # 외국인·기관 모두 매도 우위 → 관망
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +594,7 @@ def compute_sector_rotation(force: bool = False) -> dict:
             "componentNames": [CODE_NAMES.get(c, c) for c in SECTOR_ROLES.get(sector, {}).get("소부장", SECTORS[sector][2:4])[:2]],
             "trends":         SECTOR_TRENDS.get(sector, {"tags": [], "theme": ""}),
             "leadStocks":     pv.get("top_stocks", []),
+            "dominance":      pv.get("dominance"),
         })
 
     sectors_out.sort(key=lambda x: x["score"], reverse=True)
