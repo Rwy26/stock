@@ -168,68 +168,152 @@ def _macro_score() -> Tuple[float, dict]:
     try:
         import yfinance as yf
 
-        raw = yf.download(
-            "^TNX DX-Y.NYB ^VIX ^IXIC KRW=X CL=F",
+        # 일봉 60일 (추세 계산용)
+        raw_d = yf.download(
+            "^TNX DX-Y.NYB ^VIX ^IXIC KRW=X CL=F ^KS11",
             period="60d", interval="1d", progress=False,
         )
-        closes = raw["Close"]
+        closes_d = raw_d["Close"]
 
-        tnx    = closes["^TNX"].dropna()
-        dxy    = closes["DX-Y.NYB"].dropna()
-        vix    = closes["^VIX"].dropna()
-        nasdaq = closes["^IXIC"].dropna()
-        krw    = closes["KRW=X"].dropna()  # USD per 1 KRW (ex. 1380.5)
-        oil    = closes["CL=F"].dropna()   # WTI 원유 선물 (USD/배럴)
+        # 1시간봉 5일 (단기 추이용)
+        raw_h = yf.download(
+            "^TNX DX-Y.NYB ^VIX ^IXIC KRW=X CL=F",
+            period="5d", interval="1h", progress=False,
+        )
+        closes_h = raw_h["Close"]
 
-        def _dir(series, n: int = 20) -> float:
-            if len(series) < n + 1:
+        def _last(s) -> Optional[float]:
+            s2 = s.dropna()
+            return float(s2.iloc[-1]) if len(s2) > 0 else None
+
+        def _series(closes, key: str, n: int = 30) -> List[float]:
+            try:
+                s = closes[key].dropna()
+                return [round(float(v), 4) for v in s.iloc[-n:].values]
+            except Exception:
+                return []
+
+        def _chg(s, n: int) -> float:
+            s2 = s.dropna()
+            if len(s2) < n + 1:
                 return 0.0
-            now_ = _safe(series.iloc[-1])
-            past = _safe(series.iloc[-n])
-            return (now_ - past) / (abs(past) + 1e-9)
+            v0, v1 = _safe(s2.iloc[-n - 1]), _safe(s2.iloc[-1])
+            return round((v1 - v0) / (abs(v0) + 1e-9) * 100, 2)
 
-        tnx_dir    = _dir(tnx)
-        dxy_dir    = _dir(dxy)
-        nasdaq_dir = _dir(nasdaq)
-        vix_val    = _safe(vix.iloc[-1]) if len(vix) > 0 else 20.0
+        tnx    = closes_d["^TNX"].dropna()
+        dxy    = closes_d["DX-Y.NYB"].dropna()
+        vix    = closes_d["^VIX"].dropna()
+        nasdaq = closes_d["^IXIC"].dropna()
+        krw    = closes_d["KRW=X"].dropna()
+        oil    = closes_d["CL=F"].dropna()
+
+        # VKOSPI: ^KS11 없을 수 있어 별도 다운로드
+        try:
+            vkospi_raw = yf.download("^VKOSPI", period="60d", interval="1d", progress=False)
+            vkospi_s   = vkospi_raw["Close"].dropna()
+        except Exception:
+            vkospi_s = None
+
+        tnx_dir = _chg(tnx, 20) / 100
+        dxy_dir = _chg(dxy, 20) / 100
+        vix_val = _safe(vix.iloc[-1]) if len(vix) > 0 else 20.0
 
         growth_score = 50.0
-        growth_score -= tnx_dir * 200   # 금리 상승 → 성장주 불리
-        growth_score -= dxy_dir * 100   # 달러 강세 → 외국인 이탈
-        growth_score -= max(0.0, (vix_val - 20.0) * 0.5)  # VIX 20 초과 → 위험
+        growth_score -= tnx_dir * 200
+        growth_score -= dxy_dir * 100
+        growth_score -= max(0.0, (vix_val - 20.0) * 0.5)
         growth_score = round(max(0.0, min(100.0, growth_score)), 1)
 
-        nasdaq_val    = round(_safe(nasdaq.iloc[-1]), 0) if len(nasdaq) > 0 else None
-        nasdaq_chg5d  = round(_dir(nasdaq, n=5)  * 100, 2)
-        nasdaq_chg20d = round(_dir(nasdaq, n=20) * 100, 2)
+        # 지표 점수 (0~100): 섹터 카드 스타일 표현용
+        def _tnx_score(v: Optional[float]) -> float:
+            """금리: 3% 이하=90, 5% 이상=10"""
+            if v is None: return 50.0
+            return round(max(10.0, min(90.0, 90 - (v - 3.0) * 40)), 1)
 
-        us_krw_val    = round(_safe(krw.iloc[-1]), 1) if len(krw) > 0 else None
-        us_krw_chg5d  = round(_dir(krw, n=5)  * 100, 2) if len(krw) >= 6  else 0.0
-        us_krw_chg20d = round(_dir(krw, n=20) * 100, 2) if len(krw) >= 21 else 0.0
+        def _dxy_score(v: Optional[float]) -> float:
+            """달러: 95 이하=85, 110 이상=15"""
+            if v is None: return 50.0
+            return round(max(15.0, min(85.0, 85 - (v - 95) * (70 / 15))), 1)
 
-        oil_val    = round(_safe(oil.iloc[-1]), 2) if len(oil) > 0 else None
-        oil_chg5d  = round(_dir(oil, n=5)  * 100, 2) if len(oil) >= 6  else 0.0
-        oil_chg20d = round(_dir(oil, n=20) * 100, 2) if len(oil) >= 21 else 0.0
+        def _vix_score(v: float) -> float:
+            """VIX: 12 이하=90, 30 이상=10"""
+            return round(max(10.0, min(90.0, 90 - (v - 12) * (80 / 18))), 1)
 
-        tnx_chg5d = round(_dir(tnx, n=5) * 100, 2) if len(tnx) >= 6 else 0.0
+        def _nasdaq_score(chg20: float) -> float:
+            """나스닥 20d 수익률: -15%=10, +15%=90"""
+            return round(max(10.0, min(90.0, 50 + chg20 * (40 / 15))), 1)
 
-        detail = {
-            "tnx":         round(_safe(tnx.iloc[-1]), 3) if len(tnx) > 0 else None,
-            "dxy":         round(_safe(dxy.iloc[-1]), 3) if len(dxy) > 0 else None,
-            "vix":         round(vix_val, 2),
-            "tnx20dChg":   round(tnx_dir * 100, 2),
-            "tnxChg5d":    tnx_chg5d,
-            "dxy20dChg":   round(dxy_dir * 100, 2),
-            "growthScore": growth_score,
-            "nasdaq":      int(nasdaq_val) if nasdaq_val is not None else None,
-            "nasdaqChg5d": nasdaq_chg5d,
-            "nasdaqChg20d": nasdaq_chg20d,
-            "usKrw":       us_krw_val,
-            "usKrwChg5d":  us_krw_chg5d,
-            "usKrwChg20d": us_krw_chg20d,
-            "oil":         oil_val,
-            "oilChg5d":    oil_chg5d,
-            "oilChg20d":   oil_chg20d,
+        def _krw_score(v: Optional[float]) -> float:
+            """원달러: 1200 이하=85, 1500 이상=15"""
+            if v is None: return 50.0
+            return round(max(15.0, min(85.0, 85 - (v - 1200) * (70 / 300))), 1)
+
+        def _oil_score(v: Optional[float]) -> float:
+            """WTI: 60 이하=80, 100 이상=20"""
+            if v is None: return 50.0
+            return round(max(20.0, min(80.0, 80 - (v - 60) * (60 / 40))), 1)
+
+        tnx_val   = _last(tnx)
+        dxy_val   = _last(dxy)
+        krw_val   = _last(krw)
+        oil_val   = _last(oil)
+        nas_val   = _last(nasdaq)
+        vkos_val  = _safe(vkospi_s.iloc[-1]) if vkospi_s is not None and len(vkospi_s) > 0 else None
+
+        detail: dict = {
+            # 현재값
+            "tnx":          round(tnx_val, 3) if tnx_val else None,
+            "dxy":          round(dxy_val, 3) if dxy_val else None,
+            "vix":          round(vix_val, 2),
+            "vkospi":       round(vkos_val, 2) if vkos_val else None,
+            "nasdaq":       int(nas_val) if nas_val else None,
+            "usKrw":        round(krw_val, 1) if krw_val else None,
+            "oil":          round(oil_val, 2) if oil_val else None,
+            # 점수 (0~100)
+            "tnxScore":     _tnx_score(tnx_val),
+            "dxyScore":     _dxy_score(dxy_val),
+            "vixScore":     _vix_score(vix_val),
+            "vkospiScore":  _vix_score(vkos_val) if vkos_val else 50.0,
+            "nasScore":     _nasdaq_score(_chg(nasdaq, 20)),
+            "krwScore":     _krw_score(krw_val),
+            "oilScore":     _oil_score(oil_val),
+            # 변화율
+            "tnxChg1d":     _chg(tnx, 1),
+            "tnxChg5d":     _chg(tnx, 5),
+            "tnx20dChg":    _chg(tnx, 20),
+            "dxyChg1d":     _chg(dxy, 1),
+            "dxy20dChg":    _chg(dxy, 20),
+            "vixChg1d":     _chg(vix, 1),
+            "nasdaqChg1d":  _chg(nasdaq, 1),
+            "nasdaqChg5d":  _chg(nasdaq, 5),
+            "nasdaqChg20d": _chg(nasdaq, 20),
+            "usKrwChg1d":   _chg(krw, 1),
+            "usKrwChg5d":   _chg(krw, 5),
+            "usKrwChg20d":  _chg(krw, 20),
+            "oilChg1d":     _chg(oil, 1),
+            "oilChg5d":     _chg(oil, 5),
+            "oilChg20d":    _chg(oil, 20),
+            "vkospiChg1d":  _chg(vkospi_s, 1) if vkospi_s is not None and len(vkospi_s) >= 2 else 0.0,
+            "growthScore":  growth_score,
+            # 일봉 시계열 (최근 30일)
+            "series1d": {
+                "tnx":    _series(closes_d, "^TNX"),
+                "dxy":    _series(closes_d, "DX-Y.NYB"),
+                "vix":    _series(closes_d, "^VIX"),
+                "nasdaq": _series(closes_d, "^IXIC"),
+                "krw":    _series(closes_d, "KRW=X"),
+                "oil":    _series(closes_d, "CL=F"),
+                "vkospi": [round(float(v), 2) for v in vkospi_s.iloc[-30:].values] if vkospi_s is not None else [],
+            },
+            # 1시간봉 시계열 (최근 48시간)
+            "series1h": {
+                "tnx":    _series(closes_h, "^TNX", 48),
+                "dxy":    _series(closes_h, "DX-Y.NYB", 48),
+                "vix":    _series(closes_h, "^VIX", 48),
+                "nasdaq": _series(closes_h, "^IXIC", 48),
+                "krw":    _series(closes_h, "KRW=X", 48),
+                "oil":    _series(closes_h, "CL=F", 48),
+            },
         }
         return growth_score, detail
 

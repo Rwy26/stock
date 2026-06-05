@@ -7,19 +7,39 @@ interface MacroDetail {
   tnx?: number | null
   dxy?: number | null
   vix?: number
-  tnx20dChg?: number
-  tnxChg5d?: number
-  dxy20dChg?: number
-  growthScore?: number
+  vkospi?: number | null
   nasdaq?: number | null
+  usKrw?: number | null
+  oil?: number | null
+  // scores
+  tnxScore?: number
+  dxyScore?: number
+  vixScore?: number
+  vkospiScore?: number
+  nasScore?: number
+  krwScore?: number
+  oilScore?: number
+  // changes
+  tnxChg1d?: number
+  tnxChg5d?: number
+  tnx20dChg?: number
+  dxyChg1d?: number
+  dxy20dChg?: number
+  vixChg1d?: number
+  nasdaqChg1d?: number
   nasdaqChg5d?: number
   nasdaqChg20d?: number
-  usKrw?: number | null
+  usKrwChg1d?: number
   usKrwChg5d?: number
   usKrwChg20d?: number
-  oil?: number | null
+  oilChg1d?: number
   oilChg5d?: number
   oilChg20d?: number
+  vkospiChg1d?: number
+  growthScore?: number
+  // series
+  series1d?: Record<string, number[]>
+  series1h?: Record<string, number[]>
   error?: string
 }
 
@@ -451,30 +471,190 @@ function LifecycleLegend() {
 
 // ─── Macro Summary ───────────────────────────────────────────────────────────
 
+// ─── Macro Spark Line ────────────────────────────────────────────────────────
+function MacroSpark({ series, color, invert = false }: { series: number[]; color: string; invert?: boolean }) {
+  const W = 80, H = 24, PX = 1, PY = 2
+  if (series.length < 2) return <svg width={W} height={H} />
+  const mn = Math.min(...series), mx = Math.max(...series)
+  const range = mx - mn || 1
+  const toX = (i: number) => PX + (i / (series.length - 1)) * (W - 2 * PX)
+  const toY = (v: number) => PY + (invert ? (v - mn) / range : 1 - (v - mn) / range) * (H - 2 * PY)
+  const line = series.map((v, i) => `${i === 0 ? 'M' : 'L'}${toX(i)},${toY(v)}`).join(' ')
+  const area = line + ` L${toX(series.length - 1)},${H} L${PX},${H} Z`
+  const gid = `ms-${color.replace('#', '')}-${Math.random().toString(36).slice(2)}`
+  return (
+    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{ display: 'block', flexShrink: 0 }}>
+      <defs>
+        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.35" />
+          <stop offset="100%" stopColor={color} stopOpacity="0.03" />
+        </linearGradient>
+      </defs>
+      <path d={area} fill={`url(#${gid})`} />
+      <path d={line} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={toX(series.length - 1)} cy={toY(series[series.length - 1])} r="2" fill={color} />
+    </svg>
+  )
+}
+
+// ─── Macro Card (섹터 스타일) ─────────────────────────────────────────────────
+type MacroTab = '1d' | '1h'
+
 function MacroCard({ detail }: { detail: MacroDetail }) {
-  const items: [string, string | number | null | undefined, string?][] = [
-    ['미국 10Y', detail.tnx != null ? detail.tnx + '%' : '—',
-      detail.tnx20dChg != null ? fmtPct(detail.tnx20dChg) + ' (20d)' : undefined],
-    ['달러(DXY)', detail.dxy ?? '—',
-      detail.dxy20dChg != null ? fmtPct(detail.dxy20dChg) + ' (20d)' : undefined],
-    ['VIX', detail.vix ?? '—', undefined],
-    ['성장주 우호도', detail.growthScore != null ? detail.growthScore + ' / 100' : '—', undefined],
+  const [tab, setTab] = useState<MacroTab>('1d')
+
+  interface MacroItem {
+    key: string; label: string; val: string
+    score: number; chg1d: number; chg5d?: number; chg20d?: number
+    seriesKey: string; scoreColor: string
+    /** score 낮을수록 주가에 불리(금리·달러·원달러·VIX): invert spark */
+    invertSpark?: boolean
+    note?: string
+  }
+
+  const s1d = detail.series1d ?? {}
+  const s1h = detail.series1h ?? {}
+
+  const items: MacroItem[] = [
+    {
+      key: 'tnx', label: '미 10Y 국채금리', seriesKey: 'tnx', invertSpark: true,
+      val: detail.tnx != null ? detail.tnx + '%' : '—',
+      score: detail.tnxScore ?? 50,
+      chg1d: detail.tnxChg1d ?? 0, chg5d: detail.tnxChg5d, chg20d: detail.tnx20dChg,
+      scoreColor: (detail.tnxScore ?? 50) >= 60 ? '#34d399' : (detail.tnxScore ?? 50) >= 40 ? '#eab308' : '#f87171',
+      note: '금리↑ = 성장주 불리',
+    },
+    {
+      key: 'dxy', label: '달러 인덱스(DXY)', seriesKey: 'dxy', invertSpark: true,
+      val: detail.dxy != null ? String(detail.dxy) : '—',
+      score: detail.dxyScore ?? 50,
+      chg1d: detail.dxyChg1d ?? 0, chg20d: detail.dxy20dChg,
+      scoreColor: (detail.dxyScore ?? 50) >= 60 ? '#34d399' : (detail.dxyScore ?? 50) >= 40 ? '#eab308' : '#f87171',
+      note: '달러↑ = 외국인 이탈',
+    },
+    {
+      key: 'vix', label: 'VIX (미국)', seriesKey: 'vix', invertSpark: true,
+      val: detail.vix != null ? String(detail.vix) : '—',
+      score: detail.vixScore ?? 50,
+      chg1d: detail.vixChg1d ?? 0,
+      scoreColor: (detail.vixScore ?? 50) >= 60 ? '#34d399' : (detail.vixScore ?? 50) >= 40 ? '#eab308' : '#f87171',
+      note: 'VIX↑ = 공포·변동성',
+    },
+    {
+      key: 'vkospi', label: 'VKOSPI (한국)', seriesKey: 'vkospi', invertSpark: true,
+      val: detail.vkospi != null ? String(detail.vkospi) : '—',
+      score: detail.vkospiScore ?? 50,
+      chg1d: detail.vkospiChg1d ?? 0,
+      scoreColor: (detail.vkospiScore ?? 50) >= 60 ? '#34d399' : (detail.vkospiScore ?? 50) >= 40 ? '#eab308' : '#f87171',
+      note: 'KOSPI 변동성 지수',
+    },
+    {
+      key: 'nasdaq', label: '나스닥', seriesKey: 'nasdaq',
+      val: detail.nasdaq != null ? detail.nasdaq.toLocaleString() : '—',
+      score: detail.nasScore ?? 50,
+      chg1d: detail.nasdaqChg1d ?? 0, chg5d: detail.nasdaqChg5d, chg20d: detail.nasdaqChg20d,
+      scoreColor: (detail.nasScore ?? 50) >= 60 ? '#34d399' : (detail.nasScore ?? 50) >= 40 ? '#eab308' : '#f87171',
+    },
+    {
+      key: 'krw', label: '달러/원 환율', seriesKey: 'krw', invertSpark: true,
+      val: detail.usKrw != null ? detail.usKrw.toLocaleString() : '—',
+      score: detail.krwScore ?? 50,
+      chg1d: detail.usKrwChg1d ?? 0, chg5d: detail.usKrwChg5d, chg20d: detail.usKrwChg20d,
+      scoreColor: (detail.krwScore ?? 50) >= 60 ? '#34d399' : (detail.krwScore ?? 50) >= 40 ? '#eab308' : '#f87171',
+      note: '환율↑ = 외국인 이탈',
+    },
+    {
+      key: 'oil', label: 'WTI 원유', seriesKey: 'oil',
+      val: detail.oil != null ? '$' + detail.oil.toFixed(1) : '—',
+      score: detail.oilScore ?? 50,
+      chg1d: detail.oilChg1d ?? 0, chg5d: detail.oilChg5d, chg20d: detail.oilChg20d,
+      scoreColor: (detail.oilScore ?? 50) >= 60 ? '#34d399' : (detail.oilScore ?? 50) >= 40 ? '#eab308' : '#f87171',
+    },
   ]
+
+  const { arrow: gsArrow, color: gsArColor } = trendArrow(
+    (detail.growthScore ?? 50) - 50, 'pct'
+  )
 
   return (
     <div style={{
-      display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
-      gap: 10, background: 'rgba(255,255,255,0.03)',
+      background: 'rgba(255,255,255,0.02)',
       border: '1px solid rgba(255,255,255,0.08)',
-      borderRadius: 12, padding: '14px 16px',
+      borderRadius: 12, overflow: 'hidden',
     }}>
-      {items.map(([label, val, sub]) => (
-        <div key={label}>
-          <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginBottom: 2 }}>{label}</p>
-          <p style={{ fontSize: 16, fontWeight: 700, color: '#f1f5f9' }}>{val}</p>
-          {sub && <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>{sub}</p>}
+      {/* 헤더 */}
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)' }}>Layer 1 · 거시경제 지표</span>
+          <span style={{
+            fontSize: 12, padding: '2px 10px', borderRadius: 99,
+            background: gsArColor + '18', color: gsArColor, border: `1px solid ${gsArColor}30`,
+          }}>
+            성장주 우호도 {detail.growthScore ?? '—'} {gsArrow}
+          </span>
         </div>
-      ))}
+        <div style={{ display: 'flex', gap: 4 }}>
+          {(['1d', '1h'] as MacroTab[]).map(t => (
+            <button key={t} onClick={() => setTab(t)} style={{
+              fontSize: 11, padding: '3px 10px', borderRadius: 6,
+              border: `1px solid ${tab === t ? 'rgba(96,165,250,0.5)' : 'rgba(255,255,255,0.1)'}`,
+              background: tab === t ? 'rgba(96,165,250,0.15)' : 'transparent',
+              color: tab === t ? '#60a5fa' : 'rgba(255,255,255,0.4)',
+              cursor: 'pointer', fontFamily: 'inherit',
+            }}>{t === '1d' ? '일봉' : '1시간'}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* 지표 그리드 */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 0 }}>
+        {items.map((item, idx) => {
+          const series = tab === '1d' ? (s1d[item.seriesKey] ?? []) : (s1h[item.seriesKey] ?? [])
+          const { arrow: a1d, color: ac1d } = trendArrow(item.chg1d, 'pct')
+          const chgDisplay = item.chg1d
+          const borderRight = idx % 4 !== 3 ? '1px solid rgba(255,255,255,0.05)' : 'none'
+          const borderBottom = idx < 4 ? '1px solid rgba(255,255,255,0.05)' : 'none'
+
+          return (
+            <div key={item.key} style={{
+              padding: '12px 14px',
+              borderRight, borderBottom,
+            }}>
+              {/* 라벨 + 화살표 */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.4)' }}>{item.label}</span>
+                <span style={{ fontSize: 12, fontWeight: 700, color: ac1d }}>{a1d}</span>
+              </div>
+              {/* 현재값 + 스파크 */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, marginBottom: 6 }}>
+                <span style={{ fontSize: 17, fontWeight: 800, color: '#f1f5f9', lineHeight: 1 }}>{item.val}</span>
+                {series.length >= 2 && (
+                  <MacroSpark series={series} color={item.scoreColor} invert={item.invertSpark} />
+                )}
+              </div>
+              {/* 점수 바 */}
+              <ScoreBar value={item.score} color={item.scoreColor} />
+              {/* 1d 변화율 + 추가 정보 */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 5 }}>
+                <span style={{ fontSize: 10, color: ac1d, fontWeight: 600 }}>
+                  {chgDisplay >= 0 ? '+' : ''}{chgDisplay.toFixed(2)}% <span style={{ fontWeight: 400, color: 'rgba(255,255,255,0.25)' }}>1d</span>
+                </span>
+                {item.chg20d != null && (
+                  <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)' }}>
+                    {item.chg20d >= 0 ? '+' : ''}{item.chg20d.toFixed(1)}% 20d
+                  </span>
+                )}
+              </div>
+              {item.note && (
+                <div style={{ fontSize: 9.5, color: 'rgba(255,255,255,0.2)', marginTop: 3 }}>{item.note}</div>
+              )}
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -961,9 +1141,6 @@ export function SectorRotationPage() {
 
           {/* Macro summary */}
           <div style={{ marginBottom: 16 }}>
-            <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginBottom: 8 }}>
-              Layer 1 · 거시경제 지표
-            </p>
             <MacroCard detail={data.macroDetail} />
           </div>
 
