@@ -198,7 +198,33 @@ def _macro_score() -> Tuple[float, dict]:
 
 
 # ---------------------------------------------------------------------------
-# Layer 2 & 3: Foreign + Institutional Flow (pykrx)
+# KIS credentials helper
+# ---------------------------------------------------------------------------
+def _get_kis_credentials() -> Tuple[Optional[str], Optional[str], bool]:
+    """DB에서 첫 번째 KIS 자격증명 반환. 없으면 (None, None, False)."""
+    try:
+        import pymysql  # type: ignore
+        from settings import settings as s
+        conn = pymysql.connect(
+            host=s.mysql_host, port=s.mysql_port,
+            user=s.mysql_user, password=s.mysql_password,
+            database=s.mysql_db, connect_timeout=5,
+        )
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT app_key, app_secret, is_paper FROM kis_profiles ORDER BY id LIMIT 1"
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return str(row[0]), str(row[1]), bool(row[2])
+    except Exception:
+        pass
+    return None, None, False
+
+
+# ---------------------------------------------------------------------------
+# Layer 2 & 3: Foreign + Institutional Flow (KIS inquire_investor)
 # ---------------------------------------------------------------------------
 def _get_flow_scores() -> Dict[str, Dict[str, float]]:
     fallback = {
@@ -206,47 +232,67 @@ def _get_flow_scores() -> Dict[str, Dict[str, float]]:
             "foreign_raw": 0.0, "institutional_raw": 0.0}
         for s in SECTORS
     }
+
+    app_key, app_secret, is_paper = _get_kis_credentials()
+    if not app_key:
+        return fallback
+
     try:
-        from pykrx import stock as pstock  # type: ignore
+        from kis_client import inquire_investor  # type: ignore
 
         today = date.today()
-        start = today - timedelta(days=20)
-        start_str = _date_str(start)
-        end_str = _date_str(today)
+        start_date = _date_str(today - timedelta(days=42))  # ~30 거래일 커버
+        end_date = _date_str(today)
 
-        def _get_net(investor: str):
+        # 모든 섹터 종목 중복 제거
+        all_codes: List[str] = list({c for codes in SECTORS.values() for c in codes})
+
+        def _safe_int(v: Any) -> int:
             try:
-                return pstock.get_market_net_purchases_of_equities(
-                    start_str, end_str, "KOSPI", investor
+                return int(str(v or 0).replace(",", "").strip() or 0)
+            except Exception:
+                return 0
+
+        def _fetch_one(code: str) -> Tuple[str, float, float]:
+            try:
+                result = inquire_investor(
+                    app_key=app_key,        # type: ignore[arg-type]
+                    app_secret=app_secret,  # type: ignore[arg-type]
+                    is_paper=is_paper,
+                    code=code,
+                    start_date=start_date,
+                    end_date=end_date,
+                    timeout_seconds=15.0,
                 )
-            except Exception:
-                return None
+                rows = result.get("output") or []
 
-        df_f = _get_net("외국인")
-        df_i = _get_net("기관합계")
+                # 값이 있는 행만 (오늘 장중 데이터 제외), 최근 20 거래일
+                valid_rows = [
+                    r for r in rows
+                    if r.get("frgn_ntby_tr_pbmn") not in (None, "")
+                ][:20]
 
-        def _extract(df, code: str) -> float:
-            if df is None or df.empty:
-                return 0.0
-            try:
-                if code not in df.index:
-                    return 0.0
-                row = df.loc[code]
-                for col in ["순매수거래대금", "순매수금액", "순매수"]:
-                    if col in (row.index if hasattr(row, "index") else []):
-                        return _safe(row[col])
-                # 컬럼명이 다를 경우 마지막 수치 컬럼 사용
-                vals = [_safe(v) for v in row.values if isinstance(v, (int, float))]
-                return vals[-1] if vals else 0.0
+                # frgn_ntby_tr_pbmn / orgn_ntby_tr_pbmn: 백만원 단위
+                # 백만원 합계 → 억원 (/ 100)
+                f_sum = sum(_safe_int(r.get("frgn_ntby_tr_pbmn")) for r in valid_rows)
+                i_sum = sum(_safe_int(r.get("orgn_ntby_tr_pbmn")) for r in valid_rows)
+                return code, f_sum / 100.0, i_sum / 100.0
             except Exception:
-                return 0.0
+                return code, 0.0, 0.0
+
+        import concurrent.futures as _cf
+        code_flows: Dict[str, Tuple[float, float]] = {}
+        with _cf.ThreadPoolExecutor(max_workers=5) as ex:
+            futures = {ex.submit(_fetch_one, c): c for c in all_codes}
+            for fut in _cf.as_completed(futures):
+                c, f_val, i_val = fut.result()
+                code_flows[c] = (f_val, i_val)
 
         sector_f: Dict[str, float] = {}
         sector_i: Dict[str, float] = {}
-
         for sector, codes in SECTORS.items():
-            sector_f[sector] = sum(_extract(df_f, c) for c in codes)
-            sector_i[sector] = sum(_extract(df_i, c) for c in codes)
+            sector_f[sector] = sum(code_flows.get(c, (0.0, 0.0))[0] for c in codes)
+            sector_i[sector] = sum(code_flows.get(c, (0.0, 0.0))[1] for c in codes)
 
         f_norm = _normalize(sector_f)
         i_norm = _normalize(sector_i)
@@ -255,8 +301,8 @@ def _get_flow_scores() -> Dict[str, Dict[str, float]]:
             sector: {
                 "foreign":           f_norm.get(sector, 50.0),
                 "institutional":     i_norm.get(sector, 50.0),
-                "foreign_raw":       round(sector_f.get(sector, 0.0) / 1e8, 1),
-                "institutional_raw": round(sector_i.get(sector, 0.0) / 1e8, 1),
+                "foreign_raw":       round(sector_f.get(sector, 0.0), 0),
+                "institutional_raw": round(sector_i.get(sector, 0.0), 0),
             }
             for sector in SECTORS
         }

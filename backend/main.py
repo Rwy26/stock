@@ -17,6 +17,7 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPBearer
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 import httpx
@@ -1446,6 +1447,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_LOGO_DIR = Path(__file__).resolve().parent / "static" / "logos"
+_LOGO_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static/logos", StaticFiles(directory=str(_LOGO_DIR)), name="stock_logos")
 
 @app.get("/health")
 def health():

@@ -104,7 +104,10 @@ const STARS = (n: number) =>
 
 const fmtBil = (v: number) => {
   if (v === 0) return '—'
-  return (v >= 0 ? '+' : '') + v.toFixed(0) + '억'
+  const sign = v >= 0 ? '+' : ''
+  const abs = Math.abs(v)
+  if (abs >= 10000) return sign + (v / 10000).toFixed(1) + '조'
+  return sign + v.toFixed(0) + '억'
 }
 
 const fmtPct = (v: number) => (v >= 0 ? '+' : '') + v.toFixed(1) + '%'

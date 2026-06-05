@@ -671,9 +671,23 @@ export function WatchlistPage() {
                         alignItems: 'center',
                         gap: 4,
                       }}>
-                        <span style={{ fontSize: showFull ? '0.85rem' : '0.72rem', lineHeight: 1 }}>
-                          {icon}
-                        </span>
+                        {icon.startsWith('/') || icon.startsWith('http') ? (
+                          <img
+                            src={`http://127.0.0.1:8000${icon.startsWith('/') ? icon : ''}`}
+                            alt=""
+                            style={{
+                              width: showFull ? 18 : 14,
+                              height: showFull ? 18 : 14,
+                              objectFit: 'contain',
+                              borderRadius: 3,
+                              flexShrink: 0,
+                            }}
+                          />
+                        ) : (
+                          <span style={{ fontSize: showFull ? '0.85rem' : '0.72rem', lineHeight: 1 }}>
+                            {icon}
+                          </span>
+                        )}
                         {item.name}
                       </span>
 
