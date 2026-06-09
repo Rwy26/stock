@@ -4990,16 +4990,49 @@ def public_sector_rotation():
 
 
 _PUBLIC_WATCHLIST_CACHE: dict = {"ts": 0.0, "items": None}
-_PUBLIC_WATCHLIST_TTL = 120.0  # seconds
+_PUBLIC_WATCHLIST_TTL = 90.0  # seconds
+
+
+def _naver_quotes(codes: list[str]) -> dict[str, tuple[float, float]]:
+    """네이버 금융 배치 시세 조회 → {code: (현재가, 등락률%)}.
+
+    KIS 토큰 불필요·고속. 한 번에 여러 종목 콤마로 조회(40개씩 청크).
+    """
+    out: dict[str, tuple[float, float]] = {}
+    if not codes:
+        return out
+    headers = {"User-Agent": "Mozilla/5.0"}
+    chunk = 40
+    for i in range(0, len(codes), chunk):
+        part = codes[i:i + chunk]
+        url = "https://polling.finance.naver.com/api/realtime/domestic/stock/" + ",".join(part)
+        try:
+            resp = httpx.get(url, headers=headers, timeout=8.0)
+            resp.raise_for_status()
+            for d in resp.json().get("datas", []):
+                code = str(d.get("itemCode") or "")
+                if not code:
+                    continue
+                try:
+                    price = float(str(d.get("closePrice", "") or "0").replace(",", ""))
+                except Exception:
+                    price = 0.0
+                try:
+                    ratio = float(str(d.get("fluctuationsRatio", "") or "0").replace(",", ""))
+                except Exception:
+                    ratio = 0.0
+                out[code] = (price, ratio)
+        except Exception:
+            continue
+    return out
 
 
 @app.get("/api/public/watchlist")
 def public_watchlist():
     """공개 관심 종목 = admin(대표) 워치리스트.
 
-    실시간 시세/등락률은 관리자(id 1) KIS 프로필로 서버에서 **병렬** 조회하고,
-    결과를 120초 캐시한다 (게스트 다수 접속에도 KIS 호출 폭증 방지).
-    풀버전 WatchlistPage 트리맵과 동일한 형태(name/code/price/changeRate/score/sector/icon)로 반환.
+    시세/등락률은 **네이버 금융 배치 API**로 조회(KIS 토큰 불필요, 1~2회 호출로 전체).
+    결과는 90초 캐시. 풀버전 트리맵과 동일 형태(name/code/price/changeRate/score/sector/icon).
     """
     if apollo_db is None or models is None:
         raise HTTPException(status_code=500, detail="DB module not available")
@@ -5011,13 +5044,6 @@ def public_watchlist():
 
     db: Session = apollo_db.get_session_factory()()
     try:
-        profile = db.execute(
-            select(models.KisProfile).where(models.KisProfile.user_id == PUBLIC_WATCHLIST_USER_ID)
-        ).scalar_one_or_none()
-        app_key = str(getattr(profile, "app_key", "") or "")
-        app_secret = str(getattr(profile, "app_secret", "") or "")
-        is_paper = _effective_kis_is_paper(profile)
-
         rows = db.execute(
             select(models.Watchlist.stock_code, models.Stock.name, models.StockInterest.tags)
             .join(models.Stock, models.Stock.code == models.Watchlist.stock_code)
@@ -5045,7 +5071,6 @@ def public_watchlist():
                         return v
             return _icon_from_map(name=name, sector=sector)
 
-        # DB-only fields (fast); price/changeRate fetched concurrently afterwards.
         base: list[dict] = []
         for code, name, raw_tags in rows:
             sector = _extract_sector(raw_tags)
@@ -5059,37 +5084,10 @@ def public_watchlist():
     finally:
         db.close()
 
-    def _price(code: str) -> tuple[float, float]:
-        if not (app_key and app_secret):
-            return 0.0, 0.0
-        try:
-            q = kis_client.inquire_price(
-                app_key=app_key,
-                app_secret=app_secret,
-                is_paper=is_paper,
-                code=code,
-                live_base_url=settings.kis_live_base_url,
-                paper_base_url=settings.kis_paper_base_url,
-            )
-            return float(q.price), float(q.change_rate)
-        except Exception:
-            return 0.0, 0.0
-
-    from concurrent.futures import ThreadPoolExecutor
-
-    prices: dict[str, tuple[float, float]] = {}
-    if base:
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            futs = {ex.submit(_price, b["code"]): b["code"] for b in base}
-            for fut, code in futs.items():
-                try:
-                    prices[code] = fut.result(timeout=20)
-                except Exception:
-                    prices[code] = (0.0, 0.0)
-
+    quotes = _naver_quotes([b["code"] for b in base])
     items: list[dict] = []
     for b in base:
-        p, cr = prices.get(b["code"], (0.0, 0.0))
+        p, cr = quotes.get(b["code"], (0.0, 0.0))
         items.append({**b, "price": p, "changeRate": cr})
 
     _PUBLIC_WATCHLIST_CACHE["items"] = items
