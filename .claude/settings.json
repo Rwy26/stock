@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+
+      "PowerShell(.\\scripts\\run-backend.ps1*)",
+      "PowerShell(.\\scripts\\run-frontend.ps1*)",
+      "PowerShell(.\\scripts\\init-db.ps1*)",
+      "PowerShell(.\\scripts\\bootstrap.ps1*)",
+      "PowerShell(.\\scripts\\verify-*)",
+      "PowerShell(.\\scripts\\smoke-*)",
+
+      "PowerShell(npm run dev*)",
+      "PowerShell(npm run build*)",
+      "PowerShell(npm run lint*)",
+      "PowerShell(npm run preview*)",
+      "Bash(npm run dev*)",
+      "Bash(npm run build*)",
+      "Bash(npm run lint*)",
+      "Bash(npm run preview*)",
+
+      "PowerShell(backend\\.venv\\Scripts\\python.exe*)",
+      "PowerShell(.\\backend\\.venv\\Scripts\\python.exe*)",
+
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git branch*)",
+      "Bash(git show*)",
+      "PowerShell(git status*)",
+      "PowerShell(git log*)",
+      "PowerShell(git diff*)",
+      "PowerShell(git branch*)",
+      "PowerShell(git show*)",
+
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "PowerShell(git commit*)",
+      "PowerShell(git push*)"
+    ],
+    "ask": [
+      "Bash(git reset*)",
+      "PowerShell(git reset*)",
+      "PowerShell(.\\scripts\\smoke-sa-plus-user.ps1*)"
+    ]
+  }
+}
