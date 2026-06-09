@@ -20,6 +20,12 @@ import { InvestmentRulesPage } from './pages/InvestmentRulesPage'
 import { AiChartPage } from './pages/AiChartPage'
 import { AiCachePage } from './pages/AiCachePage'
 import { SectorRotationPage } from './pages/SectorRotationPage'
+import { PublicShell } from './layout/PublicShell'
+import { PublicRecommendationsPage } from './pages/public/PublicRecommendationsPage'
+import { PublicSectorPage } from './pages/public/PublicSectorPage'
+import { PublicWatchlistPage } from './pages/public/PublicWatchlistPage'
+import { PublicAiRequestPage } from './pages/public/PublicAiRequestPage'
+import { PublicRequestsPage } from './pages/PublicRequestsPage'
 
 export default function App() {
   return (
@@ -51,6 +57,15 @@ export default function App() {
           <Route path="ai-chart" element={<AiChartPage />} />
           <Route path="ai-cache" element={<AiCachePage />} />
           <Route path="sector-rotation" element={<SectorRotationPage />} />
+          <Route path="public-requests" element={<PublicRequestsPage />} />
+        </Route>
+
+        {/* Public (guest) area — outside RequireAuth. Name+phone gate only. */}
+        <Route path="/public" element={<PublicShell />}>
+          <Route index element={<PublicRecommendationsPage />} />
+          <Route path="sector" element={<PublicSectorPage />} />
+          <Route path="watchlist" element={<PublicWatchlistPage />} />
+          <Route path="ai-request" element={<PublicAiRequestPage />} />
         </Route>
 
         <Route path="login" element={<LoginPage />} />

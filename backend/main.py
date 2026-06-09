@@ -4489,7 +4489,7 @@ class ChartAnalysisCSVRequest(_BaseModel):
 @app.post("/api/ai/chart-analysis")
 async def ai_chart_analysis(
     req: ChartAnalysisRequest,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_admin),
 ):
     """AI 차트 분석 (yfinance 데이터 또는 직접 제공 OHLCV).
 
@@ -4530,7 +4530,7 @@ async def ai_chart_analysis(
 async def ai_chart_analysis_upload(
     symbol: str,
     file: UploadFile = FastAPIFile(..., description="TradingView CSV 파일"),
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_admin),
 ):
     """TradingView에서 내보낸 CSV 파일을 업로드하여 AI 분석.
 
@@ -4680,7 +4680,7 @@ async def ai_chart_analysis_image(
     symbol: str,
     files: list[UploadFile] = FastAPIFile(..., description="TradingView 차트 스크린샷 (PNG/JPG, 최대 6개)"),
     extra_context: str | None = None,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_admin),
 ):
     """TradingView 차트 스크린샷을 업로드하여 AI 종합 분석.
 
@@ -4895,6 +4895,190 @@ def delete_ai_analysis_cache(
         session.delete(row)
 
     return {"deleted": stock_code}
+
+
+# ---------------------------------------------------------------------------
+# Public (guest) endpoints — NO authentication.
+#
+# The name+phone "signup" gate is lead-capture, NOT authentication. Only safe,
+# read-only market data is exposed here. Account / portfolio / auto-trading and
+# the real AI chart analysis stay behind authentication (admin).
+# ---------------------------------------------------------------------------
+
+PUBLIC_WATCHLIST_USER_ID = 1  # admin's watchlist is the representative public one
+
+
+class PublicSignupBody(_BaseModel):
+    name: str = _Field(..., max_length=120)
+    phone: str = _Field(..., max_length=40)
+
+
+class PublicAiRequestBody(_BaseModel):
+    name: str = _Field(..., max_length=120)
+    phone: str = _Field(..., max_length=40)
+    stock: str = _Field(..., max_length=120)
+
+
+def _clean_public_text(s: str | None, *, limit: int) -> str:
+    return (str(s or "").strip())[:limit]
+
+
+@app.post("/api/public/signup")
+def public_signup(body: PublicSignupBody):
+    """게스트 진입: 이름+전화번호 기록 (인증 아님, 방문자 수집용)."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    name = _clean_public_text(body.name, limit=120)
+    phone = _clean_public_text(body.phone, limit=40)
+    if not name or not phone:
+        raise HTTPException(status_code=400, detail="이름과 전화번호를 입력하세요.")
+    with apollo_db.session_scope() as session:
+        session.add(models.PublicVisitor(name=name, phone=phone))
+    return {"ok": True}
+
+
+@app.get("/api/public/recommendations")
+def public_recommendations():
+    """공개 추천 종목 (DB 기준; 실시간가 없음 / KIS 불필요)."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    today = date.today()
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        rows = db.execute(
+            select(
+                models.Recommendation.rank,
+                models.Recommendation.score_total,
+                models.Recommendation.stock_code,
+                models.Stock.name,
+            )
+            .join(models.Stock, models.Stock.code == models.Recommendation.stock_code)
+            .where(models.Recommendation.rec_date == today)
+            .order_by(models.Recommendation.rank.is_(None), models.Recommendation.rank, desc(models.Recommendation.score_total))
+        ).all()
+        if not rows:
+            rows = db.execute(
+                select(
+                    func.null().label("rank"),
+                    models.IndicatorScore.score_total,
+                    models.IndicatorScore.stock_code,
+                    models.Stock.name,
+                )
+                .join(models.Stock, models.Stock.code == models.IndicatorScore.stock_code)
+                .where(models.IndicatorScore.scoring_date == today)
+                .order_by(desc(models.IndicatorScore.score_total), desc(models.IndicatorScore.created_at))
+                .limit(30)
+            ).all()
+        items = [
+            {"rank": int(rank or 0), "name": name, "code": code, "score": int(score)}
+            for rank, score, code, name in rows
+        ]
+        return {"date": today.isoformat(), "items": items}
+    finally:
+        db.close()
+
+
+@app.get("/api/public/sector-rotation")
+def public_sector_rotation():
+    """공개 섹터 나침반 (캐시 사용; 강제 재계산 불가)."""
+    if _sector_rotation is None:
+        raise HTTPException(status_code=503, detail="sector_rotation 모듈 로드 실패")
+    try:
+        return _sector_rotation.compute_sector_rotation(force=False)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"섹터 나침반 계산 실패: {exc}") from exc
+
+
+@app.get("/api/public/watchlist")
+def public_watchlist():
+    """공개 관심 종목 = admin(대표) 워치리스트, 읽기 전용 / 실시간가 없음."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        rows = db.execute(
+            select(models.Watchlist.stock_code, models.Stock.name, models.StockInterest.tags)
+            .join(models.Stock, models.Stock.code == models.Watchlist.stock_code)
+            .outerjoin(
+                models.StockInterest,
+                (models.StockInterest.stock_code == models.Watchlist.stock_code)
+                & (models.StockInterest.user_id == PUBLIC_WATCHLIST_USER_ID),
+            )
+            .where(models.Watchlist.user_id == PUBLIC_WATCHLIST_USER_ID)
+            .order_by(desc(models.Watchlist.created_at))
+        ).all()
+        items: list[dict] = []
+        for code, name, raw_tags in rows:
+            sector = "기타"
+            for tag in _as_tag_list(raw_tags):
+                seg = str(tag).split("|")[0].strip()
+                if seg and seg not in {"외국인수급", "기관수급", "아이콘", "테마자동"} and not seg.endswith("시장"):
+                    sector = seg
+                    break
+            items.append({
+                "name": name,
+                "code": code,
+                "score": int(_get_latest_score_total(db, code)),
+                "sector": sector,
+            })
+        return {"items": items}
+    finally:
+        db.close()
+
+
+@app.post("/api/public/ai-request")
+def public_ai_request(body: PublicAiRequestBody):
+    """게스트 'AI 차트 분석 요청' 기록 (분석 미실행, 유료 API 호출 없음)."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    name = _clean_public_text(body.name, limit=120)
+    phone = _clean_public_text(body.phone, limit=40)
+    stock = _clean_public_text(body.stock, limit=120)
+    if not name or not phone:
+        raise HTTPException(status_code=400, detail="이름과 전화번호가 필요합니다.")
+    if not stock:
+        raise HTTPException(status_code=400, detail="종목명을 입력하세요.")
+    with apollo_db.session_scope() as session:
+        session.add(models.PublicAiRequest(name=name, phone=phone, stock_query=stock))
+    return {"ok": True, "message": "요청이 접수되었습니다. 관리자가 분석 후 처리합니다."}
+
+
+@app.get("/api/admin/public-visitors")
+def admin_public_visitors(_current_user=Depends(require_admin), limit: int = 200):
+    """공개 페이지 방문자(이름·전화) 목록 — 관리자 전용."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        rows = db.execute(
+            select(models.PublicVisitor).order_by(desc(models.PublicVisitor.id)).limit(max(1, min(limit, 1000)))
+        ).scalars().all()
+        return {"items": [
+            {"id": r.id, "name": r.name, "phone": r.phone,
+             "at": r.created_at.isoformat() if r.created_at else None}
+            for r in rows
+        ]}
+    finally:
+        db.close()
+
+
+@app.get("/api/admin/public-ai-requests")
+def admin_public_ai_requests(_current_user=Depends(require_admin), limit: int = 200):
+    """게스트 AI 분석 요청(이름·전화·종목) 목록 — 관리자 전용."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        rows = db.execute(
+            select(models.PublicAiRequest).order_by(desc(models.PublicAiRequest.id)).limit(max(1, min(limit, 1000)))
+        ).scalars().all()
+        return {"items": [
+            {"id": r.id, "name": r.name, "phone": r.phone, "stock": r.stock_query,
+             "status": r.status, "at": r.created_at.isoformat() if r.created_at else None}
+            for r in rows
+        ]}
+    finally:
+        db.close()
 
 
 @app.get("/{full_path:path}")

@@ -305,6 +305,38 @@ class AiAnalysisCache(Base):
     image_hashes: Mapped[list | None] = mapped_column(JSON, nullable=True)          # 이미지 SHA-256 해시 목록
 
 
+class PublicVisitor(Base):
+    """공개(게스트) 페이지 진입 기록.
+
+    이름+전화번호 '회원가입' 게이트로 입력된 방문자. 인증 수단이 아니라
+    방문자(리드) 수집 용도. 비밀번호/토큰 없음.
+    """
+
+    __tablename__ = "public_visitors"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    phone: Mapped[str] = mapped_column(String(40), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+
+class PublicAiRequest(Base):
+    """공개 페이지의 'AI 차트 분석 요청' 기록.
+
+    게스트가 원하는 종목명을 입력하면 분석을 실행하지 않고 요청만 기록한다.
+    실제 AI 분석은 관리자만 수행. 관리자는 이 목록(이름/전화/종목)을 확인한다.
+    """
+
+    __tablename__ = "public_ai_requests"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    phone: Mapped[str] = mapped_column(String(40), index=True)
+    stock_query: Mapped[str] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(20), default="new", index=True)  # new | done
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+
 class DailyInvestorFlow(Base):
     """일별 투자자 수급 캐시 테이블.
 

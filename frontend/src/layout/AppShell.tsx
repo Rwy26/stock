@@ -6,7 +6,7 @@ import { fetchJson, refreshAccessToken } from '../lib/api'
 const menuItems = [
   { to: '/', slug: 'dashboard', label: '대시보드' },
   { to: '/portfolio', slug: 'portfolio', label: '포트폴리오' },
-  { to: '/sector-rotation', slug: 'sector-rotation', label: '🧭 섹터 로테이션' },
+  { to: '/sector-rotation', slug: 'sector-rotation', label: '🧭 섹터 나침반' },
   { to: '/stock-search', slug: 'stock-search', label: '종목 탐색' },
   { to: '/recommendations', slug: 'recommendations', label: '추천 종목' },
   { to: '/watchlist', slug: 'watchlist', label: '관심 종목' },
@@ -17,6 +17,7 @@ const menuItems = [
   { to: '/ai-chart', slug: 'ai-chart', label: '🤖 AI 차트 분석' },
   { to: '/ai-cache', slug: 'ai-cache', label: '📊 AI 분석 이력' },
   { to: '/admin', slug: 'admin', label: '관리자' },
+  { to: '/public-requests', slug: 'public-requests', label: '📨 공개 요청' },
 ] as const
 
 function getPageSlug(pathname: string): string {
