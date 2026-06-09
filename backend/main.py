@@ -1734,6 +1734,16 @@ def get_watchlist(current_user=Depends(get_current_user)):
                 }
             )
 
+        # Attach 시가총액(market cap) from Naver for treemap sizing (좌상단=큰 시총).
+        try:
+            caps = _naver_quotes([it["code"] for it in items])
+            for it in items:
+                q = caps.get(it["code"])
+                if q:
+                    it["marketCap"] = q[2]
+        except Exception:
+            pass
+
         return {"items": items}
     finally:
         db.close()
@@ -4993,16 +5003,29 @@ _PUBLIC_WATCHLIST_CACHE: dict = {"ts": 0.0, "items": None}
 _PUBLIC_WATCHLIST_TTL = 90.0  # seconds
 
 
-def _naver_quotes(codes: list[str]) -> dict[str, tuple[float, float]]:
-    """네이버 금융 배치 시세 조회 → {code: (현재가, 등락률%)}.
+def _naver_quotes(codes: list[str]) -> dict[str, tuple[float, float, float]]:
+    """네이버 금융 배치 시세 조회 → {code: (현재가, 등락률%, 시가총액)}.
 
     KIS 토큰 불필요·고속. 한 번에 여러 종목 콤마로 조회(40개씩 청크).
+    시가총액은 marketValueFullRaw(원 단위).
     """
-    out: dict[str, tuple[float, float]] = {}
+    out: dict[str, tuple[float, float, float]] = {}
     if not codes:
         return out
     headers = {"User-Agent": "Mozilla/5.0"}
     chunk = 40
+
+    def _num(d: dict, *keys) -> float:
+        for k in keys:
+            v = d.get(k)
+            if v is None or v == "":
+                continue
+            try:
+                return float(str(v).replace(",", ""))
+            except Exception:
+                continue
+        return 0.0
+
     for i in range(0, len(codes), chunk):
         part = codes[i:i + chunk]
         url = "https://polling.finance.naver.com/api/realtime/domestic/stock/" + ",".join(part)
@@ -5013,15 +5036,10 @@ def _naver_quotes(codes: list[str]) -> dict[str, tuple[float, float]]:
                 code = str(d.get("itemCode") or "")
                 if not code:
                     continue
-                try:
-                    price = float(str(d.get("closePrice", "") or "0").replace(",", ""))
-                except Exception:
-                    price = 0.0
-                try:
-                    ratio = float(str(d.get("fluctuationsRatio", "") or "0").replace(",", ""))
-                except Exception:
-                    ratio = 0.0
-                out[code] = (price, ratio)
+                price = _num(d, "closePriceRaw", "closePrice")
+                ratio = _num(d, "fluctuationsRatioRaw", "fluctuationsRatio")
+                cap = _num(d, "marketValueFullRaw")
+                out[code] = (price, ratio, cap)
         except Exception:
             continue
     return out
@@ -5087,8 +5105,8 @@ def public_watchlist():
     quotes = _naver_quotes([b["code"] for b in base])
     items: list[dict] = []
     for b in base:
-        p, cr = quotes.get(b["code"], (0.0, 0.0))
-        items.append({**b, "price": p, "changeRate": cr})
+        p, cr, cap = quotes.get(b["code"], (0.0, 0.0, 0.0))
+        items.append({**b, "price": p, "changeRate": cr, "marketCap": cap})
 
     _PUBLIC_WATCHLIST_CACHE["items"] = items
     _PUBLIC_WATCHLIST_CACHE["ts"] = time.time()

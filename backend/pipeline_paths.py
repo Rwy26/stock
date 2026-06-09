@@ -23,6 +23,11 @@ class PipelinePaths:
         return self.data_dir / "external"
 
     @property
+    def data_fundamentals(self) -> Path:
+        """기업 기본적 분석(발행주식수·재무 등) 캐시. KIS 재호출 최소화용 (D드라이브)."""
+        return self.data_external / "fundamentals"
+
+    @property
     def data_interim(self) -> Path:
         return self.data_dir / "interim"
 
@@ -79,6 +84,7 @@ class PipelinePaths:
             self.root,
             self.data_raw,
             self.data_external,
+            self.data_fundamentals,
             self.data_interim,
             self.data_processed,
             self.artifacts_models,

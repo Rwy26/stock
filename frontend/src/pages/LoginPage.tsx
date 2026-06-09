@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Navigate, useNavigate } from 'react-router-dom'
 import { fetchJson } from '../lib/api'
 import { getAccessToken, setAccessToken, setUserRole } from '../lib/auth'
+import { isPublicHost } from '../lib/publicApi'
 
 export function LoginPage() {
   const navigate = useNavigate()
@@ -53,6 +54,11 @@ export function LoginPage() {
       cancelled = true
     }
   }, [navigate])
+
+  // On the public tunnel domain, never show the admin login — send guests to the name+phone gate.
+  if (isPublicHost()) {
+    return <Navigate to="/public" replace />
+  }
 
   return (
     <main className="auth-shell">

@@ -45,6 +45,9 @@
       "Bash(git reset*)",
       "PowerShell(git reset*)",
       "PowerShell(.\\scripts\\smoke-sa-plus-user.ps1*)"
+    ],
+    "additionalDirectories": [
+      "D:\\AI\\pipeline"
     ]
   }
 }

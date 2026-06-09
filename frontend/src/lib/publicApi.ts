@@ -34,6 +34,13 @@ export function clearGuest(): void {
   }
 }
 
+/** True when served from a non-local host (i.e. the public tunnel domain), not 127.0.0.1/localhost. */
+export function isPublicHost(): boolean {
+  if (typeof window === 'undefined') return false
+  const h = window.location.hostname
+  return h !== '127.0.0.1' && h !== 'localhost'
+}
+
 export async function publicFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const extraHeaders = (init?.headers ?? {}) as Record<string, string>
   const res = await fetch(path, {

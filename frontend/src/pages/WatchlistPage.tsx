@@ -7,6 +7,7 @@ import { formatNumber, formatPercent } from '../lib/format'
 type WatchItem = {
   name: string; code: string; price: number
   changeRate: number; score: number; sector: string; icon?: string
+  marketCap?: number
 }
 type WatchlistResponse = { items: WatchItem[] }
 type StockRow = { name: string; code: string; price: number; changeRate: number; score: number }
@@ -251,11 +252,12 @@ function scoreToAreaWeight(score: number): number {
   return AREA_MIN_WEIGHT + AREA_MAX_BOOST * asymptotic
 }
 
-function stockDisplayStrength(item: WatchItem): number {
-  const base = scoreToAreaWeight(item.score)
-  const upBoost = 1 + Math.max(item.changeRate, 0) * 0.2
-  const downPenalty = 1 + Math.max(-item.changeRate, 0) * 0.28
-  return (base * upBoost) / downPenalty
+// Tile/sector area weight = 시가총액(market cap). Falls back to a score-based
+// weight (comparable scale) when market cap is unavailable (e.g. admin view).
+function stockWeight(item: WatchItem): number {
+  const cap = typeof item.marketCap === 'number' ? item.marketCap : 0
+  if (cap > 0) return cap
+  return Math.max(scoreToAreaWeight(item.score), 0.001) * 1e11
 }
 
 export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } = {}) {
@@ -369,10 +371,13 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
     const secs = Array.from(secMap.entries()).map(([sec, stocks]) => {
       const total = stocks.length || 1
       const avgChange = stocks.reduce((s, i) => s + i.changeRate, 0) / total
+      const avgScore = stocks.reduce((s, i) => s + (i.score || 0), 0) / total
       const downRatio = stocks.filter(s => s.changeRate < 0).length / total
       const isEtc = sec.includes('기타')
       const isDownSector = isEtc || avgChange <= -0.4 || downRatio >= 0.65
-      const rankedStocks = [...stocks].sort((a, b) => stockDisplayStrength(b) - stockDisplayStrength(a))
+
+      // Rank member stocks by market cap (largest first).
+      const rankedStocks = [...stocks].sort((a, b) => stockWeight(b) - stockWeight(a))
 
       const positiveRatio = stocks.filter(s => s.changeRate > 0).length / total
       const strongRatio = clamp(0.44 + positiveRatio * 0.34 + Math.max(avgChange, 0) * 0.05, 0.3, 1)
@@ -380,57 +385,29 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
       const visibleRatio = isDownSector ? weakRatio : strongRatio
       const visibleCount = clamp(Math.round(stocks.length * visibleRatio), Math.min(2, stocks.length), stocks.length)
       const visibleStocks = rankedStocks.slice(0, visibleCount)
-      const value = visibleStocks.reduce((s, i) => s + stockDisplayStrength(i), 0)
 
-      return {
-        id: sec,
-        sec,
-        stocks,
-        visibleStocks,
-        value,
-        avgChange,
-        isDownSector,
-      }
+      // Sector area = 시가총액 합 × (주도/상승 가중). 큰 시총·주도·상승일수록 커져서 좌상단으로,
+      // 작은 시총·소외·하락일수록 작아져서 우하단으로 배치된다.
+      const capSum = visibleStocks.reduce((s, i) => s + stockWeight(i), 0)
+      const momentum = 1 + clamp(avgChange, -3, 3) * 0.10 + (clamp(avgScore, 0, 100) / 100) * 0.20
+      const value = capSum * Math.max(momentum, 0.3)
+
+      return { id: sec, sec, stocks, visibleStocks, value, avgChange, isDownSector }
     })
 
-    const upperSecs = secs
-      .filter(s => !s.isDownSector)
-      .sort((a, b) => b.value - a.value)
-    const lowerSecs = secs
-      .filter(s => s.isDownSector)
-      .sort((a, b) => b.value - a.value)
-
-    let secRects: TRect[] = []
-    if (!upperSecs.length || !lowerSecs.length) {
-      secRects = squarify(
-        secs.map(s => ({ id: s.id, value: s.value })),
-        0, 0, dims.w, dims.h, SEC_GAP,
-      )
-    } else {
-      const topValue = upperSecs.reduce((s, x) => s + x.value, 0)
-      const bottomValue = lowerSecs.reduce((s, x) => s + x.value, 0)
-      const bottomShare = clamp(bottomValue / (topValue + bottomValue), 0.22, 0.48)
-      const bottomH = Math.round(dims.h * bottomShare)
-      const topH = Math.max(dims.h - bottomH - SEC_GAP, 120)
-      const adjustedBottomH = Math.max(dims.h - topH - SEC_GAP, 90)
-
-      const topRects = squarify(
-        upperSecs.map(s => ({ id: s.id, value: s.value })),
-        0, 0, dims.w, topH, SEC_GAP,
-      )
-      const bottomRects = squarify(
-        lowerSecs.map(s => ({ id: s.id, value: s.value })),
-        0, topH + SEC_GAP, dims.w, adjustedBottomH, SEC_GAP,
-      )
-      secRects = [...topRects, ...bottomRects]
-    }
+    // Single squarified layout sorted by the composite value:
+    // leading large-cap rising sectors → top-left, neglected small-cap falling → bottom-right.
+    const secRects: TRect[] = squarify(
+      secs.map(s => ({ id: s.id, value: s.value })),
+      0, 0, dims.w, dims.h, SEC_GAP,
+    )
 
     return secRects.map(sr => {
       const sd    = secs.find(s => s.id === sr.id)!
       const stkH  = Math.max(sr.h - SEC_H, 0)
       const tiles = stkH > 4
         ? squarify(
-            sd.visibleStocks.map(s => ({ id: s.code, value: stockDisplayStrength(s) })),
+            sd.visibleStocks.map(s => ({ id: s.code, value: stockWeight(s) })),
             0, SEC_H, sr.w, stkH, STK_GAP,
           )
         : []
