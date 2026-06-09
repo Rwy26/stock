@@ -31,6 +31,7 @@ class KisQuote:
     volume: int = 0
     trading_value: float = 0.0
     trade_strength: float = 0.0
+    shares: int = 0  # 상장주식수 (lstn_stcn)
 
 
 @dataclass
@@ -198,6 +199,7 @@ def inquire_price(
     trade_strength = _to_float(
         output.get("cttr") or output.get("CTTR") or output.get("tday_rltv") or output.get("TDAY_RLTV")
     )
+    shares = int(_to_float(output.get("lstn_stcn") or output.get("LSTN_STCN")))
 
     as_of = output.get("stck_cntg_hour") or datetime.now().isoformat()
 
@@ -212,6 +214,7 @@ def inquire_price(
         volume=volume,
         trading_value=trading_value,
         trade_strength=trade_strength,
+        shares=shares,
     )
 
 

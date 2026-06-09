@@ -236,9 +236,9 @@ const SEC_H   = 22  // sector label bar height
 
 // Space allocation uses deadzone + asymptotic compression to avoid extreme area gaps.
 const AREA_MIN_WEIGHT   = 1
-const AREA_MAX_BOOST    = 3.2
-const AREA_DEADZONE     = 15
-const AREA_CURVE_FACTOR = 3.6
+const AREA_MAX_BOOST    = 2.7   // 평준화 강화: 상위 면적 과대 점유 억제
+const AREA_DEADZONE     = 19    // 데드존 강화: 저점 구간 무시 폭 확대
+const AREA_CURVE_FACTOR = 4.1   // 상위 차등 일부 복원
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(Math.max(n, lo), hi)
@@ -252,12 +252,23 @@ function scoreToAreaWeight(score: number): number {
   return AREA_MIN_WEIGHT + AREA_MAX_BOOST * asymptotic
 }
 
-// Tile/sector area weight = 시가총액(market cap). Falls back to a score-based
-// weight (comparable scale) when market cap is unavailable (e.g. admin view).
-function stockWeight(item: WatchItem): number {
+// 원시 규모값 = 시가총액. 시총이 없으면 점수 기반 의사값(단조)으로 폴백.
+function rawCap(item: WatchItem): number {
   const cap = typeof item.marketCap === 'number' ? item.marketCap : 0
-  if (cap > 0) return cap
-  return Math.max(scoreToAreaWeight(item.score), 0.001) * 1e11
+  return cap > 0 ? cap : Math.max(item.score, 1) * 1e10
+}
+
+// 절대 시총 차이를 면적으로 환산할 때의 2단 압축:
+//  1) 로그(점근) 정규화 — 극단적으로 치우친 시총 분포를 그룹 최대값 대비 0~100 으로 펼침
+//  2) 데드존 + 점근 포화 곡선(scoreToAreaWeight) — 저점 무시 + 상위 포화로 면적 편차 완화
+// 단조 함수라 "큰 시총 → 큰/좌상단" 순서는 유지된다.
+function compress(value: number, all: number[]): number {
+  const n = all.length
+  if (n <= 1) return AREA_MIN_WEIGHT + AREA_MAX_BOOST
+  // 순위 백분위(0~100)로 정규화 → 치우친 시총 분포를 균등 분배한 뒤 데드존+점근 곡선 적용.
+  const below = all.filter(x => x < value).length
+  const pct = (below / (n - 1)) * 100
+  return scoreToAreaWeight(pct)
 }
 
 export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } = {}) {
@@ -368,7 +379,7 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
       secMap.get(s)!.push(it)
     }
 
-    const secs = Array.from(secMap.entries()).map(([sec, stocks]) => {
+    const secsRaw = Array.from(secMap.entries()).map(([sec, stocks]) => {
       const total = stocks.length || 1
       const avgChange = stocks.reduce((s, i) => s + i.changeRate, 0) / total
       const avgScore = stocks.reduce((s, i) => s + (i.score || 0), 0) / total
@@ -376,8 +387,8 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
       const isEtc = sec.includes('기타')
       const isDownSector = isEtc || avgChange <= -0.4 || downRatio >= 0.65
 
-      // Rank member stocks by market cap (largest first).
-      const rankedStocks = [...stocks].sort((a, b) => stockWeight(b) - stockWeight(a))
+      // Rank member stocks by raw market cap (largest first); ordering stays cap-based.
+      const rankedStocks = [...stocks].sort((a, b) => rawCap(b) - rawCap(a))
 
       const positiveRatio = stocks.filter(s => s.changeRate > 0).length / total
       const strongRatio = clamp(0.44 + positiveRatio * 0.34 + Math.max(avgChange, 0) * 0.05, 0.3, 1)
@@ -386,17 +397,20 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
       const visibleCount = clamp(Math.round(stocks.length * visibleRatio), Math.min(2, stocks.length), stocks.length)
       const visibleStocks = rankedStocks.slice(0, visibleCount)
 
-      // Sector area = 시가총액 합 × (주도/상승 가중). 큰 시총·주도·상승일수록 커져서 좌상단으로,
-      // 작은 시총·소외·하락일수록 작아져서 우하단으로 배치된다.
-      const capSum = visibleStocks.reduce((s, i) => s + stockWeight(i), 0)
+      const sectorCap = stocks.reduce((s, i) => s + rawCap(i), 0)
       const momentum = 1 + clamp(avgChange, -3, 3) * 0.10 + (clamp(avgScore, 0, 100) / 100) * 0.20
-      const value = capSum * Math.max(momentum, 0.3)
 
-      return { id: sec, sec, stocks, visibleStocks, value, avgChange, isDownSector }
+      return { id: sec, sec, stocks, visibleStocks, sectorCap, momentum, avgChange, isDownSector }
     })
 
-    // Single squarified layout sorted by the composite value:
-    // leading large-cap rising sectors → top-left, neglected small-cap falling → bottom-right.
+    // 섹터 면적 = compress(섹터 시총) × 모멘텀. 로그 점근 정규화 + 데드존 포화로
+    // 절대 시총 차이를 압축 → 큰 시총·주도·상승은 좌상단, 소외·하락은 우하단(단, 편차 완화).
+    const allSectorCaps = secsRaw.map(s => s.sectorCap)
+    const secs = secsRaw.map(s => ({
+      ...s,
+      value: compress(s.sectorCap, allSectorCaps) * Math.max(s.momentum, 0.3),
+    }))
+
     const secRects: TRect[] = squarify(
       secs.map(s => ({ id: s.id, value: s.value })),
       0, 0, dims.w, dims.h, SEC_GAP,
@@ -405,9 +419,11 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
     return secRects.map(sr => {
       const sd    = secs.find(s => s.id === sr.id)!
       const stkH  = Math.max(sr.h - SEC_H, 0)
+      // 섹터 내 종목 타일도 동일 압축(섹터 내 최대 시총 대비) → 대형주 쏠림 완화.
+      const tileCaps = sd.visibleStocks.map(s => rawCap(s))
       const tiles = stkH > 4
         ? squarify(
-            sd.visibleStocks.map(s => ({ id: s.code, value: stockWeight(s) })),
+            sd.visibleStocks.map(s => ({ id: s.code, value: compress(rawCap(s), tileCaps) })),
             0, SEC_H, sr.w, stkH, STK_GAP,
           )
         : []

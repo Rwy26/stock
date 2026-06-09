@@ -35,13 +35,19 @@ HEADERS = {
 
 SVG_URL = "https://ssl.pstatic.net/imgstock/fn/real/logo/stock/Stock{code}.svg"
 PNG_URL = "https://ssl.pstatic.net/imgstock/fn/real/logo/png/stock/Stock{code}.png"
+# 네이버에 없는 종목 보완: 토스 증권 로고 CDN (PNG)
+TOSS_URL = "https://static.toss.im/png-icons/securities/icn-sec-fill-{code}.png"
 
 LOGO_SERVE_PREFIX = "/static/logos"
 
 
 def fetch_logo(code: str) -> tuple[bytes | None, str]:
     """SVG 우선, 없으면 PNG. (content, ext) 반환."""
-    for url, ext in [(SVG_URL.format(code=code), "svg"), (PNG_URL.format(code=code), "png")]:
+    for url, ext in [
+        (SVG_URL.format(code=code), "svg"),
+        (PNG_URL.format(code=code), "png"),
+        (TOSS_URL.format(code=code), "png"),
+    ]:
         try:
             r = httpx.get(url, headers=HEADERS, timeout=8, follow_redirects=True)
             if r.status_code == 200 and len(r.content) > 200:
@@ -139,7 +145,7 @@ def main() -> None:
 
         session.commit()
         total = ok + skipped
-        print(f"\n[logo] done — downloaded={ok}  reused={skipped}  failed={failed}  icon_tags_updated={total}")
+        print(f"\n[logo] done - downloaded={ok}  reused={skipped}  failed={failed}  icon_tags_updated={total}")
     finally:
         session.close()
 

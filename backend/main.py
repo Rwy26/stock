@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 import httpx
 
 import kis_client
+import fundamentals_cache
 
 try:
     import db as apollo_db
@@ -1734,13 +1735,18 @@ def get_watchlist(current_user=Depends(get_current_user)):
                 }
             )
 
-        # Attach 시가총액(market cap) from Naver for treemap sizing (좌상단=큰 시총).
+        # 시총 = 주가 × 발행주식수(D캐시). 캐시 없으면 네이버 시총으로 폴백.
         try:
             caps = _naver_quotes([it["code"] for it in items])
             for it in items:
-                q = caps.get(it["code"])
-                if q:
-                    it["marketCap"] = q[2]
+                sh = fundamentals_cache.get_shares(it["code"])
+                price = float(it.get("price") or 0)
+                if sh > 0 and price > 0:
+                    it["marketCap"] = price * sh
+                else:
+                    q = caps.get(it["code"])
+                    if q:
+                        it["marketCap"] = q[2]
         except Exception:
             pass
 
@@ -5105,7 +5111,9 @@ def public_watchlist():
     quotes = _naver_quotes([b["code"] for b in base])
     items: list[dict] = []
     for b in base:
-        p, cr, cap = quotes.get(b["code"], (0.0, 0.0, 0.0))
+        p, cr, ncap = quotes.get(b["code"], (0.0, 0.0, 0.0))
+        sh = fundamentals_cache.get_shares(b["code"])
+        cap = (p * sh) if (sh > 0 and p > 0) else ncap  # 시총 = 주가 × 발행주식수(D캐시), 없으면 네이버값
         items.append({**b, "price": p, "changeRate": cr, "marketCap": cap})
 
     _PUBLIC_WATCHLIST_CACHE["items"] = items
