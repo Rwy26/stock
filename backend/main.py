@@ -4989,13 +4989,35 @@ def public_sector_rotation():
         raise HTTPException(status_code=502, detail=f"섹터 나침반 계산 실패: {exc}") from exc
 
 
+_PUBLIC_WATCHLIST_CACHE: dict = {"ts": 0.0, "items": None}
+_PUBLIC_WATCHLIST_TTL = 120.0  # seconds
+
+
 @app.get("/api/public/watchlist")
 def public_watchlist():
-    """공개 관심 종목 = admin(대표) 워치리스트, 읽기 전용 / 실시간가 없음."""
+    """공개 관심 종목 = admin(대표) 워치리스트.
+
+    실시간 시세/등락률은 관리자(id 1) KIS 프로필로 서버에서 **병렬** 조회하고,
+    결과를 120초 캐시한다 (게스트 다수 접속에도 KIS 호출 폭증 방지).
+    풀버전 WatchlistPage 트리맵과 동일한 형태(name/code/price/changeRate/score/sector/icon)로 반환.
+    """
     if apollo_db is None or models is None:
         raise HTTPException(status_code=500, detail="DB module not available")
+
+    now = time.time()
+    cached_items = _PUBLIC_WATCHLIST_CACHE.get("items")
+    if cached_items is not None and (now - _PUBLIC_WATCHLIST_CACHE.get("ts", 0.0)) < _PUBLIC_WATCHLIST_TTL:
+        return {"items": cached_items, "cached": True}
+
     db: Session = apollo_db.get_session_factory()()
     try:
+        profile = db.execute(
+            select(models.KisProfile).where(models.KisProfile.user_id == PUBLIC_WATCHLIST_USER_ID)
+        ).scalar_one_or_none()
+        app_key = str(getattr(profile, "app_key", "") or "")
+        app_secret = str(getattr(profile, "app_secret", "") or "")
+        is_paper = _effective_kis_is_paper(profile)
+
         rows = db.execute(
             select(models.Watchlist.stock_code, models.Stock.name, models.StockInterest.tags)
             .join(models.Stock, models.Stock.code == models.Watchlist.stock_code)
@@ -5007,23 +5029,72 @@ def public_watchlist():
             .where(models.Watchlist.user_id == PUBLIC_WATCHLIST_USER_ID)
             .order_by(desc(models.Watchlist.created_at))
         ).all()
-        items: list[dict] = []
-        for code, name, raw_tags in rows:
-            sector = "기타"
+
+        def _extract_sector(raw_tags) -> str:
             for tag in _as_tag_list(raw_tags):
                 seg = str(tag).split("|")[0].strip()
                 if seg and seg not in {"외국인수급", "기관수급", "아이콘", "테마자동"} and not seg.endswith("시장"):
-                    sector = seg
-                    break
-            items.append({
+                    return seg
+            return "기타"
+
+        def _extract_icon(raw_tags, *, name: str, sector: str) -> str:
+            for tag in _as_tag_list(raw_tags):
+                if str(tag).startswith("아이콘|"):
+                    v = str(tag).split("|", 1)[1].strip()
+                    if v:
+                        return v
+            return _icon_from_map(name=name, sector=sector)
+
+        # DB-only fields (fast); price/changeRate fetched concurrently afterwards.
+        base: list[dict] = []
+        for code, name, raw_tags in rows:
+            sector = _extract_sector(raw_tags)
+            base.append({
                 "name": name,
                 "code": code,
                 "score": int(_get_latest_score_total(db, code)),
                 "sector": sector,
+                "icon": _extract_icon(raw_tags, name=str(name or ""), sector=sector),
             })
-        return {"items": items}
     finally:
         db.close()
+
+    def _price(code: str) -> tuple[float, float]:
+        if not (app_key and app_secret):
+            return 0.0, 0.0
+        try:
+            q = kis_client.inquire_price(
+                app_key=app_key,
+                app_secret=app_secret,
+                is_paper=is_paper,
+                code=code,
+                live_base_url=settings.kis_live_base_url,
+                paper_base_url=settings.kis_paper_base_url,
+            )
+            return float(q.price), float(q.change_rate)
+        except Exception:
+            return 0.0, 0.0
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    prices: dict[str, tuple[float, float]] = {}
+    if base:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futs = {ex.submit(_price, b["code"]): b["code"] for b in base}
+            for fut, code in futs.items():
+                try:
+                    prices[code] = fut.result(timeout=20)
+                except Exception:
+                    prices[code] = (0.0, 0.0)
+
+    items: list[dict] = []
+    for b in base:
+        p, cr = prices.get(b["code"], (0.0, 0.0))
+        items.append({**b, "price": p, "changeRate": cr})
+
+    _PUBLIC_WATCHLIST_CACHE["items"] = items
+    _PUBLIC_WATCHLIST_CACHE["ts"] = time.time()
+    return {"items": items, "cached": False}
 
 
 @app.post("/api/public/ai-request")

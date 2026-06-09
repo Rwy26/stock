@@ -8,6 +8,8 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 3001,
     strictPort: true,
+    // Allow Cloudflare Tunnel (TryCloudflare) hostnames to reach the dev server.
+    allowedHosts: ['.trycloudflare.com'],
     proxy: {
       '/api': 'http://127.0.0.1:5001',
       '/health': 'http://127.0.0.1:5001',
