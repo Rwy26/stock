@@ -1423,6 +1423,23 @@ def _load_watchlist_icon_map() -> dict:
     return {"stocks": {}, "sectors": {}, "fallback": "⬤"}
 
 
+_SECTOR_MAP_PATH = REPO_ROOT / "backend" / "sector_classification.json"
+_SECTOR_MAP_CACHE: dict | None = None
+
+
+def _load_sector_map() -> dict:
+    """코드→1차 섹터 분류 맵 (sector_classification.json). 워치리스트 섹터를 태그보다 우선 결정."""
+    global _SECTOR_MAP_CACHE
+    if _SECTOR_MAP_CACHE is None:
+        try:
+            with _SECTOR_MAP_PATH.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            _SECTOR_MAP_CACHE = {k: v for k, v in data.items() if not str(k).startswith("_")} if isinstance(data, dict) else {}
+        except Exception:
+            _SECTOR_MAP_CACHE = {}
+    return _SECTOR_MAP_CACHE
+
+
 def _icon_from_map(*, name: str | None, sector: str | None) -> str:
     cfg = _load_watchlist_icon_map()
     stock_map = cfg.get("stocks") if isinstance(cfg.get("stocks"), dict) else {}
@@ -1722,7 +1739,7 @@ def get_watchlist(current_user=Depends(get_current_user)):
             except Exception:
                 price, change_rate = 0, 0.0
             score = _get_latest_score_total(db, stock_code)
-            sector = _extract_sector(raw_tags)
+            sector = _load_sector_map().get(stock_code) or _extract_sector(raw_tags)
             items.append(
                 {
                     "name": name,
@@ -5097,7 +5114,7 @@ def public_watchlist():
 
         base: list[dict] = []
         for code, name, raw_tags in rows:
-            sector = _extract_sector(raw_tags)
+            sector = _load_sector_map().get(code) or _extract_sector(raw_tags)
             base.append({
                 "name": name,
                 "code": code,
