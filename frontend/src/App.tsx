@@ -22,8 +22,6 @@ import { AiCachePage } from './pages/AiCachePage'
 import { SectorRotationPage } from './pages/SectorRotationPage'
 import { PublicShell } from './layout/PublicShell'
 import { PublicRecommendationsPage } from './pages/public/PublicRecommendationsPage'
-import { PublicSectorPage } from './pages/public/PublicSectorPage'
-import { PublicWatchlistPage } from './pages/public/PublicWatchlistPage'
 import { PublicAiRequestPage } from './pages/public/PublicAiRequestPage'
 import { PublicRequestsPage } from './pages/PublicRequestsPage'
 
@@ -63,8 +61,8 @@ export default function App() {
         {/* Public (guest) area — outside RequireAuth. Name+phone gate only. */}
         <Route path="/public" element={<PublicShell />}>
           <Route index element={<PublicRecommendationsPage />} />
-          <Route path="sector" element={<PublicSectorPage />} />
-          <Route path="watchlist" element={<PublicWatchlistPage />} />
+          <Route path="sector" element={<SectorRotationPage publicMode />} />
+          <Route path="watchlist" element={<WatchlistPage publicMode />} />
           <Route path="ai-request" element={<PublicAiRequestPage />} />
         </Route>
 

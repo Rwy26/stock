@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchJson } from '../lib/api'
+import { publicFetch } from '../lib/publicApi'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -969,7 +970,7 @@ function fmtCountdown(ms: number): string {
   return m > 0 ? `${m}분 ${s}초 후 갱신` : `${s}초 후 갱신`
 }
 
-export function SectorRotationPage() {
+export function SectorRotationPage({ publicMode = false }: { publicMode?: boolean } = {}) {
   const init = loadCached()
   const [data, setData] = useState<RotationData | null>(init.data)
   const [loading, setLoading] = useState(false)
@@ -986,7 +987,9 @@ export function SectorRotationPage() {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetchJson<RotationData>(`/api/sector-rotation${force ? '?force=true' : ''}`)
+      const res = publicMode
+        ? await publicFetch<RotationData>('/api/public/sector-rotation')
+        : await fetchJson<RotationData>(`/api/sector-rotation${force ? '?force=true' : ''}`)
       setData(res)
       setStale(false)
       const now = Date.now()
@@ -1002,7 +1005,7 @@ export function SectorRotationPage() {
       setLoading(false)
       setRefreshing(false)
     }
-  }, [])
+  }, [publicMode])
 
   // 카운트다운 타이머 (1초마다 갱신)
   useEffect(() => {
@@ -1044,17 +1047,19 @@ export function SectorRotationPage() {
           </p>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
-          <button
-            onClick={handleForceRefresh}
-            disabled={loading || refreshing}
-            style={{
-              padding: '7px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)',
-              background: 'rgba(255,255,255,0.06)', color: '#f1f5f9', fontSize: 12,
-              cursor: loading ? 'wait' : 'pointer', fontFamily: 'inherit',
-            }}
-          >
-            {refreshing ? '⏳ 재계산 중...' : '↺ 강제 갱신'}
-          </button>
+          {!publicMode && (
+            <button
+              onClick={handleForceRefresh}
+              disabled={loading || refreshing}
+              style={{
+                padding: '7px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)',
+                background: 'rgba(255,255,255,0.06)', color: '#f1f5f9', fontSize: 12,
+                cursor: loading ? 'wait' : 'pointer', fontFamily: 'inherit',
+              }}
+            >
+              {refreshing ? '⏳ 재계산 중...' : '↺ 강제 갱신'}
+            </button>
+          )}
           {data && (
             <div style={{ textAlign: 'right' }}>
               <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', display: 'block' }}>

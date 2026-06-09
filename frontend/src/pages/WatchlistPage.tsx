@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJson } from '../lib/api'
+import { publicFetch } from '../lib/publicApi'
 import { formatNumber, formatPercent } from '../lib/format'
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -257,7 +258,7 @@ function stockDisplayStrength(item: WatchItem): number {
   return (base * upBoost) / downPenalty
 }
 
-export function WatchlistPage() {
+export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } = {}) {
   const [data, setData]           = useState<WatchlistResponse | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [busyCode, setBusyCode]   = useState<string | null>(null)
@@ -280,9 +281,17 @@ export function WatchlistPage() {
   const containerRef              = useRef<HTMLDivElement>(null)
   const [dims, setDims]           = useState({ w: 900, h: 620 })
 
+  const loadWatchlist = useCallback(
+    (): Promise<WatchlistResponse> =>
+      publicMode
+        ? publicFetch<WatchlistResponse>('/api/public/watchlist')
+        : loadWatchlist(),
+    [publicMode],
+  )
+
   const refresh = useCallback(() => {
     setIsLoading(true)
-    fetchJson<WatchlistResponse>('/api/watchlist')
+    loadWatchlist()
       .then(p => {
         setData(p)
         setCachedItems(p.items)
@@ -301,7 +310,7 @@ export function WatchlistPage() {
     let dead = false
     const load = () => {
       if (!dead) setIsLoading(true)
-      fetchJson<WatchlistResponse>('/api/watchlist')
+      loadWatchlist()
         .then(p => {
           if (dead) return
           setData(p)
@@ -450,9 +459,11 @@ export function WatchlistPage() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
           <div className="status-pill">총 {items.length}개</div>
-          <button className="btn" type="button" onClick={() => setShowSearch(v => !v)}>
-            {showSearch ? '✕ 닫기' : '＋ 종목 추가'}
-          </button>
+          {!publicMode && (
+            <button className="btn" type="button" onClick={() => setShowSearch(v => !v)}>
+              {showSearch ? '✕ 닫기' : '＋ 종목 추가'}
+            </button>
+          )}
         </div>
       </header>
 
@@ -627,7 +638,7 @@ export function WatchlistPage() {
                   }}
                 >
                   {/* Hover: delete button */}
-                  {isHov && (
+                  {isHov && !publicMode && (
                     <button
                       type="button"
                       onClick={e => { e.stopPropagation(); handleDelete(item.code) }}
@@ -673,7 +684,7 @@ export function WatchlistPage() {
                       }}>
                         {icon.startsWith('/') || icon.startsWith('http') ? (
                           <img
-                            src={`http://127.0.0.1:8000${icon.startsWith('/') ? icon : ''}`}
+                            src={icon}
                             alt=""
                             style={{
                               width: showFull ? 18 : 14,
