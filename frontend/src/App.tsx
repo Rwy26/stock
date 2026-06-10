@@ -21,7 +21,6 @@ import { AiChartPage } from './pages/AiChartPage'
 import { AiCachePage } from './pages/AiCachePage'
 import { SectorRotationPage } from './pages/SectorRotationPage'
 import { PublicShell } from './layout/PublicShell'
-import { PublicRecommendationsPage } from './pages/public/PublicRecommendationsPage'
 import { PublicAiRequestPage } from './pages/public/PublicAiRequestPage'
 import { PublicRequestsPage } from './pages/PublicRequestsPage'
 
@@ -60,7 +59,8 @@ export default function App() {
 
         {/* Public (guest) area — outside RequireAuth. Name+phone gate only. */}
         <Route path="/public" element={<PublicShell />}>
-          <Route index element={<PublicRecommendationsPage />} />
+          {/* 종목 추천은 공개 메뉴에서 제외 — 첫 화면은 섹터 나침반 */}
+          <Route index element={<Navigate to="/public/sector" replace />} />
           <Route path="sector" element={<SectorRotationPage publicMode />} />
           <Route path="watchlist" element={<WatchlistPage publicMode />} />
           <Route path="ai-request" element={<PublicAiRequestPage />} />
