@@ -90,6 +90,12 @@ class Settings:
     # auto = 설정된 키 중 Gemini > Groq > OpenAI 우선순위로 자동 선택
     ai_provider: str = os.getenv("AI_PROVIDER", "auto").strip().lower() or "auto"
 
+    # Google OAuth 관리자 로그인 (공개 도메인에서 비밀번호 없이 관리자 진입)
+    # GOOGLE_OAUTH_CLIENT_ID: Google Cloud Console > OAuth 클라이언트 ID (웹)
+    # ADMIN_GOOGLE_EMAIL: 이 구글 계정만 관리자 로그인 허용 (소문자 비교)
+    google_oauth_client_id: str = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+    admin_google_email: str = os.getenv("ADMIN_GOOGLE_EMAIL", "").strip().lower()
+
     # DART OpenAPI (공시 / 재무제표 실적)
     # 발급: https://opendart.fss.or.kr/uss/umt/EgovMberInfoEdit.do
     dart_api_key: str = os.getenv("DART_API_KEY", "").strip()

@@ -186,11 +186,85 @@ def analyze_stock(code: str, with_ai: bool = True) -> dict:
     if with_ai:
         ai_report, provider = _call_stock_llm(context)
 
-    return {
+    result = {
         **context,
         "aiReport": ai_report,
         "aiProvider": provider,
     }
+
+    # AI 분석 이력(ai_analysis_cache)에 자동 저장 — 실패해도 분석 결과 반환은 유지
+    try:
+        _save_history(result)
+    except Exception:
+        pass
+
+    return result
+
+
+def _save_history(result: dict) -> None:
+    """분석 결과를 AI 분석 이력 테이블에 upsert (AI 분석 이력 페이지에 표시됨).
+
+    signal 매핑(결정론 점수 기준): 80+ STRONG_BUY / 70+ BUY / 55+ HOLD / 40+ SELL / 미만 STRONG_SELL
+    confidence = 종합 점수, upside_probability = 목표가 선도달 확률(빈도 기반).
+    """
+    from datetime import datetime as _dt
+
+    import db
+    import models
+    from sqlalchemy import select
+
+    st = result.get("stock", {})
+    comp = result.get("composite", {})
+    prob = result.get("probability", {}) or {}
+    score = float(comp.get("score") or 0)
+    signal = (
+        "STRONG_BUY" if score >= 80 else
+        "BUY" if score >= 70 else
+        "HOLD" if score >= 55 else
+        "SELL" if score >= 40 else
+        "STRONG_SELL"
+    )
+    reach = prob.get("reachTargetPct")
+
+    payload = {
+        "source": "market-compass-12stage",
+        "composite": comp,
+        "market": result.get("market", {}).get("regime"),
+        "mtfAlignment": result.get("mtf", {}).get("alignment"),
+        "targets": result.get("targets"),
+        "stops": result.get("stops"),
+        "probability": prob,
+        "aiReport": result.get("aiReport"),
+        "aiProvider": result.get("aiProvider"),
+    }
+
+    session = db.get_session_factory()()
+    try:
+        row = session.execute(
+            select(models.AiAnalysisCache).where(
+                models.AiAnalysisCache.stock_code == st.get("code")
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            session.add(models.AiAnalysisCache(
+                stock_code=st.get("code"),
+                stock_name=st.get("name"),
+                analyzed_at=_dt.utcnow(),
+                signal=signal,
+                confidence=score,
+                upside_probability=float(reach) if reach is not None else None,
+                result_json=payload,
+            ))
+        else:
+            row.stock_name = st.get("name") or row.stock_name
+            row.analyzed_at = _dt.utcnow()
+            row.signal = signal
+            row.confidence = score
+            row.upside_probability = float(reach) if reach is not None else None
+            row.result_json = payload
+        session.commit()
+    finally:
+        session.close()
 
 
 def _call_stock_llm(context: dict) -> tuple[Optional[str], str]:

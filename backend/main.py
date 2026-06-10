@@ -3350,6 +3350,78 @@ def kis_quote(code: str, current_user=Depends(get_current_user)):
         db.close()
 
 
+@app.get("/api/auth/google/config")
+def google_auth_config():
+    """구글 로그인 활성 여부 + 클라이언트 ID (프론트 버튼 렌더용 — 공개 정보)."""
+    enabled = bool(settings.google_oauth_client_id and settings.admin_google_email)
+    return {"enabled": enabled, "clientId": settings.google_oauth_client_id if enabled else None}
+
+
+@app.post("/api/auth/google")
+def google_login(request: Request, payload: dict = Body(...)):
+    """구글 ID 토큰으로 관리자 로그인 (공개 도메인용 — 비밀번호 미노출).
+
+    검증: 구글 tokeninfo로 서명·만료 확인 → aud(클라이언트 ID) 일치
+          → email_verified → ADMIN_GOOGLE_EMAIL 과 일치할 때만 허용.
+    """
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    if not (settings.google_oauth_client_id and settings.admin_google_email):
+        raise HTTPException(status_code=503, detail="Google 로그인 미설정")
+
+    credential = (payload.get("credential") or "").strip()
+    if not credential:
+        raise HTTPException(status_code=400, detail="credential is required")
+
+    try:
+        resp = httpx.get(
+            "https://oauth2.googleapis.com/tokeninfo",
+            params={"id_token": credential}, timeout=10.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail="구글 토큰 검증 실패(네트워크)") from exc
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="유효하지 않은 구글 토큰")
+    info = resp.json()
+
+    if str(info.get("aud") or "") != settings.google_oauth_client_id:
+        raise HTTPException(status_code=401, detail="토큰 대상(aud) 불일치")
+    if str(info.get("email_verified") or "").lower() != "true":
+        raise HTTPException(status_code=401, detail="이메일 미인증 계정")
+    email = str(info.get("email") or "").strip().lower()
+    if email != settings.admin_google_email:
+        raise HTTPException(status_code=403, detail="허용되지 않은 계정")
+
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        user = db.execute(
+            select(models.User).where(models.User.email == "administrator")
+        ).scalar_one_or_none()
+        if user is None or not user.is_active:
+            raise HTTPException(status_code=500, detail="관리자 계정 없음")
+        try:
+            ip = request.client.host if request.client else None
+            db.add(models.LoginHistory(
+                user_id=int(user.id), event="google-login", ip=ip,
+                user_agent=request.headers.get("user-agent"),
+            ))
+            db.commit()
+        except Exception:
+            db.rollback()
+        token = auth.create_access_token(
+            subject=str(user.id), secret=settings.jwt_secret,
+            expires_minutes=settings.jwt_expire_minutes,
+        )
+        return {
+            "accessToken": token,
+            "tokenType": "bearer",
+            "user": {"id": int(user.id), "email": user.email,
+                     "nickname": user.nickname, "role": user.role},
+        }
+    finally:
+        db.close()
+
+
 @app.post("/api/auth/login")
 def login(request: Request, payload: dict = Body(...)):
     if apollo_db is None or models is None:
