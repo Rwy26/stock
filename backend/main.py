@@ -5025,6 +5025,37 @@ def public_sector_rotation():
 _PUBLIC_WATCHLIST_CACHE: dict = {"ts": 0.0, "items": None}
 _PUBLIC_WATCHLIST_TTL = 90.0  # seconds
 
+# 관심종목 섹터 태그용 ETF (코드·이름 네이버 검증 완료 2026-06-10). 고정 허용목록.
+_PUBLIC_ETF_CODES = [
+    "069500",  # KODEX 200
+    "487240",  # KODEX AI전력핵심설비
+    "471990",  # KODEX AI반도체핵심장비
+    "0098F0",  # KODEX 원자력SMR
+    "445290",  # KODEX 로봇액티브
+    "0080G0",  # KODEX 방산TOP10
+    "305720",  # KODEX 2차전지산업
+    "117700",  # KODEX 건설
+    "0167Z0",  # KODEX 미국우주항공
+]
+_PUBLIC_ETF_CACHE: dict = {"ts": 0.0, "items": None}
+_PUBLIC_ETF_TTL = 60.0  # seconds
+
+
+@app.get("/api/public/etf-quotes")
+def public_etf_quotes():
+    """섹터 태그 ETF 시세 (네이버 배치 1콜, 60초 캐시). 인증 불필요 — 공개 시세."""
+    now = time.time()
+    if _PUBLIC_ETF_CACHE["items"] is not None and (now - _PUBLIC_ETF_CACHE["ts"]) < _PUBLIC_ETF_TTL:
+        return {"items": _PUBLIC_ETF_CACHE["items"], "cached": True}
+    quotes = _naver_quotes(_PUBLIC_ETF_CODES)
+    items = {
+        code: {"price": p, "changeRate": r}
+        for code, (p, r, _cap) in quotes.items()
+    }
+    _PUBLIC_ETF_CACHE["items"] = items
+    _PUBLIC_ETF_CACHE["ts"] = now
+    return {"items": items, "cached": False}
+
 
 def _naver_quotes(codes: list[str]) -> dict[str, tuple[float, float, float]]:
     """네이버 금융 배치 시세 조회 → {code: (현재가, 등락률%, 시가총액)}.

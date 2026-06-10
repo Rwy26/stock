@@ -251,6 +251,22 @@ const SEC_GAP = 3   // gap between sector blocks
 const STK_GAP = 1   // gap between stock tiles
 const SEC_H   = 22  // sector label bar height
 
+// 섹터별 대표 ETF 태그 (코드·이름 네이버 검증 완료 2026-06-10). 클릭 시 네이버 시세로 이동.
+const SECTOR_ETFS: Record<string, { code: string; label: string }[]> = {
+  '반도체':      [{ code: '471990', label: 'AI반도체핵심장비' }],
+  '전력 인프라': [{ code: '487240', label: 'AI전력핵심설비' }, { code: '0098F0', label: '원자력SMR' }],
+  '로봇 AI':     [{ code: '445290', label: '로봇액티브' }],
+  '방산':        [{ code: '0080G0', label: '방산TOP10' }, { code: '0167Z0', label: '미국우주항공' }],
+  '2차전지':     [{ code: '305720', label: '2차전지산업' }],
+  '기타':        [{ code: '117700', label: '건설' }],
+}
+// 시장 전체 기준 ETF — 페이지 상단에 표시
+const MARKET_ETF = { code: '069500', label: 'KODEX 200' }
+
+function openNaverItem(code: string) {
+  window.open(`https://finance.naver.com/item/main.naver?code=${code}`, '_blank', 'noreferrer')
+}
+
 // 면적 배분: 거듭제곱(점진) 압축 + 최소 면적 플로어(데드존).
 //   w = FLOOR + (1-FLOOR) × (시총/전역최대시총)^ALPHA
 // - 단조: 시총이 크면 반드시 더 큰 면적 (전역 최대 = 1.0 기준)
@@ -298,6 +314,21 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
   })
   const containerRef              = useRef<HTMLDivElement>(null)
   const [dims, setDims]           = useState({ w: 900, h: 620 })
+  const [etfQuotes, setEtfQuotes] = useState<Record<string, { price: number; changeRate: number }>>({})
+
+  // ETF 태그 시세 (공개 엔드포인트, 서버측 60초 캐시)
+  useEffect(() => {
+    let dead = false
+    const load = () => {
+      fetch('/api/public/etf-quotes')
+        .then(r => r.json())
+        .then(d => { if (!dead) setEtfQuotes(d.items ?? {}) })
+        .catch(() => {})
+    }
+    load()
+    const t = setInterval(load, 60_000)
+    return () => { dead = true; clearInterval(t) }
+  }, [])
 
   const loadWatchlist = useCallback(
     (): Promise<WatchlistResponse> =>
@@ -395,28 +426,22 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
       // Rank member stocks by raw market cap (largest first); ordering stays cap-based.
       const rankedStocks = [...stocks].sort((a, b) => rawCap(b) - rawCap(a))
 
-      const positiveRatio = stocks.filter(s => s.changeRate > 0).length / total
-      const strongRatio = clamp(0.44 + positiveRatio * 0.34 + Math.max(avgChange, 0) * 0.05, 0.3, 1)
-      const weakRatio = clamp(0.28 + positiveRatio * 0.16, 0.2, 0.55)
-      const visibleRatio = isDownSector ? weakRatio : strongRatio
-      const visibleCount = clamp(Math.round(stocks.length * visibleRatio), Math.min(2, stocks.length), stocks.length)
-      const visibleStocks = rankedStocks.slice(0, visibleCount)
-
       const sectorCap = stocks.reduce((s, i) => s + rawCap(i), 0)
       const momentum = 1 + clamp(avgChange, -3, 3) * 0.10 + (clamp(avgScore, 0, 100) / 100) * 0.20
 
-      return { id: sec, sec, stocks, rankedStocks, visibleStocks, sectorCap, momentum, avgChange, isDownSector }
+      return { id: sec, sec, stocks, rankedStocks, sectorCap, momentum, avgChange, isDownSector }
     })
 
     // 전역 단조성 보장: 모든 종목을 단일 척도(관심종목 전체, 최대 시총=1.0)로 압축하고
     // 섹터 면적 = 보이는 타일 가중치의 합 → 섹터 면적은 같을 필요 없이 비중대로 벌어진다.
     // "시총이 더 작은 종목이 더 큰 공간을 가질 수 없다"가 섹터 경계를 넘어 성립한다.
-    // 소외 섹터(하락/기타 + 시총 비중 8% 미만)는 빈칸 대신 시총 상위 4개까지만 작게 노출.
+    // 소외 섹터(하락/기타 + 시총 비중 8% 미만)만 공간이 작으므로 시총 상위 4개로 한정,
+    // 그 외 섹터는 공간이 충분하므로 전 종목 노출.
     const allCaps = items.map(it => rawCap(it))
     const totalCap = allCaps.reduce((a, b) => a + b, 0)
     const secs = secsRaw.map(s => {
       const marginal = s.isDownSector && totalCap > 0 && s.sectorCap / totalCap < 0.08
-      const visibleStocks = marginal ? s.rankedStocks.slice(0, 4) : s.visibleStocks
+      const visibleStocks = marginal ? s.rankedStocks.slice(0, 4) : s.rankedStocks
       const value = visibleStocks.reduce((sum, st) => sum + compress(rawCap(st), allCaps), 0)
       return { ...s, visibleStocks, value }
     })
@@ -461,6 +486,22 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
           <h2>관심 종목</h2>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <div
+            className="status-pill"
+            onClick={() => openNaverItem(MARKET_ETF.code)}
+            title={`${MARKET_ETF.label} (${MARKET_ETF.code}) — 네이버 시세 보기`}
+            style={{ cursor: 'pointer', color: '#93c5fd' }}
+          >
+            ETF {MARKET_ETF.label}
+            {etfQuotes[MARKET_ETF.code] != null && (
+              <span style={{
+                marginLeft: 5, fontWeight: 800,
+                color: etfQuotes[MARKET_ETF.code].changeRate >= 0 ? '#34d399' : '#f87171',
+              }}>
+                {formatPercent(etfQuotes[MARKET_ETF.code].changeRate)}
+              </span>
+            )}
+          </div>
           <div className="status-pill">총 {items.length}개</div>
           {!publicMode && (
             <button className="btn" type="button" onClick={() => setShowSearch(v => !v)}>
@@ -604,6 +645,34 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
               <span style={{ marginLeft: 5, opacity: 0.42, fontWeight: 400 }}>
                 {sec.shownCount}/{sec.totalCount}
               </span>
+              {(SECTOR_ETFS[sec.sec] ?? []).map(etf => {
+                const q = etfQuotes[etf.code]
+                return (
+                  <span
+                    key={etf.code}
+                    onClick={e => { e.stopPropagation(); openNaverItem(etf.code) }}
+                    title={`KODEX ${etf.label} (${etf.code}) — 네이버 시세 보기`}
+                    style={{
+                      marginLeft: 6, padding: '1px 7px',
+                      fontSize: '0.66rem', fontWeight: 600, letterSpacing: 0,
+                      color: '#93c5fd', background: 'rgba(96,165,250,0.12)',
+                      border: '1px solid rgba(96,165,250,0.3)', borderRadius: 99,
+                      pointerEvents: 'auto', cursor: 'pointer',
+                      overflow: 'hidden', textOverflow: 'ellipsis',
+                    }}
+                  >
+                    ETF {etf.label}
+                    {q != null && (
+                      <span style={{
+                        marginLeft: 4, fontWeight: 800,
+                        color: q.changeRate >= 0 ? '#34d399' : '#f87171',
+                      }}>
+                        {formatPercent(q.changeRate)}
+                      </span>
+                    )}
+                  </span>
+                )
+              })}
             </div>
 
             {/* Stock tiles */}
