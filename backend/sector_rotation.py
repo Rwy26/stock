@@ -23,65 +23,76 @@ warnings.filterwarnings("ignore")
 # ---------------------------------------------------------------------------
 # Sector definitions: 섹터명 → 대표 종목 코드 (KOSPI)
 # ---------------------------------------------------------------------------
+# 관심종목(sector_classification.json)과 동일한 섹터 체계.
+# 각 섹터 대표 4종목 = 시총 상위(대장주 우선). 코드↔이름은 네이버 금융으로 전수 검증(2026-06-10).
 SECTORS: Dict[str, List[str]] = {
-    "AI·반도체":   ["000660", "005930", "042700", "288490"],  # SK하이닉스, 삼성전자, 한미반도체, 레이크머티
-    "전력기기":    ["267260", "001440", "103590"],             # LS ELECTRIC, 국일신동, 한국전선
-    "방산":        ["012450", "047810", "079550"],             # 한화에어로, KAI, LIG넥스원
-    "조선":        ["009540", "010140", "042660"],             # HD한국조선해양, 삼성중공업, HD현대중공업
-    "금융":        ["105560", "055550", "086790", "316140"],   # KB금융, 신한지주, 하나금융, 우리금융
-    "2차전지":     ["373220", "051910", "096770"],             # LG에너지솔루션, LG화학, SK이노베이션
-    "자동차·로봇": ["005380", "000270", "267250", "277810"],  # 현대차, 기아, 현대로보틱스, 레인보우로보틱스
-    "바이오":      ["207940", "068270", "326030"],             # 삼성바이오, 셀트리온, SK바이오팜
+    "반도체":      ["005930", "000660", "009150", "042700"],  # 삼성전자, SK하이닉스, 삼성전기, 한미반도체
+    "AI 생태계":   ["035420", "034730", "018260", "030200"],  # NAVER, SK, 삼성에스디에스, KT
+    "로봇 AI":     ["005380", "000270", "277810", "108490"],  # 현대차, 기아, 레인보우로보틱스, 로보티즈
+    "전력 인프라": ["267260", "103590", "001440", "060370"],  # HD현대일렉트릭, 일진전기, 대한전선, LS마린솔루션
+    "조선":        ["329180", "009540", "042660", "010140"],  # HD현대중공업, HD한국조선해양, 한화오션, 삼성중공업
+    "방산":        ["012450", "047810", "272210", "079550"],  # 한화에어로스페이스, 한국항공우주, 한화시스템, LIG디펜스
+    "금융":        ["105560", "055550", "086790", "316140"],  # KB금융, 신한지주, 하나금융지주, 우리금융지주
+    "바이오":      ["207940", "068270", "196170", "326030"],  # 삼성바이오로직스, 셀트리온, 알테오젠, SK바이오팜
+    "2차전지":     ["373220", "051910", "247540", "003670"],  # LG에너지솔루션, LG화학, 에코프로비엠, 포스코퓨처엠
+    "화학":        ["096770", "009830", "010060"],             # SK이노베이션, 한화솔루션, OCI홀딩스
 }
 
-# 종목 코드 → 한국어 이름
+# 종목 코드 → 한국어 이름 (네이버 금융 기준 실명)
 CODE_NAMES: Dict[str, str] = {
-    "000660": "SK하이닉스",  "005930": "삼성전자",     "042700": "한미반도체",  "288490": "레이크머티",
-    "267260": "LS ELECTRIC", "001440": "국일신동",     "103590": "한국전선",
-    "012450": "한화에어로",  "047810": "KAI",          "079550": "LIG넥스원",
-    "009540": "HD한국조선", "010140": "삼성중공업",   "042660": "HD현대중공",
-    "105560": "KB금융",      "055550": "신한지주",     "086790": "하나금융",    "316140": "우리금융",
-    "373220": "LG에너지솔", "051910": "LG화학",       "096770": "SK이노베이션",
-    "005380": "현대차",      "000270": "기아",         "267250": "현대로보틱스", "277810": "레인보우로보",
-    "207940": "삼성바이오", "068270": "셀트리온",     "326030": "SK바이오팜",
+    "005930": "삼성전자",     "000660": "SK하이닉스",   "009150": "삼성전기",     "042700": "한미반도체",
+    "035420": "NAVER",        "034730": "SK",           "018260": "삼성에스디에스", "030200": "KT",
+    "005380": "현대차",       "000270": "기아",         "277810": "레인보우로보틱스", "108490": "로보티즈",
+    "267260": "HD현대일렉트릭", "103590": "일진전기",   "001440": "대한전선",     "060370": "LS마린솔루션",
+    "329180": "HD현대중공업", "009540": "HD한국조선해양", "042660": "한화오션",   "010140": "삼성중공업",
+    "012450": "한화에어로스페이스", "047810": "한국항공우주", "272210": "한화시스템", "079550": "LIG디펜스",
+    "105560": "KB금융",       "055550": "신한지주",     "086790": "하나금융지주", "316140": "우리금융지주",
+    "207940": "삼성바이오로직스", "068270": "셀트리온", "196170": "알테오젠",     "326030": "SK바이오팜",
+    "373220": "LG에너지솔루션", "051910": "LG화학",     "247540": "에코프로비엠", "003670": "포스코퓨처엠",
+    "096770": "SK이노베이션", "009830": "한화솔루션",   "010060": "OCI홀딩스",
 }
 
-# 섹터별 주도주 / 소부장(소재·부품·장비) 구분
+# 섹터별 주도주(시총 대장) / 소부장·동종 구분 — 주도주 = 시총 상위 2개
 SECTOR_ROLES: Dict[str, Dict[str, List[str]]] = {
-    "AI·반도체":   {"주도주": ["000660", "005930"], "소부장": ["042700", "288490"]},
-    "전력기기":    {"주도주": ["267260"],            "소부장": ["001440", "103590"]},
-    "방산":        {"주도주": ["012450", "047810"], "소부장": ["079550"]},
-    "조선":        {"주도주": ["009540", "010140"], "소부장": ["042660"]},
+    "반도체":      {"주도주": ["005930", "000660"], "소부장": ["009150", "042700"]},
+    "AI 생태계":   {"주도주": ["035420", "034730"], "소부장": ["018260", "030200"]},
+    "로봇 AI":     {"주도주": ["005380", "000270"], "소부장": ["277810", "108490"]},
+    "전력 인프라": {"주도주": ["267260", "103590"], "소부장": ["001440", "060370"]},
+    "조선":        {"주도주": ["329180", "009540"], "소부장": ["042660", "010140"]},
+    "방산":        {"주도주": ["012450", "047810"], "소부장": ["272210", "079550"]},
     "금융":        {"주도주": ["105560", "055550"], "소부장": ["086790", "316140"]},
-    "2차전지":     {"주도주": ["373220"],            "소부장": ["051910", "096770"]},
-    "자동차·로봇": {"주도주": ["005380", "000270"], "소부장": ["267250", "277810"]},
-    "바이오":      {"주도주": ["207940", "068270"], "소부장": ["326030"]},
+    "바이오":      {"주도주": ["207940", "068270"], "소부장": ["196170", "326030"]},
+    "2차전지":     {"주도주": ["373220", "051910"], "소부장": ["247540", "003670"]},
+    "화학":        {"주도주": ["096770", "009830"], "소부장": ["010060"]},
 }
 
 # 섹터별 현재 시장 트렌드 테마 (주기적 갱신 예정)
 SECTOR_TRENDS: Dict[str, Dict] = {
-    "AI·반도체":   {"tags": ["HBM", "AI인프라", "엔비디아밸류체인"],       "theme": "AI 데이터센터 폭발적 수요"},
-    "전력기기":    {"tags": ["데이터센터전력", "HVDC", "에너지전환"],       "theme": "전력망 현대화 수혜"},
-    "방산":        {"tags": ["K방산수출", "NATO재무장", "폴란드계약"],      "theme": "글로벌 지정학 리스크 수혜"},
+    "반도체":      {"tags": ["HBM", "AI인프라", "엔비디아밸류체인"],       "theme": "AI 데이터센터 폭발적 수요"},
+    "AI 생태계":   {"tags": ["클라우드", "AI서비스", "소버린AI"],           "theme": "클라우드·AI 플랫폼 기대감"},
+    "로봇 AI":     {"tags": ["휴머노이드", "자율주행", "피지컬AI"],         "theme": "모빌리티·AI로봇 융합 테마"},
+    "전력 인프라": {"tags": ["데이터센터전력", "HVDC", "원전·에너지전환"],  "theme": "전력망 현대화 수혜"},
     "조선":        {"tags": ["LNG선", "친환경선박", "수주잔고최대"],        "theme": "조선 슈퍼사이클 진입"},
+    "방산":        {"tags": ["K방산수출", "NATO재무장", "폴란드계약"],      "theme": "글로벌 지정학 리스크 수혜"},
     "금융":        {"tags": ["고금리수혜", "밸류업", "배당확대"],           "theme": "정부 밸류업 프로그램"},
-    "2차전지":     {"tags": ["ESS전환", "전기차조정", "소재다변화"],        "theme": "ESS·에너지저장 전환 모색"},
-    "자동차·로봇": {"tags": ["AI로봇", "휴머노이드", "자율주행", "로봇택시"], "theme": "모빌리티·AI로봇 융합 테마"},
     "바이오":      {"tags": ["ADC항체약물", "비만치료제", "AI신약"],        "theme": "글로벌 바이오텍 확장"},
+    "2차전지":     {"tags": ["ESS전환", "전기차조정", "소재다변화"],        "theme": "ESS·에너지저장 전환 모색"},
+    "화학":        {"tags": ["정유스프레드", "태양광소재", "친환경전환"],   "theme": "화학 업황 턴어라운드 대기"},
 }
 
 WEIGHTS = {
-    "macro": 0.15,
-    "foreign": 0.25,
-    "institutional": 0.20,
-    "momentum": 0.20,
-    "news": 0.05,
-    "volume": 0.10,
-    "smart": 0.05,
+    "macro": 0.12,
+    "foreign": 0.22,
+    "institutional": 0.17,
+    "momentum": 0.18,
+    "news": 0.04,
+    "volume": 0.09,
+    "smart": 0.03,
+    "intraday": 0.15,  # 당일 실시간 등락 — 장중 로테이션 즉시 반영 (KIS와 동일성 검증된 네이버 실시간)
 }
 
 # 성장주 우호 섹터 (금리하락 시 +) vs 가치주 우호 섹터 (금리상승 시 +)
-GROWTH_SECTORS = {"AI·반도체", "2차전지", "바이오", "자동차·로봇"}
+GROWTH_SECTORS = {"반도체", "AI 생태계", "로봇 AI", "2차전지", "바이오"}
 VALUE_SECTORS  = {"금융", "방산"}
 
 # ---------------------------------------------------------------------------
@@ -90,7 +101,21 @@ VALUE_SECTORS  = {"금융", "방산"}
 _cache_lock = threading.Lock()
 _cache: Optional[dict] = None
 _cache_ts: float = 0.0
-CACHE_TTL = 28800  # 8시간 (매일 장마감 후 1회 갱신 권장)
+CACHE_TTL = 28800        # 장외: 8시간 (일별 데이터는 하루 1회 갱신이면 충분)
+CACHE_TTL_MARKET = 900   # 장중: 15분 — 당일 실시간 레이어가 장중 로테이션을 따라가도록
+
+
+def _is_market_hours() -> bool:
+    """KRX 정규장 (평일 09:00~15:30 KST). 서버는 KST 가정."""
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False
+    hm = now.hour * 60 + now.minute
+    return 9 * 60 <= hm <= 15 * 60 + 30
+
+
+def _current_ttl() -> int:
+    return CACHE_TTL_MARKET if _is_market_hours() else CACHE_TTL
 
 
 # ---------------------------------------------------------------------------
@@ -599,13 +624,52 @@ def _lifecycle(score: float, foreign: float, institutional: float) -> Tuple[str,
 # ---------------------------------------------------------------------------
 # Main entry
 # ---------------------------------------------------------------------------
+def _intraday_scores() -> tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+    """당일 실시간 등락 레이어.
+
+    네이버 실시간 polling API (KIS inquire_price와 39종목 전수 대조로 동일성 검증, 2026-06-10).
+    KIS는 종목당 1콜(레이트리밋)이라 장중 15분 캐시에는 배치 1콜인 네이버를 사용한다.
+    반환: (섹터별 점수 0~100, 섹터별 평균 등락%, 종목별 등락%)
+    """
+    import httpx as _httpx
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    all_codes = sorted({c for codes in SECTORS.values() for c in codes})
+    code_chg: Dict[str, float] = {}
+    for i in range(0, len(all_codes), 40):
+        part = all_codes[i:i + 40]
+        try:
+            r = _httpx.get(
+                "https://polling.finance.naver.com/api/realtime/domestic/stock/" + ",".join(part),
+                headers=headers, timeout=8.0,
+            )
+            for d in r.json().get("datas", []):
+                c = str(d.get("itemCode") or "")
+                try:
+                    code_chg[c] = float(str(d.get("fluctuationsRatio") or 0))
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    sector_pct: Dict[str, float] = {}
+    sector_score: Dict[str, float] = {}
+    for sector, codes in SECTORS.items():
+        chgs = [code_chg[c] for c in codes if c in code_chg]
+        avg = sum(chgs) / len(chgs) if chgs else 0.0
+        sector_pct[sector] = round(avg, 2)
+        # ±4% 등락을 0~100 점수로 사상 (50 = 보합)
+        sector_score[sector] = round(max(0.0, min(100.0, 50.0 + avg * 12.5)), 1)
+    return sector_score, sector_pct, code_chg
+
+
 def compute_sector_rotation(force: bool = False) -> dict:
-    """전체 계산 후 JSON 직렬화 가능한 dict 반환. 1시간 캐시."""
+    """전체 계산 후 JSON 직렬화 가능한 dict 반환. 캐시: 장중 15분 / 장외 8시간."""
     global _cache, _cache_ts
 
     with _cache_lock:
         now = time.time()
-        if not force and _cache is not None and (now - _cache_ts) < CACHE_TTL:
+        if not force and _cache is not None and (now - _cache_ts) < _current_ttl():
             return _cache
 
     import concurrent.futures
@@ -618,6 +682,8 @@ def compute_sector_rotation(force: bool = False) -> dict:
         flow_scores = flow_future.result()
         pv_scores = pv_future.result()
 
+    intraday_score, intraday_pct, code_intraday = _intraday_scores()
+
     sectors_out = []
 
     for sector in SECTORS:
@@ -629,6 +695,7 @@ def compute_sector_rotation(force: bool = False) -> dict:
         mom_score = pv.get("momentum", 50.0)
         vol_score = pv.get("volume", 50.0)
         smart = round(mom_score * 0.6 + vol_score * 0.4, 1)
+        intr_score = intraday_score.get(sector, 50.0)
         news_score = 50.0  # placeholder
 
         # 매크로 편향
@@ -647,6 +714,7 @@ def compute_sector_rotation(force: bool = False) -> dict:
             + WEIGHTS["news"] * news_score
             + WEIGHTS["volume"] * vol_score
             + WEIGHTS["smart"] * smart
+            + WEIGHTS["intraday"] * intr_score
         )
         total = round(max(0.0, min(100.0, total)), 1)
 
@@ -666,18 +734,23 @@ def compute_sector_rotation(force: bool = False) -> dict:
                 "news":          news_score,
                 "volume":        vol_score,
                 "smart":         smart,
+                "intraday":      intr_score,
             },
             "detail": {
                 "foreignBil":      flow.get("foreign_raw", 0.0),
                 "institutionalBil": flow.get("institutional_raw", 0.0),
                 "momentumPct":     pv.get("momentum_pct", 0.0),
                 "volumeSurgePct":  pv.get("volume_surge_pct", 0.0),
+                "intradayPct":     intraday_pct.get(sector, 0.0),
             },
             "codes": SECTORS[sector],
             "leadNames":      [CODE_NAMES.get(c, c) for c in SECTOR_ROLES.get(sector, {}).get("주도주", SECTORS[sector][:2])[:2]],
             "componentNames": [CODE_NAMES.get(c, c) for c in SECTOR_ROLES.get(sector, {}).get("소부장", SECTORS[sector][2:4])[:2]],
             "trends":         SECTOR_TRENDS.get(sector, {"tags": [], "theme": ""}),
-            "leadStocks":     pv.get("top_stocks", []),
+            "leadStocks":     [
+                {**ls, "changeToday": code_intraday.get(str(ls.get("code")), 0.0)}
+                for ls in pv.get("top_stocks", [])
+            ],
             "dominance":      pv.get("dominance"),
         })
 

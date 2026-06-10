@@ -52,6 +52,7 @@ interface SectorBreakdown {
   news: number
   volume: number
   smart: number
+  intraday?: number
 }
 
 interface SectorDetail {
@@ -65,6 +66,7 @@ interface LeadStock {
   code: string
   name: string
   change14d: number
+  changeToday?: number
 }
 
 interface DominanceData {
@@ -171,6 +173,7 @@ function ScoreBar({ value, color }: { value: number; color: string }) {
 
 function BreakdownBars({ bd }: { bd: SectorBreakdown }) {
   const rows: [string, number, string][] = [
+    ['당일',     bd.intraday ?? 50, '#f87171'],
     ['매크로',   bd.macro,         '#a78bfa'],
     ['외국인',   bd.foreign,       '#60a5fa'],
     ['기관',     bd.institutional, '#34d399'],
@@ -777,7 +780,7 @@ function SectorGrid({ sectors, macro }: { sectors: SectorItem[]; macro: MacroDet
       marginBottom: 24,
     }}>
       <p style={{ fontSize: 10, color: 'rgba(255,255,255,0.2)', letterSpacing: 3, textAlign: 'center', marginBottom: 10 }}>
-        SECTOR ROTATION COMPASS · 동(E) = 1위 주도 섹터 · 시계방향 순위 · 종목 수익률: 14거래일
+        SECTOR ROTATION COMPASS · 동(E) = 1위 주도 섹터 · 시계방향 순위 · 종목: 당일 등락 (보조: 14거래일) · 장중 15분 갱신
       </p>
 
       <div style={{
@@ -907,23 +910,34 @@ function SectorGrid({ sectors, macro }: { sectors: SectorItem[]; macro: MacroDet
               {/* 대표 종목 3개 (14거래일 수익률) */}
               {stocks.length > 0 ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  {stocks.slice(0, 3).map(stock => (
-                    <div key={stock.code} style={{
-                      display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 4,
-                    }}>
-                      <span style={{
-                        fontSize: 11, color: 'rgba(241,245,249,0.78)',
-                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                        flex: 1, minWidth: 0,
-                      }}>{stock.name}</span>
-                      <span style={{
-                        fontSize: 11, fontWeight: 700, flexShrink: 0,
-                        color: stock.change14d >= 0 ? '#34d399' : '#f87171',
+                  {stocks.slice(0, 3).map(stock => {
+                    const today = stock.changeToday
+                    return (
+                      <div key={stock.code} style={{
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 4,
                       }}>
-                        {stock.change14d >= 0 ? '+' : ''}{stock.change14d.toFixed(1)}%
-                      </span>
-                    </div>
-                  ))}
+                        <span style={{
+                          fontSize: 11, color: 'rgba(241,245,249,0.78)',
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          flex: 1, minWidth: 0,
+                        }}>{stock.name}</span>
+                        {today != null && (
+                          <span style={{
+                            fontSize: 11, fontWeight: 700, flexShrink: 0,
+                            color: today >= 0 ? '#34d399' : '#f87171',
+                          }}>
+                            {today >= 0 ? '+' : ''}{today.toFixed(1)}%
+                          </span>
+                        )}
+                        <span style={{
+                          fontSize: 9.5, fontWeight: 400, flexShrink: 0,
+                          color: stock.change14d >= 0 ? 'rgba(52,211,153,0.5)' : 'rgba(248,113,113,0.5)',
+                        }}>
+                          14d {stock.change14d >= 0 ? '+' : ''}{stock.change14d.toFixed(0)}%
+                        </span>
+                      </div>
+                    )
+                  })}
                 </div>
               ) : (
                 <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.15)' }}>수집 중...</span>
@@ -951,7 +965,7 @@ function SectorGrid({ sectors, macro }: { sectors: SectorItem[]; macro: MacroDet
 
 const CACHE_KEY = 'apolloSectorCache'
 const CACHE_TS_KEY = 'apolloSectorCacheTs'
-const REFRESH_INTERVAL = 8 * 60 * 60 * 1000  // 8시간 (KRX 일일 데이터 기준)
+const REFRESH_INTERVAL = 15 * 60 * 1000  // 15분 — 장중엔 백엔드가 새로 계산, 장외엔 캐시 반환이라 부담 없음
 
 function loadCached(): { data: RotationData | null; stale: boolean; savedAt: number } {
   try {

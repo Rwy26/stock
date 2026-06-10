@@ -98,12 +98,18 @@ const SECTOR_ICONS: Record<string, string> = {
   '반도체': '💾',
   'MLCC·기판': '🧩',
   '로봇·AI': '🤖',
+  '로봇 AI': '🤖',
+  'AI 생태계': '🌐',
   '자동차·로봇': '🚗',
   '2차전지': '🔋',
   '바이오': '🧬',
   '금융': '🏦',
   '우주항공': '🛰',
   '전력기기': '⚡',
+  '전력 인프라': '⚡',
+  '방산': '🛡',
+  '화학': '⚗',
+  '소비재': '🛍',
   '조선': '🚢',
   '외국인 코스피': '🌍',
   '외국인 코스닥': '🌍',
@@ -245,22 +251,16 @@ const SEC_GAP = 3   // gap between sector blocks
 const STK_GAP = 1   // gap between stock tiles
 const SEC_H   = 22  // sector label bar height
 
-// Space allocation uses deadzone + asymptotic compression to avoid extreme area gaps.
-const AREA_MIN_WEIGHT   = 1
-const AREA_MAX_BOOST    = 2.7   // 평준화 강화: 상위 면적 과대 점유 억제
-const AREA_DEADZONE     = 19    // 데드존 강화: 저점 구간 무시 폭 확대
-const AREA_CURVE_FACTOR = 4.1   // 상위 차등 일부 복원
+// 면적 배분: 거듭제곱(점진) 압축 + 최소 면적 플로어(데드존).
+//   w = FLOOR + (1-FLOOR) × (시총/전역최대시총)^ALPHA
+// - 단조: 시총이 크면 반드시 더 큰 면적 (전역 최대 = 1.0 기준)
+// - 점진: ALPHA<1 거듭제곱이 절대 격차(수천 배)를 점진적으로 좁힘 — 로그보다 차이가 또렷이 남는다
+// - 데드존: 초소형은 FLOOR 면적으로 수렴, 그 이하로 내려가지 않음
+const AREA_FLOOR = 0.18 // 최소 면적 비율 — 최대 종목 대비 약 5.6배 이내
+const AREA_ALPHA = 0.38 // 거듭제곱 지수 — 낮추면 평준화, 높이면 시총 비례 강화
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(Math.max(n, lo), hi)
-}
-
-function scoreToAreaWeight(score: number): number {
-  const s = Math.min(Math.max(score, 0), 100)
-  if (s <= AREA_DEADZONE) return AREA_MIN_WEIGHT
-  const normalized = (s - AREA_DEADZONE) / (100 - AREA_DEADZONE)
-  const asymptotic = 1 - Math.exp(-AREA_CURVE_FACTOR * normalized)
-  return AREA_MIN_WEIGHT + AREA_MAX_BOOST * asymptotic
 }
 
 // 원시 규모값 = 시가총액. 시총이 없으면 점수 기반 의사값(단조)으로 폴백.
@@ -269,17 +269,11 @@ function rawCap(item: WatchItem): number {
   return cap > 0 ? cap : Math.max(item.score, 1) * 1e10
 }
 
-// 절대 시총 차이를 면적으로 환산할 때의 2단 압축:
-//  1) 로그(점근) 정규화 — 극단적으로 치우친 시총 분포를 그룹 최대값 대비 0~100 으로 펼침
-//  2) 데드존 + 점근 포화 곡선(scoreToAreaWeight) — 저점 무시 + 상위 포화로 면적 편차 완화
-// 단조 함수라 "큰 시총 → 큰/좌상단" 순서는 유지된다.
 function compress(value: number, all: number[]): number {
-  const n = all.length
-  if (n <= 1) return AREA_MIN_WEIGHT + AREA_MAX_BOOST
-  // 순위 백분위(0~100)로 정규화 → 치우친 시총 분포를 균등 분배한 뒤 데드존+점근 곡선 적용.
-  const below = all.filter(x => x < value).length
-  const pct = (below / (n - 1)) * 100
-  return scoreToAreaWeight(pct)
+  const max = Math.max(...all)
+  if (!(max > 0)) return AREA_FLOOR
+  const share = clamp(value / max, 0, 1)
+  return AREA_FLOOR + (1 - AREA_FLOOR) * Math.pow(share, AREA_ALPHA)
 }
 
 export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } = {}) {
@@ -414,13 +408,20 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
       return { id: sec, sec, stocks, visibleStocks, sectorCap, momentum, avgChange, isDownSector }
     })
 
-    // 섹터 면적 = compress(섹터 시총) × 모멘텀. 로그 점근 정규화 + 데드존 포화로
-    // 절대 시총 차이를 압축 → 큰 시총·주도·상승은 좌상단, 소외·하락은 우하단(단, 편차 완화).
-    const allSectorCaps = secsRaw.map(s => s.sectorCap)
-    const secs = secsRaw.map(s => ({
-      ...s,
-      value: compress(s.sectorCap, allSectorCaps) * Math.max(s.momentum, 0.3),
-    }))
+    // 전역 단조성 보장: 모든 종목을 단일 척도(관심종목 전체, 최대 시총=1.0)로 압축하고
+    // 섹터 면적 = 보이는 타일 가중치의 합 → 섹터 면적은 같을 필요 없이 비중대로 벌어진다.
+    // "시총이 더 작은 종목이 더 큰 공간을 가질 수 없다"가 섹터 경계를 넘어 성립한다.
+    // 소외 섹터(하락/기타 + 시총 비중 8% 미만)는 접어서 이름만 표시 — 종목 타일 없음.
+    const allCaps = items.map(it => rawCap(it))
+    const totalCap = allCaps.reduce((a, b) => a + b, 0)
+    const secs = secsRaw.map(s => {
+      const collapsed = s.isDownSector && totalCap > 0 && s.sectorCap / totalCap < 0.08
+      const visibleStocks = collapsed ? [] : s.visibleStocks
+      const value = collapsed
+        ? AREA_FLOOR * 1.6
+        : visibleStocks.reduce((sum, st) => sum + compress(rawCap(st), allCaps), 0)
+      return { ...s, collapsed, visibleStocks, value }
+    })
 
     const secRects: TRect[] = squarify(
       secs.map(s => ({ id: s.id, value: s.value })),
@@ -430,17 +431,19 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
     return secRects.map(sr => {
       const sd    = secs.find(s => s.id === sr.id)!
       const stkH  = Math.max(sr.h - SEC_H, 0)
-      // 섹터 내 종목 타일도 동일 압축(섹터 내 최대 시총 대비) → 대형주 쏠림 완화.
-      const tileCaps = sd.visibleStocks.map(s => rawCap(s))
+      // 타일도 섹터 면적과 같은 전역 척도를 사용 — 섹터 면적이 타일 가중 합이므로
+      // 어느 섹터에 있든 같은 시총이면 같은 면적, 더 큰 시총이면 더 큰 면적.
       const tiles = stkH > 4
         ? squarify(
-            sd.visibleStocks.map(s => ({ id: s.code, value: compress(rawCap(s), tileCaps) })),
+            sd.visibleStocks.map(s => ({ id: s.code, value: compress(rawCap(s), allCaps) })),
             0, SEC_H, sr.w, stkH, STK_GAP,
           )
         : []
       const stockMap = new Map(sd.visibleStocks.map(s => [s.code, s]))
       return {
         ...sr, sec: sd.sec,
+        collapsed: sd.collapsed,
+        avgChange: sd.avgChange,
         totalCount: sd.stocks.length,
         shownCount: sd.visibleStocks.length,
         stocks: tiles.map(r => ({ ...r, item: stockMap.get(r.id)! })).filter(r => !!r.item),
@@ -589,23 +592,48 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
               overflow: 'hidden',
             }}
           >
-            {/* Sector header */}
-            <div
-              style={{
-                position: 'absolute', inset: '0 0 auto 0', height: SEC_H,
-                display: 'flex', alignItems: 'center', padding: '0 7px',
-                background: 'rgba(10,15,24,0.84)',
-                zIndex: 2, pointerEvents: 'none',
-                fontSize: '0.62rem', fontWeight: 800,
-                letterSpacing: '0.04em', color: 'rgba(255,255,255,0.72)',
-                whiteSpace: 'nowrap', overflow: 'hidden',
-              }}
-            >
-              {toKoreanSectorAbbr(sec.sec)}
-              <span style={{ marginLeft: 5, opacity: 0.42, fontWeight: 400 }}>
-                {sec.shownCount}/{sec.totalCount}
-              </span>
-            </div>
+            {sec.collapsed ? (
+              /* 소외 섹터: 종목 없이 이름만 중앙 표시 */
+              <div
+                style={{
+                  position: 'absolute', inset: 0,
+                  display: 'flex', flexDirection: 'column',
+                  alignItems: 'center', justifyContent: 'center', gap: 2,
+                  background: 'rgba(10,15,24,0.6)',
+                  pointerEvents: 'none',
+                }}
+              >
+                <span style={{
+                  fontSize: '0.72rem', fontWeight: 800,
+                  letterSpacing: '0.04em', color: 'rgba(255,255,255,0.55)',
+                  textAlign: 'center', padding: '0 6px',
+                  whiteSpace: 'nowrap', overflow: 'hidden', maxWidth: '100%',
+                }}>
+                  {toKoreanSectorAbbr(sec.sec)}
+                </span>
+                <span style={{ fontSize: '0.58rem', color: 'rgba(255,255,255,0.38)' }}>
+                  {sec.totalCount}종목 {formatPercent(sec.avgChange)}
+                </span>
+              </div>
+            ) : (
+              /* Sector header */
+              <div
+                style={{
+                  position: 'absolute', inset: '0 0 auto 0', height: SEC_H,
+                  display: 'flex', alignItems: 'center', padding: '0 7px',
+                  background: 'rgba(10,15,24,0.84)',
+                  zIndex: 2, pointerEvents: 'none',
+                  fontSize: '0.62rem', fontWeight: 800,
+                  letterSpacing: '0.04em', color: 'rgba(255,255,255,0.72)',
+                  whiteSpace: 'nowrap', overflow: 'hidden',
+                }}
+              >
+                {toKoreanSectorAbbr(sec.sec)}
+                <span style={{ marginLeft: 5, opacity: 0.42, fontWeight: 400 }}>
+                  {sec.shownCount}/{sec.totalCount}
+                </span>
+              </div>
+            )}
 
             {/* Stock tiles */}
             {sec.stocks.map(({ id, x, y, w, h, item }) => {
