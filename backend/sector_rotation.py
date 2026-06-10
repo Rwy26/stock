@@ -185,6 +185,30 @@ def _compute_rsi(prices: List[float], period: int = 14) -> List[float]:
 # ---------------------------------------------------------------------------
 # Layer 1: Macro Score
 # ---------------------------------------------------------------------------
+def _vkospi_series_db(n: int = 44) -> List[float]:
+    """vkospi_history 테이블에서 최근 n개 종가 (과거→현재 순).
+
+    이력은 scripts/vkospi_crawl.py(초기 2,064개 적재) + fundamentals_sync(매일 갱신)가 채운다.
+    """
+    try:
+        import db as _db
+        import models as _models
+        from sqlalchemy import select as _select
+
+        s = _db.get_session_factory()()
+        try:
+            rows = s.execute(
+                _select(_models.VkospiHistory.close)
+                .order_by(_models.VkospiHistory.trade_date.desc())
+                .limit(n)
+            ).scalars().all()
+        finally:
+            s.close()
+        return [round(float(v), 2) for v in reversed(rows)]
+    except Exception:
+        return []
+
+
 def _vkospi_quote() -> Tuple[Optional[float], float]:
     """V-KOSPI(한국 변동성지수) 현재값 + 등락률%.
 
@@ -264,8 +288,14 @@ def _macro_score() -> Tuple[float, dict]:
         oil    = closes_d["CL=F"].dropna()
 
         # VKOSPI: 야후 ^VKOSPI는 폐지된 심볼(항상 빈 데이터) → KRX 변동성지수 선물(VKI1!) 사용
+        # 실시간 값은 TradingView 스캐너, 일별 시계열은 DB(vkospi_history)에서 로드.
         vkospi_val, vkospi_chg = _vkospi_quote()
-        vkospi_s = None  # 일별 시계열은 미제공 — 스파크라인 없이 현재값/등락률만
+        vkospi_series = _vkospi_series_db(44)
+        if vkospi_val is None and vkospi_series:
+            # 실시간 조회 실패 시 DB 최신 종가로 폴백 (전일 대비 등락률도 DB에서 계산)
+            vkospi_val = vkospi_series[-1]
+            if len(vkospi_series) >= 2 and vkospi_series[-2]:
+                vkospi_chg = round((vkospi_series[-1] - vkospi_series[-2]) / vkospi_series[-2] * 100, 2)
 
         tnx_dir = _chg(tnx, 20) / 100
         dxy_dir = _chg(dxy, 20) / 100
@@ -356,7 +386,7 @@ def _macro_score() -> Tuple[float, dict]:
                 "nasdaq": _series(closes_d, "^IXIC", 44),
                 "krw":    _series(closes_d, "KRW=X", 44),
                 "oil":    _series(closes_d, "CL=F", 44),
-                "vkospi": [],  # VKI1! 스캐너는 시계열 미제공
+                "vkospi": vkospi_series,
             },
             # 1시간봉 시계열 (최근 48시간)
             "series1h": {

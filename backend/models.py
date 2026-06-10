@@ -363,3 +363,25 @@ class DailyInvestorFlow(Base):
     __table_args__ = (
         Index("uq_investor_flow_code_date", "stock_code", "trading_date", unique=True),
     )
+
+
+class VkospiHistory(Base):
+    """VKOSPI(코스피 변동성지수) 일별 이력.
+
+    현물 VKOSPI는 야후/네이버/다음 미제공, KRX 정보데이터시스템은 이 네트워크에서
+    DNS 불가 — KRX 변동성지수 선물 연속물(VKI1!)을 TradingView 차트 데이터로 수집한다.
+    초기 적재: scripts/vkospi_crawl.py (과거 일봉 전체)
+    일일 갱신: scripts/fundamentals_sync.py (07:00 / 20:10)
+    해석: 20~30 평시, 30 이상 공포 (2008년 위기 ~80).
+    """
+
+    __tablename__ = "vkospi_history"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, unique=True, index=True)
+    open: Mapped[float] = mapped_column(Float, default=0.0)
+    high: Mapped[float] = mapped_column(Float, default=0.0)
+    low: Mapped[float] = mapped_column(Float, default=0.0)
+    close: Mapped[float] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(20), default="VKI1!")  # 데이터 출처 (선물 연속물)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

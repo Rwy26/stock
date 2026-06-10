@@ -10,6 +10,7 @@
   4. [무결성 검증] DB 종목명 ↔ 네이버 종목명 전수 대조.
      불일치(코드가 다른 회사를 가리킴)나 시세 없음(폐지/오타 코드)은
      logs/name-mismatch-alert.log 에 기록 — 2026-06-10 코드 매핑 오류 13건 재발 방지.
+  5. VKOSPI(변동성지수 선물 VKI1!) 최근 일봉을 vkospi_history 테이블에 upsert.
 
 KIS는 읽기 전용(시세 조회)만 사용 — 주문/거래 없음(킬스위치 무관).
 """
@@ -144,6 +145,17 @@ def main() -> int:
 
     naver = _naver_quotes(codes)
     name_problems = verify_names(codes, naver, now)
+
+    # VKOSPI 최근 일봉 동기화 (실패해도 본 동기화는 계속)
+    vkospi_note = ""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import vkospi_crawl
+        ins, upd = vkospi_crawl.sync_recent(days=10)
+        vkospi_note = f" vkospi(+{ins}/~{upd})"
+    except Exception as exc:  # noqa: BLE001
+        vkospi_note = f" vkospi(FAIL {type(exc).__name__})"
+
     mismatches: list[dict] = []
 
     for c in codes:
@@ -193,7 +205,7 @@ def main() -> int:
     logf = pp.logs_dir / "fundamentals-sync.log"
     header = (
         f"[{now.isoformat(timespec='seconds')}] synced={len(codes)} "
-        f"mismatches(>{MISMATCH_PCT}%)={len(mismatches)} name_problems={len(name_problems)}"
+        f"mismatches(>{MISMATCH_PCT}%)={len(mismatches)} name_problems={len(name_problems)}{vkospi_note}"
     )
     try:
         with logf.open("a", encoding="utf-8") as f:
