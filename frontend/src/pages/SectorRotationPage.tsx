@@ -545,12 +545,12 @@ function MacroCard({ detail }: { detail: MacroDetail }) {
       note: 'VIX↑ = 공포·변동성',
     },
     {
-      key: 'vkospi', label: 'VKOSPI (한국)', seriesKey: 'vkospi', invertSpark: true,
+      key: 'vkospi', label: 'VKOSPI (선물·20분지연)', seriesKey: 'vkospi', invertSpark: true,
       val: detail.vkospi != null ? String(detail.vkospi) : '—',
       score: detail.vkospiScore ?? 50,
       chg1d: detail.vkospiChg1d ?? 0,
       scoreColor: (detail.vkospiScore ?? 50) >= 60 ? '#34d399' : (detail.vkospiScore ?? 50) >= 40 ? '#eab308' : '#f87171',
-      note: 'KOSPI 변동성 지수',
+      note: 'KOSPI 변동성 — 20~30 평시 · 30↑ 공포',
     },
     {
       key: 'nasdaq', label: '나스닥', seriesKey: 'nasdaq',

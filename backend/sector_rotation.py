@@ -185,6 +185,37 @@ def _compute_rsi(prices: List[float], period: int = 14) -> List[float]:
 # ---------------------------------------------------------------------------
 # Layer 1: Macro Score
 # ---------------------------------------------------------------------------
+def _vkospi_quote() -> Tuple[Optional[float], float]:
+    """V-KOSPI(한국 변동성지수) 현재값 + 등락률%.
+
+    현물 VKOSPI는 야후/네이버/다음 모두 미제공, KRX 정보데이터시스템은 이 환경에서
+    DNS 불가 — KRX 변동성지수 선물 연속물(VKI1!)을 TradingView 스캐너로 조회한다
+    (20분 지연). 선물이므로 현물과 약간의 베이시스가 있고, 라벨에 '선물·지연' 명시.
+    해석 기준: 20~30 평시, 30+ 공포 (2008년 위기 시 ~80).
+    """
+    try:
+        import httpx as _httpx
+
+        body = {
+            "symbols": {"tickers": ["KRX:VKI1!"], "query": {"types": []}},
+            "columns": ["close", "change"],
+        }
+        r = _httpx.post(
+            "https://scanner.tradingview.com/global/scan",
+            headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"},
+            json=body, timeout=8.0,
+        )
+        rows = r.json().get("data", [])
+        if rows and rows[0].get("d"):
+            close = float(rows[0]["d"][0])
+            chg = float(rows[0]["d"][1] or 0.0)
+            if close > 0:
+                return round(close, 2), round(chg, 2)
+    except Exception:
+        pass
+    return None, 0.0
+
+
 def _macro_score() -> Tuple[float, dict]:
     """
     금리·달러·VIX 방향으로 성장주 우호도 0~100 계산.
@@ -232,12 +263,9 @@ def _macro_score() -> Tuple[float, dict]:
         krw    = closes_d["KRW=X"].dropna()
         oil    = closes_d["CL=F"].dropna()
 
-        # VKOSPI: ^KS11 없을 수 있어 별도 다운로드
-        try:
-            vkospi_raw = yf.download("^VKOSPI", period="60d", interval="1d", progress=False)
-            vkospi_s   = vkospi_raw["Close"].dropna()
-        except Exception:
-            vkospi_s = None
+        # VKOSPI: 야후 ^VKOSPI는 폐지된 심볼(항상 빈 데이터) → KRX 변동성지수 선물(VKI1!) 사용
+        vkospi_val, vkospi_chg = _vkospi_quote()
+        vkospi_s = None  # 일별 시계열은 미제공 — 스파크라인 없이 현재값/등락률만
 
         tnx_dir = _chg(tnx, 20) / 100
         dxy_dir = _chg(dxy, 20) / 100
@@ -283,7 +311,7 @@ def _macro_score() -> Tuple[float, dict]:
         krw_val   = _last(krw)
         oil_val   = _last(oil)
         nas_val   = _last(nasdaq)
-        vkos_val  = _safe(vkospi_s.iloc[-1]) if vkospi_s is not None and len(vkospi_s) > 0 else None
+        vkos_val  = vkospi_val
 
         detail: dict = {
             # 현재값
@@ -318,7 +346,7 @@ def _macro_score() -> Tuple[float, dict]:
             "oilChg1d":     _chg(oil, 1),
             "oilChg5d":     _chg(oil, 5),
             "oilChg20d":    _chg(oil, 20),
-            "vkospiChg1d":  _chg(vkospi_s, 1) if vkospi_s is not None and len(vkospi_s) >= 2 else 0.0,
+            "vkospiChg1d":  vkospi_chg,
             "growthScore":  growth_score,
             # 일봉 시계열 (최근 44일 — BB(20) 계산 시 표시 구간 25포인트 확보)
             "series1d": {
@@ -328,7 +356,7 @@ def _macro_score() -> Tuple[float, dict]:
                 "nasdaq": _series(closes_d, "^IXIC", 44),
                 "krw":    _series(closes_d, "KRW=X", 44),
                 "oil":    _series(closes_d, "CL=F", 44),
-                "vkospi": [round(float(v), 2) for v in vkospi_s.iloc[-44:].values] if vkospi_s is not None else [],
+                "vkospi": [],  # VKI1! 스캐너는 시계열 미제공
             },
             # 1시간봉 시계열 (최근 48시간)
             "series1h": {
