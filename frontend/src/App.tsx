@@ -20,6 +20,7 @@ import { InvestmentRulesPage } from './pages/InvestmentRulesPage'
 import { AiChartPage } from './pages/AiChartPage'
 import { AiCachePage } from './pages/AiCachePage'
 import { SectorRotationPage } from './pages/SectorRotationPage'
+import { MarketCompassPage } from './pages/MarketCompassPage'
 import { PublicShell } from './layout/PublicShell'
 import { PublicAiRequestPage } from './pages/public/PublicAiRequestPage'
 import { PublicRequestsPage } from './pages/PublicRequestsPage'
@@ -54,6 +55,7 @@ export default function App() {
           <Route path="ai-chart" element={<AiChartPage />} />
           <Route path="ai-cache" element={<AiCachePage />} />
           <Route path="sector-rotation" element={<SectorRotationPage />} />
+          <Route path="market-compass" element={<MarketCompassPage />} />
           <Route path="public-requests" element={<PublicRequestsPage />} />
         </Route>
 

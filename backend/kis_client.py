@@ -664,3 +664,257 @@ def parse_program_trade(data: dict[str, Any], lookback_days: int = 5) -> int:
         else:
             break
     return streak
+
+
+def inquire_daily_chart(
+    *,
+    app_key: str,
+    app_secret: str,
+    is_paper: bool,
+    code: str,
+    period: str = "D",  # D=일봉 W=주봉 M=월봉 Y=년봉
+    end_date: str | None = None,  # YYYYMMDD — 이 날짜까지의 100봉 (장기 이력 페이지네이션용)
+    live_base_url: str | None = None,
+    paper_base_url: str | None = None,
+    timeout_seconds: float = 10.0,
+) -> list[dict[str, Any]]:
+    """국내주식 기간별 시세 (TR FHKST03010100) — 한 번에 최대 100봉, 수정주가.
+
+    반환: 과거→현재 순 [{date, open, high, low, close, volume}].
+    """
+    from datetime import date as _date, datetime as _dt, timedelta as _td
+
+    code = code.strip()
+    token, _ = get_access_token(
+        app_key=app_key, app_secret=app_secret, is_paper=is_paper,
+        live_base_url=live_base_url, paper_base_url=paper_base_url,
+        timeout_seconds=timeout_seconds,
+    )
+    base = _base_url(is_paper, live_base_url=live_base_url, paper_base_url=paper_base_url)
+    url = f"{base}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+
+    # 100봉을 덮는 달력 범위 (D: 150일, W: 750일, M: 3200일)
+    span = {"D": 150, "W": 750, "M": 3200, "Y": 36500}.get(period, 150)
+    end = _dt.strptime(end_date, "%Y%m%d").date() if end_date else _date.today()
+    start = end - _td(days=span)
+
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appkey": app_key,
+        "appsecret": app_secret,
+        "tr_id": "FHKST03010100",
+        "custtype": "P",
+    }
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_INPUT_ISCD": code,
+        "FID_INPUT_DATE_1": start.strftime("%Y%m%d"),
+        "FID_INPUT_DATE_2": end.strftime("%Y%m%d"),
+        "FID_PERIOD_DIV_CODE": period,
+        "FID_ORG_ADJ_PRC": "0",
+    }
+    try:
+        resp = httpx.get(url, headers=headers, params=params, timeout=timeout_seconds)
+    except Exception as exc:
+        raise KisError(f"KIS daily-chart request failed: {exc}") from exc
+    data = _safe_json(resp)
+    if resp.status_code >= 400 or str(data.get("rt_cd") or "") not in ("", "0"):
+        msg = data.get("msg1") or f"HTTP {resp.status_code}"
+        raise KisError(f"KIS daily-chart error: {msg}", status_code=resp.status_code, payload=data)
+
+    def _f(row: dict, key: str) -> float:
+        try:
+            return float(str(row.get(key) or "0").replace(",", ""))
+        except Exception:
+            return 0.0
+
+    out = []
+    for row in data.get("output2") or []:
+        d = str(row.get("stck_bsop_date") or "")
+        if not d:
+            continue
+        out.append({
+            "date": d,
+            "open": _f(row, "stck_oprc"),
+            "high": _f(row, "stck_hgpr"),
+            "low": _f(row, "stck_lwpr"),
+            "close": _f(row, "stck_clpr"),
+            "volume": _f(row, "acml_vol"),
+        })
+    out.sort(key=lambda r: r["date"])
+    return out
+
+
+def inquire_minute_chart(
+    *,
+    app_key: str,
+    app_secret: str,
+    is_paper: bool,
+    code: str,
+    max_calls: int = 13,
+    live_base_url: str | None = None,
+    paper_base_url: str | None = None,
+    timeout_seconds: float = 10.0,
+) -> list[dict[str, Any]]:
+    """당일 1분봉 (TR FHKST03010200) — 호출당 30건, 뒤에서부터 연속 조회로 전일장 커버.
+
+    반환: 과거→현재 순 [{time(HHMMSS), open, high, low, close, volume}].
+    """
+    import time as _time
+
+    code = code.strip()
+    token, _ = get_access_token(
+        app_key=app_key, app_secret=app_secret, is_paper=is_paper,
+        live_base_url=live_base_url, paper_base_url=paper_base_url,
+        timeout_seconds=timeout_seconds,
+    )
+    base = _base_url(is_paper, live_base_url=live_base_url, paper_base_url=paper_base_url)
+    url = f"{base}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appkey": app_key,
+        "appsecret": app_secret,
+        "tr_id": "FHKST03010200",
+        "custtype": "P",
+    }
+
+    def _f(row: dict, key: str) -> float:
+        try:
+            return float(str(row.get(key) or "0").replace(",", ""))
+        except Exception:
+            return 0.0
+
+    bars: dict[str, dict] = {}
+    hour = "153000"
+    for _ in range(max_calls):
+        params = {
+            "FID_ETC_CLS_CODE": "",
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": code,
+            "FID_INPUT_HOUR_1": hour,
+            "FID_PW_DATA_INCU_YN": "N",
+        }
+        try:
+            resp = httpx.get(url, headers=headers, params=params, timeout=timeout_seconds)
+        except Exception as exc:
+            raise KisError(f"KIS minute-chart request failed: {exc}") from exc
+        data = _safe_json(resp)
+        if resp.status_code >= 400 or str(data.get("rt_cd") or "") not in ("", "0"):
+            break
+        rows = data.get("output2") or []
+        if not rows:
+            break
+        earliest = None
+        for row in rows:
+            t = str(row.get("stck_cntg_hour") or "")
+            if not t:
+                continue
+            bars[t] = {
+                "time": t,
+                "open": _f(row, "stck_oprc"),
+                "high": _f(row, "stck_hgpr"),
+                "low": _f(row, "stck_lwpr"),
+                "close": _f(row, "stck_prpr"),
+                "volume": _f(row, "cntg_vol"),
+            }
+            if earliest is None or t < earliest:
+                earliest = t
+        if earliest is None or earliest <= "090100":
+            break
+        # 다음 호출: 가장 이른 봉 직전 분
+        hh, mm = int(earliest[:2]), int(earliest[2:4])
+        mm -= 1
+        if mm < 0:
+            hh, mm = hh - 1, 59
+        hour = f"{hh:02d}{mm:02d}00"
+        _time.sleep(0.08)
+
+    return [bars[k] for k in sorted(bars)]
+
+
+def inquire_daily_minute_chart(
+    *,
+    app_key: str,
+    app_secret: str,
+    is_paper: bool,
+    code: str,
+    date_yyyymmdd: str,
+    live_base_url: str | None = None,
+    paper_base_url: str | None = None,
+    timeout_seconds: float = 10.0,
+) -> list[dict[str, Any]]:
+    """특정 일자의 1분봉 전체 (TR FHKST03010230, 일별분봉조회) — 호출당 120건, 하루 4콜.
+
+    반환: 과거→현재 순 [{date, time, open, high, low, close, volume}].
+    """
+    import time as _time
+
+    code = code.strip()
+    token, _ = get_access_token(
+        app_key=app_key, app_secret=app_secret, is_paper=is_paper,
+        live_base_url=live_base_url, paper_base_url=paper_base_url,
+        timeout_seconds=timeout_seconds,
+    )
+    base = _base_url(is_paper, live_base_url=live_base_url, paper_base_url=paper_base_url)
+    url = f"{base}/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice"
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appkey": app_key,
+        "appsecret": app_secret,
+        "tr_id": "FHKST03010230",
+        "custtype": "P",
+    }
+
+    def _f(row: dict, key: str) -> float:
+        try:
+            return float(str(row.get(key) or "0").replace(",", ""))
+        except Exception:
+            return 0.0
+
+    bars: dict[str, dict] = {}
+    hour = "153000"
+    for _ in range(5):  # 390분 / 120봉 = 4콜이면 전체 커버 (+1 여유)
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": code,
+            "FID_INPUT_DATE_1": date_yyyymmdd,
+            "FID_INPUT_HOUR_1": hour,
+            "FID_PW_DATA_INCU_YN": "N",
+            "FID_FAKE_TICK_INCU_YN": "N",
+        }
+        try:
+            resp = httpx.get(url, headers=headers, params=params, timeout=timeout_seconds)
+        except Exception as exc:
+            raise KisError(f"KIS daily-minute request failed: {exc}") from exc
+        data = _safe_json(resp)
+        if resp.status_code >= 400 or str(data.get("rt_cd") or "") not in ("", "0"):
+            break
+        rows = data.get("output2") or []
+        if not rows:
+            break
+        earliest = None
+        for row in rows:
+            t = str(row.get("stck_cntg_hour") or "")
+            if not t:
+                continue
+            bars[t] = {
+                "date": date_yyyymmdd,
+                "time": t,
+                "open": _f(row, "stck_oprc"),
+                "high": _f(row, "stck_hgpr"),
+                "low": _f(row, "stck_lwpr"),
+                "close": _f(row, "stck_prpr"),
+                "volume": _f(row, "cntg_vol"),
+            }
+            if earliest is None or t < earliest:
+                earliest = t
+        if earliest is None or earliest <= "090100":
+            break
+        hh, mm = int(earliest[:2]), int(earliest[2:4])
+        mm -= 1
+        if mm < 0:
+            hh, mm = hh - 1, 59
+        hour = f"{hh:02d}{mm:02d}00"
+        _time.sleep(0.08)
+
+    return [bars[k] for k in sorted(bars)]

@@ -5025,6 +5025,43 @@ def admin_market_compass(force: int = 0, ai: int = 1, user=Depends(require_admin
         raise HTTPException(status_code=502, detail=f"시장 나침반 계산 실패: {exc}") from exc
 
 
+@app.get("/api/admin/mtf-analysis")
+def admin_mtf_analysis(code: str, user=Depends(require_admin)):
+    """멀티 타임프레임 차트 분석 (시장 나침반 8단계) — 월/주/일/60분/15분.
+
+    KIS 차트 API 사용 (호출 ~16건/종목). 결정론 계산 — LLM 없음.
+    """
+    try:
+        import mtf_analysis
+        return mtf_analysis.analyze_mtf(code.strip())
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"MTF 분석 실패: {exc}") from exc
+
+
+@app.get("/api/admin/stock-compass")
+def admin_stock_compass(code: str, ai: int = 1, user=Depends(require_admin)):
+    """종목 종합 평가 — 시장 나침반 12단계 전체 통합.
+
+    1~7(시장) + 8(MTF) + 9~11(목표/손절/확률) + 12(LLM 최종 형식).
+    KIS ~30콜 + LLM 1콜, 약 30초 소요.
+    """
+    try:
+        import stock_compass
+        return stock_compass.analyze_stock(code.strip(), with_ai=bool(ai))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"종목 종합 평가 실패: {exc}") from exc
+
+
+@app.get("/api/admin/stock-targets")
+def admin_stock_targets(code: str, user=Depends(require_admin)):
+    """목표가 5종·손절가 3종·빈도 기반 확률 (시장 나침반 9~11단계)."""
+    try:
+        import target_engine
+        return target_engine.analyze_targets(code.strip())
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"목표가 분석 실패: {exc}") from exc
+
+
 @app.get("/api/public/sector-rotation")
 def public_sector_rotation():
     """공개 섹터 나침반 (캐시 사용; 강제 재계산 불가)."""

@@ -156,6 +156,14 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         vkospi_note = f" vkospi(FAIL {type(exc).__name__})"
 
+    # 뉴스 수집 (시장 나침반 6단계 데이터 — 실패해도 본 동기화는 계속)
+    try:
+        import news_collector
+        nres = news_collector.collect(pages=2, force=True)
+        vkospi_note += f" news(+{nres.get('inserted', 0)})"
+    except Exception as exc:  # noqa: BLE001
+        vkospi_note += f" news(FAIL {type(exc).__name__})"
+
     mismatches: list[dict] = []
 
     for c in codes:

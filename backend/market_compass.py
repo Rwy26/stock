@@ -227,6 +227,9 @@ _SYSTEM_PROMPT = """당신은 월가 헤지펀드 PM, 글로벌 매크로 전략
 [2단계] 거시경제 — macroMap의 요소별 섹터 유불리를 종합
 [3단계] 섹터 순환 — rotationLadder 위치 해석 (현금→방어→경기민감→성장→테마)
 [4단계] 주도 섹터 — sectorRanking 상위 3개의 레이어별 강점 분석 (외인/기관/모멘텀/당일)
+[6단계] 뉴스 분석 — newsContext의 섹터별 24시간/7일/30일 기사량과 헤드라인을 분석.
+        기사량 급증(24h가 7d 평균 대비 급등) 섹터 = 뉴스 모멘텀 발생.
+        헤드라인을 보고 각 재료를 단기(수일)/중기(분기)/장기(구조적) 재료로 구분.
 [7단계] 스마트머니 — 각 섹터 breakdown의 foreign/institutional/smart 점수로 실자금 유입 판단
 [12단계] 최종 결론 — 아래 형식 필수:
 
@@ -245,35 +248,53 @@ _SYSTEM_PROMPT = """당신은 월가 헤지펀드 PM, 글로벌 매크로 전략
 
 
 def _call_llm(context_json: str) -> tuple[Optional[str], str]:
-    """Gemini > Groq > OpenAI 우선순위로 종합 리포트 생성. (리포트, 프로바이더) 반환."""
+    """Gemini > Groq > OpenAI 우선순위로 종합 리포트 생성. (리포트, 프로바이더) 반환.
+
+    실패 시 다음 프로바이더로 폴백하고, 전부 실패하면 마지막 오류를 프로바이더 문자열에 담는다.
+    """
     user_msg = (
         "다음은 실시간 계산된 시장 데이터다. 이 데이터만 근거로 분석 절차를 수행하라.\n\n"
         f"```json\n{context_json}\n```"
     )
+    errors: list[str] = []
 
-    # Gemini
+    # Gemini (2.5-flash 는 thinking 토큰을 쓰므로 출력 한도를 넉넉히)
+    # 무료 티어 레이트리밋(429) 대비 1회 재시도.
     if settings.gemini_api_key:
-        try:
-            url = (
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"{settings.gemini_model}:generateContent?key={settings.gemini_api_key}"
-            )
-            body = {
-                "systemInstruction": {"parts": [{"text": _SYSTEM_PROMPT}]},
-                "contents": [{"role": "user", "parts": [{"text": user_msg}]}],
-                "generationConfig": {"temperature": 0.3, "maxOutputTokens": 4096},
-            }
-            r = httpx.post(url, json=body, timeout=90.0)
-            r.raise_for_status()
-            text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            return text, f"gemini:{settings.gemini_model}"
-        except Exception:
-            pass
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{settings.gemini_model}:generateContent?key={settings.gemini_api_key}"
+        )
+        body = {
+            "systemInstruction": {"parts": [{"text": _SYSTEM_PROMPT}]},
+            "contents": [{"role": "user", "parts": [{"text": user_msg}]}],
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 16384},
+        }
+        for attempt in (1, 2):
+            try:
+                r = httpx.post(url, json=body, timeout=120.0)
+                if r.status_code == 429 and attempt == 1:
+                    time.sleep(20)
+                    continue
+                r.raise_for_status()
+                cand = r.json().get("candidates", [{}])[0]
+                parts = cand.get("content", {}).get("parts") or []
+                text = "".join(p.get("text", "") for p in parts).strip()
+                if text:
+                    return text, f"gemini:{settings.gemini_model}"
+                errors.append(f"gemini empty (finishReason={cand.get('finishReason')})")
+                break
+            except httpx.HTTPStatusError as exc:
+                errors.append(f"gemini HTTP {exc.response.status_code}")
+                break
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"gemini {type(exc).__name__}")
+                break
 
     # Groq / OpenAI (OpenAI 호환)
-    for key, model, base in (
-        (settings.groq_api_key, settings.groq_model, "https://api.groq.com/openai/v1"),
-        (settings.openai_api_key, settings.openai_model, "https://api.openai.com/v1"),
+    for name, key, model, base in (
+        ("groq", settings.groq_api_key, settings.groq_model, "https://api.groq.com/openai/v1"),
+        ("openai", settings.openai_api_key, settings.openai_model, "https://api.openai.com/v1"),
     ):
         if not key:
             continue
@@ -289,13 +310,18 @@ def _call_llm(context_json: str) -> tuple[Optional[str], str]:
                     ],
                     "temperature": 0.3,
                 },
-                timeout=90.0,
+                timeout=120.0,
             )
             r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"], f"{base.split('.')[1]}:{model}"
-        except Exception:
-            continue
-    return None, "none"
+            text = (r.json()["choices"][0]["message"]["content"] or "").strip()
+            if text:
+                return text, f"{name}:{model}"
+            errors.append(f"{name} empty")
+        except httpx.HTTPStatusError as exc:
+            errors.append(f"{name} HTTP {exc.response.status_code}")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{name} {type(exc).__name__}")
+    return None, f"none ({'; '.join(errors)})" if errors else "none"
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +343,15 @@ def compute_market_compass(force: bool = False, with_ai: bool = True) -> dict:
     regime = _stage1_market_regime(macro, vkospi, sectors)
     macro_map = _stage2_macro_map(macro)
     ladder = _stage3_rotation_ladder(sectors)
+
+    # [6단계] 뉴스 수집 (30분 TTL) + 컨텍스트
+    news_ctx: dict = {}
+    try:
+        import news_collector
+        news_collector.collect(pages=1)
+        news_ctx = news_collector.get_news_context()
+    except Exception:
+        news_ctx = {"error": "뉴스 수집 실패 — 이번 리포트에서 6단계 제외"}
     ranking = [
         {
             "rank": i + 1,
@@ -336,9 +371,11 @@ def compute_market_compass(force: bool = False, with_ai: bool = True) -> dict:
         "macroMap": macro_map,
         "rotationLadder": ladder,
         "sectorRanking": ranking,
+        "newsContext": news_ctx,
         "dataNotes": [
-            "뉴스 상세(6단계)·산업 세부(5단계)·개별 종목 차트/목표가(8~11단계)는 Phase 2 데이터 수집 후 활성화",
+            "산업 세부(5단계)·개별 종목 차트/목표가(8~11단계)는 Phase 3 데이터 수집 후 활성화",
             "VKOSPI는 KRX 변동성지수 선물(VKI1!) 기반",
+            "뉴스는 나침반 대표종목 39개 기준 (네이버 증권 뉴스)",
         ],
     }
 

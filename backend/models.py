@@ -385,3 +385,25 @@ class VkospiHistory(Base):
     close: Mapped[float] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(20), default="VKI1!")  # 데이터 출처 (선물 연속물)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class NewsArticle(Base):
+    """섹터/종목 뉴스 수집 저장소 (네이버 모바일 증권 뉴스 API).
+
+    수집: backend/news_collector.py — 시장 나침반 계산 시 30분 TTL로 자동 수집.
+    article_key = officeId+articleId (네이버 기사 고유키, 중복 수집 방지).
+    시장 나침반 6단계(뉴스 분석)가 24시간/7일/30일 버킷으로 사용.
+    """
+
+    __tablename__ = "news_articles"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    article_key: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    stock_code: Mapped[str] = mapped_column(String(20), index=True)
+    sector: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(300))
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    press: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    url: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
