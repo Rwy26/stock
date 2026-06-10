@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { fetchJson } from '../lib/api'
+import { CompassReport } from '../components/CompassReport'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -196,27 +197,32 @@ export function AiCachePage() {
             {detailLoading ? (
               <p style={{ textAlign: 'center', color: 'var(--muted)' }}>상세 불러오는 중…</p>
             ) : selected ? (
-              <>
-                <h3 style={{ marginBottom: '0.8rem' }}>
-                  {selected.stock_name ?? selected.stock_code}&nbsp;
-                  <span style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>({selected.stock_code})</span>
-                </h3>
-                <p style={{ marginBottom: '0.3rem' }}>
-                  <span className={SIGNAL_CLASSES[selected.signal ?? ''] ?? 'signal-tag'}>
-                    {SIGNAL_LABELS[selected.signal ?? ''] ?? selected.signal ?? '–'}
-                  </span>
-                  {selected.confidence != null && (
-                    <span style={{ marginLeft: 8, color: 'var(--muted)', fontSize: '0.85rem' }}>신뢰도 {selected.confidence.toFixed(0)}%</span>
-                  )}
-                </p>
-                <p className="subtle" style={{ marginBottom: '1rem' }}>분석일시: {formatAt(selected.analyzed_at)}</p>
+              selected.result_json && (selected.result_json as Record<string, unknown>).source === 'market-compass-12stage' ? (
+                /* 시장 나침반 12단계 → 뉴스레터 스타일 리포트 */
+                <CompassReport data={selected.result_json as Record<string, never>} />
+              ) : (
+                <>
+                  <h3 style={{ marginBottom: '0.8rem' }}>
+                    {selected.stock_name ?? selected.stock_code}&nbsp;
+                    <span style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>({selected.stock_code})</span>
+                  </h3>
+                  <p style={{ marginBottom: '0.3rem' }}>
+                    <span className={SIGNAL_CLASSES[selected.signal ?? ''] ?? 'signal-tag'}>
+                      {SIGNAL_LABELS[selected.signal ?? ''] ?? selected.signal ?? '–'}
+                    </span>
+                    {selected.confidence != null && (
+                      <span style={{ marginLeft: 8, color: 'var(--muted)', fontSize: '0.85rem' }}>신뢰도 {selected.confidence.toFixed(0)}%</span>
+                    )}
+                  </p>
+                  <p className="subtle" style={{ marginBottom: '1rem' }}>분석일시: {formatAt(selected.analyzed_at)}</p>
 
-                {selected.result_json && (
-                  <pre style={{ background: 'var(--surface)', padding: '1rem', borderRadius: 8, fontSize: '0.78rem', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
-                    {JSON.stringify(selected.result_json, null, 2)}
-                  </pre>
-                )}
-              </>
+                  {selected.result_json && (
+                    <pre style={{ background: 'var(--surface)', padding: '1rem', borderRadius: 8, fontSize: '0.78rem', overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
+                      {JSON.stringify(selected.result_json, null, 2)}
+                    </pre>
+                  )}
+                </>
+              )
             ) : null}
           </div>
         </div>

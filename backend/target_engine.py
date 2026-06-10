@@ -323,6 +323,11 @@ def analyze_targets(code: str) -> dict:
         "asOf": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "currentPrice": cur,
         "barsUsed": len(bars),
+        # 핵심 차트용 시계열 (최근 120봉 종가) — 뉴스레터 리포트의 가격 vs 목표/손절 차트
+        "series": {
+            "dates": [b["date"] for b in bars[-120:]],
+            "closes": [b["close"] for b in bars[-120:]],
+        },
         "targets": targets,
         "avgTarget": avg_target,
         "avgTargetUpside": round((avg_target / cur - 1) * 100, 1) if avg_target else None,

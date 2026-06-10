@@ -167,6 +167,7 @@ def analyze_stock(code: str, with_ai: bool = True) -> dict:
                     "structureEvent": t.get("structureEvent"),
                     "liquidity": t.get("liquidity"),
                     "cdv": t.get("cdv"),
+                    "volumeProfile": t.get("volumeProfile"),  # 매물대 — 핵심 차트에 밴드로 표시
                     "error": t.get("error"),
                 }
                 for t in mtf.get("timeframes", [])
@@ -179,6 +180,7 @@ def analyze_stock(code: str, with_ai: bool = True) -> dict:
         },
         "stops": targets.get("stops"),
         "probability": targets.get("probability"),
+        "series": targets.get("series"),
         "composite": composite,
     }
 
@@ -228,12 +230,15 @@ def _save_history(result: dict) -> None:
 
     payload = {
         "source": "market-compass-12stage",
+        "asOf": result.get("asOf"),
+        "stock": st,
         "composite": comp,
-        "market": result.get("market", {}).get("regime"),
-        "mtfAlignment": result.get("mtf", {}).get("alignment"),
+        "market": result.get("market"),  # regime + rotationLadder + sectorRanking + vkospi
+        "mtf": result.get("mtf"),
         "targets": result.get("targets"),
         "stops": result.get("stops"),
         "probability": prob,
+        "series": result.get("series"),
         "aiReport": result.get("aiReport"),
         "aiProvider": result.get("aiProvider"),
     }
