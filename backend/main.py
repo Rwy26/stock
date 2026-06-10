@@ -5134,6 +5134,65 @@ def admin_stock_targets(code: str, user=Depends(require_admin)):
         raise HTTPException(status_code=502, detail=f"목표가 분석 실패: {exc}") from exc
 
 
+@app.get("/api/public/ai-history")
+def public_ai_history():
+    """공개 AI 분석 이력 목록 (읽기 전용 — 종목별 최신 분석 요약)."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        rows = db.execute(
+            select(models.AiAnalysisCache)
+            .order_by(models.AiAnalysisCache.analyzed_at.desc())
+            .limit(50)
+        ).scalars().all()
+        return {
+            "items": [
+                {
+                    "code": r.stock_code,
+                    "name": r.stock_name,
+                    "signal": r.signal,
+                    "confidence": r.confidence,
+                    "upside": r.upside_probability,
+                    "analyzedAt": r.analyzed_at.isoformat() if r.analyzed_at else None,
+                    "isCompass": bool(
+                        isinstance(r.result_json, dict)
+                        and r.result_json.get("source") == "market-compass-12stage"
+                    ),
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        db.close()
+
+
+@app.get("/api/public/ai-history/{code}")
+def public_ai_history_detail(code: str):
+    """공개 AI 분석 상세 (뉴스레터 리포트 데이터)."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        row = db.execute(
+            select(models.AiAnalysisCache).where(
+                models.AiAnalysisCache.stock_code == code.strip()
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="분석 이력 없음")
+        return {
+            "code": row.stock_code,
+            "name": row.stock_name,
+            "signal": row.signal,
+            "confidence": row.confidence,
+            "analyzedAt": row.analyzed_at.isoformat() if row.analyzed_at else None,
+            "result_json": row.result_json,
+        }
+    finally:
+        db.close()
+
+
 @app.get("/api/public/sector-rotation")
 def public_sector_rotation():
     """공개 섹터 나침반 (캐시 사용; 강제 재계산 불가)."""
@@ -5374,12 +5433,20 @@ def serve_frontend(full_path: str):
     if dist_root not in candidate.parents and candidate != dist_root:
         raise HTTPException(status_code=404, detail="Not Found")
 
+    # 캐시 정책: index.html은 항상 재검증(no-cache) — 재배포 후 옛 번들 참조로
+    # 빈 화면이 되는 사고 방지. 해시 붙은 assets/* 는 불변이므로 1년 캐시.
     if candidate.exists() and candidate.is_file():
         media_type, _ = mimetypes.guess_type(str(candidate))
-        return FileResponse(candidate, media_type=media_type)
+        if candidate.name == "index.html":
+            headers = {"Cache-Control": "no-cache"}
+        elif "assets" in candidate.parts:
+            headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+        else:
+            headers = {"Cache-Control": "no-cache"}
+        return FileResponse(candidate, media_type=media_type, headers=headers)
 
     # SPA fallback: return index.html for client-side routes.
     index = dist_root / "index.html"
     if not index.exists():
         raise HTTPException(status_code=500, detail="frontend dist is missing index.html")
-    return FileResponse(index, media_type="text/html")
+    return FileResponse(index, media_type="text/html", headers={"Cache-Control": "no-cache"})

@@ -918,3 +918,74 @@ def inquire_daily_minute_chart(
         _time.sleep(0.08)
 
     return [bars[k] for k in sorted(bars)]
+
+
+def inquire_short_sale(
+    *,
+    app_key: str,
+    app_secret: str,
+    is_paper: bool,
+    code: str,
+    days: int = 60,
+    live_base_url: str | None = None,
+    paper_base_url: str | None = None,
+    timeout_seconds: float = 10.0,
+) -> list[dict[str, Any]]:
+    """국내주식 공매도 일별추이 (TR FHPST04830000).
+
+    반환: 과거→현재 순 [{date, close, shortQty(공매도 수량), shortRatio(거래량 대비 %)}].
+    대차잔고는 KIS 미제공 — 공매도 비중 추이가 수급 압력의 대용 지표.
+    """
+    from datetime import date as _date, timedelta as _td
+
+    code = code.strip()
+    token, _ = get_access_token(
+        app_key=app_key, app_secret=app_secret, is_paper=is_paper,
+        live_base_url=live_base_url, paper_base_url=paper_base_url,
+        timeout_seconds=timeout_seconds,
+    )
+    base = _base_url(is_paper, live_base_url=live_base_url, paper_base_url=paper_base_url)
+    url = f"{base}/uapi/domestic-stock/v1/quotations/daily-short-sale"
+    end = _date.today()
+    start = end - _td(days=days)
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appkey": app_key,
+        "appsecret": app_secret,
+        "tr_id": "FHPST04830000",
+        "custtype": "P",
+    }
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_INPUT_ISCD": code,
+        "FID_INPUT_DATE_1": start.strftime("%Y%m%d"),
+        "FID_INPUT_DATE_2": end.strftime("%Y%m%d"),
+    }
+    try:
+        resp = httpx.get(url, headers=headers, params=params, timeout=timeout_seconds)
+    except Exception as exc:
+        raise KisError(f"KIS short-sale request failed: {exc}") from exc
+    data = _safe_json(resp)
+    if resp.status_code >= 400 or str(data.get("rt_cd") or "") not in ("", "0"):
+        msg = data.get("msg1") or f"HTTP {resp.status_code}"
+        raise KisError(f"KIS short-sale error: {msg}", status_code=resp.status_code, payload=data)
+
+    def _f(row: dict, key: str) -> float:
+        try:
+            return float(str(row.get(key) or "0").replace(",", ""))
+        except Exception:
+            return 0.0
+
+    out = []
+    for row in data.get("output2") or []:
+        d = str(row.get("stck_bsop_date") or "")
+        if not d:
+            continue
+        out.append({
+            "date": d,
+            "close": _f(row, "stck_clpr"),
+            "shortQty": _f(row, "ssts_cntg_qty"),
+            "shortRatio": _f(row, "ssts_vol_rlim"),
+        })
+    out.sort(key=lambda r: r["date"])
+    return out

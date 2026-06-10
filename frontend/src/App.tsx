@@ -23,6 +23,7 @@ import { SectorRotationPage } from './pages/SectorRotationPage'
 import { MarketCompassPage } from './pages/MarketCompassPage'
 import { PublicShell } from './layout/PublicShell'
 import { PublicAiRequestPage } from './pages/public/PublicAiRequestPage'
+import { PublicAiHistoryPage } from './pages/public/PublicAiHistoryPage'
 import { PublicRequestsPage } from './pages/PublicRequestsPage'
 
 export default function App() {
@@ -65,6 +66,7 @@ export default function App() {
           <Route index element={<Navigate to="/public/watchlist" replace />} />
           <Route path="sector" element={<SectorRotationPage publicMode />} />
           <Route path="watchlist" element={<WatchlistPage publicMode />} />
+          <Route path="ai-history" element={<PublicAiHistoryPage />} />
           <Route path="ai-request" element={<PublicAiRequestPage />} />
         </Route>
 

@@ -334,7 +334,7 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
     (): Promise<WatchlistResponse> =>
       publicMode
         ? publicFetch<WatchlistResponse>('/api/public/watchlist')
-        : loadWatchlist(),
+        : fetchJson<WatchlistResponse>('/api/watchlist'),
     [publicMode],
   )
 

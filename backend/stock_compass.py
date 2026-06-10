@@ -31,7 +31,7 @@ def _stock_sector(code: str) -> Optional[str]:
 
 
 def _composite_score(sector_score: Optional[float], mtf: dict, targets: dict) -> dict:
-    """결정론 종합 점수 — 각 요소와 가중치를 투명하게 반환."""
+    """결정론 종합 점수 — 각 요소와 가중치를 투명하게 반환 (5요소 균등 20%)."""
     parts = {}
 
     parts["섹터 강도"] = round(sector_score, 1) if sector_score is not None else 50.0
@@ -42,6 +42,10 @@ def _composite_score(sector_score: Optional[float], mtf: dict, targets: dict) ->
 
     prob = targets.get("probability", {})
     parts["상승지속확률"] = float(prob.get("continueUpPct", 50.0)) if "error" not in prob else 50.0
+
+    # 공매도 수급: 감소 추세=가점, 높은 비중=감점 (target_engine 계산). 데이터 없으면 중립 50.
+    short = targets.get("shortSelling") or {}
+    parts["공매도 수급"] = float(short.get("score", 50.0)) if "error" not in short else 50.0
 
     # 손익비: (평균목표 상승폭) / (기술적 손절 하락폭) — 2.0 이상이면 만점
     cur = targets.get("currentPrice") or 0
@@ -103,7 +107,9 @@ _SYSTEM_PROMPT = """당신은 월가 헤지펀드 PM, 글로벌 매크로 전략
 손절 : (stops 중 타당한 것 + "추세 진행 시 손절선을 따라 올리는" 운용 규칙 언급)
 수급 읽기 : (외인/기관/스마트 레이어 점수 해석 + tradePlan.accumulationZones를
             "매집 추정 구간(거래량 집중 가격대)"으로 인용 — 반드시 '추정'임을 명시.
-            대차거래·공매도 데이터는 미제공이므로 절대 언급하지 말 것)
+            shortSelling 데이터가 있으면 공매도 비중·추세를 인용할 것 —
+            감소 추세(trend>0)는 "공매도 감소 = 숏커버/재평가 신호"로,
+            증가 추세는 "하락 베팅 확대"로 해석. 대차잔고는 미제공이므로 언급 금지)
 리스크 트리거 : ("~하면 즉시 매도" 형식 1~2개 — 데이터 근거 필수)
 개미털기 주의 : (스윙 레벨·매물대 기반으로 흔들기 가능 구간 1개 — 구조적 추측임을 명시)
 
@@ -191,6 +197,7 @@ def analyze_stock(code: str, with_ai: bool = True) -> dict:
         "probability": targets.get("probability"),
         "series": targets.get("series"),
         "tradePlan": targets.get("tradePlan"),
+        "shortSelling": targets.get("shortSelling"),
         "composite": composite,
     }
 
@@ -249,6 +256,8 @@ def _save_history(result: dict) -> None:
         "stops": result.get("stops"),
         "probability": prob,
         "series": result.get("series"),
+        "shortSelling": result.get("shortSelling"),
+        "tradePlan": result.get("tradePlan"),
         "aiReport": result.get("aiReport"),
         "aiProvider": result.get("aiProvider"),
     }

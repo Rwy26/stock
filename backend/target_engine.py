@@ -210,9 +210,41 @@ def analyze_targets(code: str) -> dict:
         paper_base_url=settings.kis_paper_base_url,
     )
 
+    import kis_client
+
     bars = _fetch_daily_long(code, kw)
     if len(bars) < 120:
         raise RuntimeError(f"일봉 이력 부족 ({len(bars)}봉)")
+
+    # ── 공매도 수급 (KIS 일별추이 — 대차잔고는 KIS 미제공이라 공매도 비중이 대용 지표) ──
+    # 점수 설계: 50 기준 ± [추세(20일평균-최근5일평균)×12] + [(2% - 최근비중)×8]
+    #   → 공매도 '감소 중'이면 가점(숏커버/재평가 신호), 비중 자체가 높으면 감점.
+    short_data: dict = {}
+    try:
+        srows = kis_client.inquire_short_sale(code=code, days=60, **kw)
+        if len(srows) >= 10:
+            ratios = [r["shortRatio"] for r in srows]
+            recent5 = sum(ratios[-5:]) / 5
+            base_seg = ratios[-25:-5] or ratios[:-5]
+            base20 = sum(base_seg) / max(len(base_seg), 1)
+            trend = round(base20 - recent5, 2)  # 양수 = 공매도 감소 중 (우호)
+            score = max(0.0, min(100.0, 50 + trend * 12 + (2.0 - recent5) * 8))
+            short_data = {
+                "recentRatio5d": round(recent5, 2),
+                "baseRatio20d": round(base20, 2),
+                "trend": trend,
+                "score": round(score, 1),
+                "days": len(srows),
+                "interpretation": (
+                    "공매도 감소 중 — 숏커버/재평가 신호 가능" if trend > 0.2
+                    else "공매도 증가 중 — 하락 베팅 확대" if trend < -0.2
+                    else "공매도 중립"
+                ),
+            }
+        else:
+            short_data = {"error": f"공매도 데이터 부족 ({len(srows)}일)"}
+    except Exception as exc:  # noqa: BLE001
+        short_data = {"error": f"공매도 조회 실패: {type(exc).__name__}"}
     closes = [b["close"] for b in bars]
     highs = [b["high"] for b in bars]
     lows = [b["low"] for b in bars]
@@ -373,6 +405,7 @@ def analyze_targets(code: str) -> dict:
             "stagedTargets": staged_targets,   # 단계별 목표 1·2·3차 (유효 목표 낮은 순)
             "accumulationZones": accumulation, # 매집 추정 구간 (거래량 집중 가격대 — 추정)
         },
+        "shortSelling": short_data,            # 공매도 비중·추세 (KIS) — 대차잔고는 미제공
         "notes": [
             "확률은 과거 빈도 기반 추정 — 미래 보장 아님",
             "목표가 5종은 독립 계산 — 편차가 크면 불확실성이 큰 것",
