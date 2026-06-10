@@ -5011,6 +5011,20 @@ def public_recommendations():
         db.close()
 
 
+@app.get("/api/admin/market-compass")
+def admin_market_compass(force: int = 0, ai: int = 1, user=Depends(require_admin)):
+    """시장 나침반 (Market Compass) — 자금 흐름 추적 12단계 프레임워크.
+
+    1~4단계는 결정론 계산, 5~12단계는 LLM 종합 (Gemini>Groq>OpenAI).
+    관리자 전용 — LLM 호출 비용 발생. 캐시: 장중 30분 / 장외 8시간.
+    """
+    try:
+        import market_compass
+        return market_compass.compute_market_compass(force=bool(force), with_ai=bool(ai))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"시장 나침반 계산 실패: {exc}") from exc
+
+
 @app.get("/api/public/sector-rotation")
 def public_sector_rotation():
     """공개 섹터 나침반 (캐시 사용; 강제 재계산 불가)."""
