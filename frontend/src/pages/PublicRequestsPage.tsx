@@ -34,7 +34,7 @@ export function PublicRequestsPage() {
 
       {!loading && !err && (
         <>
-          <h3 style={{ margin: '0 0 8px' }}>AI 차트 분석 요청 ({requests.length})</h3>
+          <h3 style={{ margin: '0 0 8px' }}>AI 종목 분석 요청 ({requests.length})</h3>
           <div className="glass" style={{ padding: 16, marginBottom: 24 }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>

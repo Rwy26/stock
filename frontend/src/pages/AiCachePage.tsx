@@ -126,7 +126,7 @@ export function AiCachePage() {
       ) : filtered.length === 0 ? (
         <div className="panel glass" style={{ padding: '2rem', textAlign: 'center', color: 'var(--muted)' }}>
           분석 이력이 없습니다.{' '}
-          <a href="/ai-chart" style={{ color: 'var(--accent)' }}>AI 차트 분석</a>에서 차트 이미지를 업로드하면 자동 저장됩니다.
+          <a href="/ai-chart" style={{ color: 'var(--accent)' }}>AI 종목 분석</a>에서 차트 이미지를 업로드하면 자동 저장됩니다.
         </div>
       ) : (
         <div className="rec-table-wrap reveal">

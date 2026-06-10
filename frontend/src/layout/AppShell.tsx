@@ -14,7 +14,7 @@ const menuItems = [
   { to: '/auto-basic', slug: 'auto-basic', label: '일반 자동매매' },
   { to: '/auto-sa', slug: 'auto-sa', label: 'SA 자동매매' },
   { to: '/sv-agent', slug: 'sv-agent', label: 'SV Agent' },
-  { to: '/ai-chart', slug: 'ai-chart', label: '🤖 AI 차트 분석' },
+  { to: '/ai-chart', slug: 'ai-chart', label: '🤖 AI 종목 분석' },
   { to: '/ai-cache', slug: 'ai-cache', label: '📊 AI 분석 이력' },
   { to: '/admin', slug: 'admin', label: '관리자' },
   { to: '/public-requests', slug: 'public-requests', label: '📨 공개 요청' },

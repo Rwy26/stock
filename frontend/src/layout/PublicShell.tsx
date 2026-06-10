@@ -7,7 +7,7 @@ const publicMenu = [
   { to: '/public', end: true, label: '📈 종목 추천' },
   { to: '/public/sector', end: false, label: '🧭 섹터 나침반' },
   { to: '/public/watchlist', end: false, label: '⭐ 관심 종목' },
-  { to: '/public/ai-request', end: false, label: '🤖 AI 차트 분석 요청' },
+  { to: '/public/ai-request', end: false, label: '🤖 AI 종목 분석 요청' },
 ] as const
 
 const inputStyle: CSSProperties = {

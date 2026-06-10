@@ -50,7 +50,7 @@ export function PublicAiRequestPage() {
 
   return (
     <div>
-      <h2 style={{ marginBottom: 4 }}>🤖 AI 차트 분석 요청</h2>
+      <h2 style={{ marginBottom: 4 }}>🤖 AI 종목 분석 요청</h2>
       <p style={{ color: '#94a3b8', fontSize: 13, marginBottom: 16, lineHeight: 1.6 }}>
         분석을 원하는 종목명을 입력하면 요청이 접수됩니다. 실제 AI 분석은 관리자가 수행한 뒤 처리합니다.
         <br />

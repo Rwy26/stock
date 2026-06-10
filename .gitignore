@@ -34,3 +34,6 @@ Thumbs.db
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
+
+# local tools (ngrok binary etc.)
+tools/

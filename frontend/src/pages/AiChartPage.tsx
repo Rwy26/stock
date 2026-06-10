@@ -253,7 +253,7 @@ function buildReportHtml(data: AnalysisResponse, images: string[]): string {
   <div class="header">
     <div class="h-left">
       <h1>${data.symbol} <span style="font-weight:400;font-size:1rem;color:#94a3b8">${r.company_analysis?.sector ?? ''}</span></h1>
-      <div class="sub">AI 차트 분석 보고서 · ${date}${data.images_count ? ` · ${data.images_count}개 이미지 분석` : ''}</div>
+      <div class="sub">AI 종목 분석 보고서 · ${date}${data.images_count ? ` · ${data.images_count}개 이미지 분석` : ''}</div>
     </div>
     <div class="h-right">
       <div class="signal-pill">${signal}</div>
@@ -689,7 +689,7 @@ export function AiChartPage() {
       <header className="topbar glass">
         <div>
           <p className="top-label">AI CHART ANALYSIS</p>
-          <h2>AI 차트 분석</h2>
+          <h2>AI 종목 분석</h2>
           <p className="subtle">차트 이미지 · CSV를 드롭하거나 종목코드로 즉시 AI 분석</p>
         </div>
         <button type="button" className="ai-key-settings-btn" onClick={() => { setShowKeyPanel(v => !v); setKeyStatus('idle'); setKeyMsg('') }}
