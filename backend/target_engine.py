@@ -303,6 +303,40 @@ def analyze_targets(code: str) -> dict:
         "구조 손절": {"price": struct_stop, "basis": "현 상승 다리 기점 스윙 저점 (이탈 시 구조 무효)"},
     }
 
+    # ── 트레이딩 플랜 레벨 (분할 매수·단계별 목표·매집 추정 구간) ────────
+    # 분할 매수: 현 상승 다리(주 스윙 저점→현재가)의 피보나치 되돌림 0.236/0.382/0.5
+    leg_low = struct_stop if struct_stop and struct_stop < cur else lo
+    buy_levels = []
+    if leg_low and cur > leg_low:
+        rng_leg = cur - leg_low
+        for i, ratio in enumerate((0.236, 0.382, 0.5), start=1):
+            lvl = cur - rng_leg * ratio
+            if lvl > (tech_stop or 0):  # 손절선 아래 매수 레벨은 무의미
+                buy_levels.append({
+                    "stage": f"{i}차",
+                    "price": round(lvl),
+                    "basis": f"상승 다리 {ratio} 되돌림",
+                })
+
+    # 단계별 목표: 유효 목표가(평균 가드 통과 + 현재가 위)를 낮은 순으로 1·2·3차
+    staged = sorted(
+        [
+            {"price": t["price"], "basis": k}
+            for k, t in targets.items()
+            if t and t.get("price") and not t.get("excluded") and t["price"] > cur
+        ],
+        key=lambda x: x["price"],
+    )[:3]
+    staged_targets = [
+        {"stage": f"{i}차", **s} for i, s in enumerate(staged, start=1)
+    ]
+
+    # 매집 추정 구간: 현재가 아래 거래량 집중 가격대 상위 2개 (추정임을 명시)
+    accumulation = sorted(
+        [z for z in vp if z["priceTo"] <= cur],
+        key=lambda z: -z["volumePct"],
+    )[:2]
+
     # ── [11단계] 확률 (빈도 기반) ────────────────────────────────────────
     prob = {}
     stop_for_prob = tech_stop or supply_stop or struct_stop
@@ -334,6 +368,11 @@ def analyze_targets(code: str) -> dict:
         "stops": stops,
         "probability": prob,
         "fundamentals": fund,
+        "tradePlan": {
+            "buyLevels": buy_levels,           # 분할 매수 1·2·3차 (피보나치 되돌림)
+            "stagedTargets": staged_targets,   # 단계별 목표 1·2·3차 (유효 목표 낮은 순)
+            "accumulationZones": accumulation, # 매집 추정 구간 (거래량 집중 가격대 — 추정)
+        },
         "notes": [
             "확률은 과거 빈도 기반 추정 — 미래 보장 아님",
             "목표가 5종은 독립 계산 — 편차가 크면 불확실성이 큰 것",

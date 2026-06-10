@@ -361,31 +361,63 @@ function SectorRanking({ p }: { p: Dict }) {
   )
 }
 
-// ── 확률 스택바 ──────────────────────────────────────────────────────────────
+// ── 확률 — "과거 비슷한 상황 100번 중 몇 번?" 와플 차트 (자연빈도 표현) ───────
 function ProbBar({ p }: { p: Dict }) {
   const pr = p.probability ?? {}
-  const reach = Number(pr.reachTargetPct ?? 0)
-  const stopP = Number(pr.hitStopPct ?? 0)
+  const reach = Math.round(Number(pr.reachTargetPct ?? 0))
+  const stopP = Math.round(Number(pr.hitStopPct ?? 0))
   const und = Math.max(0, 100 - reach - stopP)
+  const contUp = pr.continueUpPct != null ? Math.round(Number(pr.continueUpPct) / 10) : null
   if (!reach && !stopP) return null
+
+  // 100개 점: 초록(목표 먼저) → 회색(결판 안 남) → 빨강(손절 먼저)
+  const dots = [
+    ...Array(reach).fill('#34d399'),
+    ...Array(und).fill('rgba(255,255,255,0.16)'),
+    ...Array(stopP).fill('#f87171'),
+  ].slice(0, 100)
+
   return (
     <div style={card}>
-      <p style={sectionTitle}>
-        확률 — 과거 {pr.sample}건 빈도 기반{pr.lowConfidence ? ' (표본 적음 ⚠)' : ''}
+      <p style={sectionTitle}>📊 과거에 비슷한 상황에서는?</p>
+
+      <p style={{ fontSize: 13.5, lineHeight: 1.7, color: 'rgba(241,245,249,0.85)', margin: '0 0 12px' }}>
+        지금과 같은 추세 국면이 과거에 <b style={{ color: '#f1f5f9' }}>{pr.sample}번</b> 있었습니다.
+        그때마다 100번 중 —
       </p>
-      <div style={{ display: 'flex', height: 22, borderRadius: 11, overflow: 'hidden', fontSize: 11, fontWeight: 800 }}>
-        <div style={{ width: `${reach}%`, background: '#065f46', color: '#34d399', display: 'grid', placeItems: 'center' }}>
-          {reach >= 14 ? `목표 ${reach}%` : ''}
-        </div>
-        <div style={{ width: `${und}%`, background: 'rgba(255,255,255,0.08)', color: '#94a3b8', display: 'grid', placeItems: 'center' }}>
-          {und >= 14 ? `미결 ${und.toFixed(1)}%` : ''}
-        </div>
-        <div style={{ width: `${stopP}%`, background: '#7f1d1d', color: '#f87171', display: 'grid', placeItems: 'center' }}>
-          {stopP >= 14 ? `손절 ${stopP}%` : ''}
-        </div>
+
+      {/* 와플 차트: 10 × 10 */}
+      <div style={{
+        display: 'grid', gridTemplateColumns: 'repeat(20, 1fr)', gap: 3,
+        maxWidth: 420, margin: '0 auto 12px',
+      }}>
+        {dots.map((c, i) => (
+          <div key={i} style={{ aspectRatio: '1', borderRadius: 2.5, background: c }} />
+        ))}
       </div>
-      <p style={{ fontSize: 11, color: '#64748b', marginTop: 6 }}>
-        상승 지속(20일) {pr.continueUpPct}% · 목표 선도달 vs 손절 선이탈, 60일 한도
+
+      {/* 쉬운 말 범례 */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', justifyContent: 'center', fontSize: 12.5 }}>
+        <span><span style={{ color: '#34d399', fontWeight: 800 }}>● {reach}번</span> 목표가에 먼저 닿음</span>
+        <span><span style={{ color: '#f87171', fontWeight: 800 }}>● {stopP}번</span> 손절가에 먼저 닿음</span>
+        <span><span style={{ color: '#94a3b8', fontWeight: 800 }}>● {und}번</span> 두 달 안에 결판 안 남</span>
+      </div>
+
+      {/* 한 달 뒤 — 10칸 게이지 */}
+      {contUp != null && (
+        <p style={{ fontSize: 13, textAlign: 'center', marginTop: 14, color: 'rgba(241,245,249,0.8)' }}>
+          한 달 뒤 가격이 올라 있던 경우 — 10번 중{' '}
+          <b style={{ color: '#34d399', fontSize: 15 }}>{contUp}번</b>{' '}
+          <span style={{ letterSpacing: 1.5 }}>
+            <span style={{ color: '#34d399' }}>{'●'.repeat(contUp)}</span>
+            <span style={{ color: 'rgba(255,255,255,0.15)' }}>{'●'.repeat(10 - contUp)}</span>
+          </span>
+        </p>
+      )}
+
+      <p style={{ fontSize: 11, color: '#64748b', textAlign: 'center', marginTop: 8 }}>
+        {pr.lowConfidence ? '⚠ 과거 사례가 적어 참고만 하세요 · ' : ''}
+        과거 통계일 뿐, 미래를 보장하지 않습니다
       </p>
     </div>
   )
@@ -418,6 +450,28 @@ function Story({ text }: { text: string }) {
   )
 }
 
+// ── AI 리포트 섹션 분해 ("# 제목" 기준) ─────────────────────────────────────
+function splitSections(text: string): Array<{ title: string; body: string }> {
+  const out: Array<{ title: string; body: string }> = []
+  let title = ''
+  let buf: string[] = []
+  const flush = () => {
+    const body = buf.join('\n').replace(/^[\s-]*\n/, '').replace(/\n[\s-]*$/, '').trim()
+    if (title || body) out.push({ title, body })
+    buf = []
+  }
+  for (const line of text.split('\n')) {
+    if (line.startsWith('# ')) {
+      flush()
+      title = line.slice(2).trim()
+    } else {
+      buf.push(line)
+    }
+  }
+  flush()
+  return out
+}
+
 // ── 메인 리포트 ──────────────────────────────────────────────────────────────
 export function CompassReport({ data }: { data: Dict }) {
   const comp = data.composite ?? {}
@@ -431,6 +485,14 @@ export function CompassReport({ data }: { data: Dict }) {
   const stops = data.stops ?? {}
   const stopPrice = stops['기술적 손절']?.price ?? stops['구조 손절']?.price
   const cur = stock.currentPrice
+
+  // AI 리포트 섹션 분해: 종목 평가는 제목·차트와 중복이라 제외,
+  // 투자 행동·시나리오는 차트 바로 아래, 나머지(시장 해석)는 하단 노트로.
+  const sections = data.aiReport ? splitSections(String(data.aiReport)) : []
+  const actionSec = sections.find(s => s.title.includes('투자 행동'))
+  const scenarioSec = sections.find(s => s.title.includes('시나리오') || s.title.includes('불확실'))
+  const restSecs = sections.filter(s =>
+    s !== actionSec && s !== scenarioSec && !s.title.includes('종목 평가'))
 
   return (
     <div style={{ maxWidth: 680, margin: '0 auto' }}>
@@ -482,13 +544,32 @@ export function CompassReport({ data }: { data: Dict }) {
         </div>
       )}
 
+      {/* ── 투자 행동 + 반대 시나리오 (차트 직하 — 행동으로 직결) ── */}
+      {actionSec && (
+        <div style={{ ...card, borderColor: 'rgba(52,211,153,0.3)' }}>
+          <p style={sectionTitle}>🎯 투자 행동</p>
+          <Story text={actionSec.body} />
+        </div>
+      )}
+      {scenarioSec && (
+        <div style={{ ...card, borderColor: 'rgba(248,113,113,0.25)' }}>
+          <p style={sectionTitle}>⚠ 불확실성 · 반대 시나리오</p>
+          <Story text={scenarioSec.body} />
+        </div>
+      )}
+
       <ProbBar p={data} />
 
-      {/* ── AI 스토리 ── */}
-      {data.aiReport && (
+      {/* ── AI 시장 해석 (남은 섹션) ── */}
+      {restSecs.length > 0 && (
         <div style={card}>
-          <p style={sectionTitle}>AI 애널리스트 노트 <span style={{ letterSpacing: 0 }}>({data.aiProvider})</span></p>
-          <Story text={data.aiReport} />
+          <p style={sectionTitle}>AI 시장 해석 <span style={{ letterSpacing: 0 }}>({data.aiProvider})</span></p>
+          {restSecs.map((s, i) => (
+            <div key={i}>
+              {s.title && <h4 style={{ margin: '10px 0 6px', color: '#a5b4fc' }}>{s.title}</h4>}
+              <Story text={s.body} />
+            </div>
+          ))}
         </div>
       )}
 
