@@ -405,22 +405,20 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
       const sectorCap = stocks.reduce((s, i) => s + rawCap(i), 0)
       const momentum = 1 + clamp(avgChange, -3, 3) * 0.10 + (clamp(avgScore, 0, 100) / 100) * 0.20
 
-      return { id: sec, sec, stocks, visibleStocks, sectorCap, momentum, avgChange, isDownSector }
+      return { id: sec, sec, stocks, rankedStocks, visibleStocks, sectorCap, momentum, avgChange, isDownSector }
     })
 
     // 전역 단조성 보장: 모든 종목을 단일 척도(관심종목 전체, 최대 시총=1.0)로 압축하고
     // 섹터 면적 = 보이는 타일 가중치의 합 → 섹터 면적은 같을 필요 없이 비중대로 벌어진다.
     // "시총이 더 작은 종목이 더 큰 공간을 가질 수 없다"가 섹터 경계를 넘어 성립한다.
-    // 소외 섹터(하락/기타 + 시총 비중 8% 미만)는 접어서 이름만 표시 — 종목 타일 없음.
+    // 소외 섹터(하락/기타 + 시총 비중 8% 미만)는 빈칸 대신 시총 상위 4개까지만 작게 노출.
     const allCaps = items.map(it => rawCap(it))
     const totalCap = allCaps.reduce((a, b) => a + b, 0)
     const secs = secsRaw.map(s => {
-      const collapsed = s.isDownSector && totalCap > 0 && s.sectorCap / totalCap < 0.08
-      const visibleStocks = collapsed ? [] : s.visibleStocks
-      const value = collapsed
-        ? AREA_FLOOR * 1.6
-        : visibleStocks.reduce((sum, st) => sum + compress(rawCap(st), allCaps), 0)
-      return { ...s, collapsed, visibleStocks, value }
+      const marginal = s.isDownSector && totalCap > 0 && s.sectorCap / totalCap < 0.08
+      const visibleStocks = marginal ? s.rankedStocks.slice(0, 4) : s.visibleStocks
+      const value = visibleStocks.reduce((sum, st) => sum + compress(rawCap(st), allCaps), 0)
+      return { ...s, visibleStocks, value }
     })
 
     const secRects: TRect[] = squarify(
@@ -442,8 +440,6 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
       const stockMap = new Map(sd.visibleStocks.map(s => [s.code, s]))
       return {
         ...sr, sec: sd.sec,
-        collapsed: sd.collapsed,
-        avgChange: sd.avgChange,
         totalCount: sd.stocks.length,
         shownCount: sd.visibleStocks.length,
         stocks: tiles.map(r => ({ ...r, item: stockMap.get(r.id)! })).filter(r => !!r.item),
@@ -592,48 +588,23 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
               overflow: 'hidden',
             }}
           >
-            {sec.collapsed ? (
-              /* 소외 섹터: 종목 없이 이름만 중앙 표시 */
-              <div
-                style={{
-                  position: 'absolute', inset: 0,
-                  display: 'flex', flexDirection: 'column',
-                  alignItems: 'center', justifyContent: 'center', gap: 2,
-                  background: 'rgba(10,15,24,0.6)',
-                  pointerEvents: 'none',
-                }}
-              >
-                <span style={{
-                  fontSize: '0.72rem', fontWeight: 800,
-                  letterSpacing: '0.04em', color: 'rgba(255,255,255,0.55)',
-                  textAlign: 'center', padding: '0 6px',
-                  whiteSpace: 'nowrap', overflow: 'hidden', maxWidth: '100%',
-                }}>
-                  {toKoreanSectorAbbr(sec.sec)}
-                </span>
-                <span style={{ fontSize: '0.58rem', color: 'rgba(255,255,255,0.38)' }}>
-                  {sec.totalCount}종목 {formatPercent(sec.avgChange)}
-                </span>
-              </div>
-            ) : (
-              /* Sector header */
-              <div
-                style={{
-                  position: 'absolute', inset: '0 0 auto 0', height: SEC_H,
-                  display: 'flex', alignItems: 'center', padding: '0 7px',
-                  background: 'rgba(10,15,24,0.84)',
-                  zIndex: 2, pointerEvents: 'none',
-                  fontSize: '0.62rem', fontWeight: 800,
-                  letterSpacing: '0.04em', color: 'rgba(255,255,255,0.72)',
-                  whiteSpace: 'nowrap', overflow: 'hidden',
-                }}
-              >
-                {toKoreanSectorAbbr(sec.sec)}
-                <span style={{ marginLeft: 5, opacity: 0.42, fontWeight: 400 }}>
-                  {sec.shownCount}/{sec.totalCount}
-                </span>
-              </div>
-            )}
+            {/* Sector header */}
+            <div
+              style={{
+                position: 'absolute', inset: '0 0 auto 0', height: SEC_H,
+                display: 'flex', alignItems: 'center', padding: '0 7px',
+                background: 'rgba(10,15,24,0.84)',
+                zIndex: 2, pointerEvents: 'none',
+                fontSize: '0.62rem', fontWeight: 800,
+                letterSpacing: '0.04em', color: 'rgba(255,255,255,0.72)',
+                whiteSpace: 'nowrap', overflow: 'hidden',
+              }}
+            >
+              {toKoreanSectorAbbr(sec.sec)}
+              <span style={{ marginLeft: 5, opacity: 0.42, fontWeight: 400 }}>
+                {sec.shownCount}/{sec.totalCount}
+              </span>
+            </div>
 
             {/* Stock tiles */}
             {sec.stocks.map(({ id, x, y, w, h, item }) => {

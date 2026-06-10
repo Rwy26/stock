@@ -4,8 +4,8 @@ import { NavLink, Outlet } from 'react-router-dom'
 import { clearGuest, getGuest, publicFetch, setGuest, type Guest } from '../lib/publicApi'
 
 const publicMenu = [
-  { to: '/public/sector', end: false, label: '🧭 섹터 나침반' },
   { to: '/public/watchlist', end: false, label: '⭐ 관심 종목' },
+  { to: '/public/sector', end: false, label: '🧭 섹터 나침반' },
   { to: '/public/ai-request', end: false, label: '🤖 AI 종목 분석 요청' },
 ] as const
 

@@ -59,8 +59,8 @@ export default function App() {
 
         {/* Public (guest) area — outside RequireAuth. Name+phone gate only. */}
         <Route path="/public" element={<PublicShell />}>
-          {/* 종목 추천은 공개 메뉴에서 제외 — 첫 화면은 섹터 나침반 */}
-          <Route index element={<Navigate to="/public/sector" replace />} />
+          {/* 종목 추천은 공개 메뉴에서 제외 — 첫 화면은 관심 종목 */}
+          <Route index element={<Navigate to="/public/watchlist" replace />} />
           <Route path="sector" element={<SectorRotationPage publicMode />} />
           <Route path="watchlist" element={<WatchlistPage publicMode />} />
           <Route path="ai-request" element={<PublicAiRequestPage />} />
