@@ -704,34 +704,78 @@ function LifecyclePipeline({ sectors }: { sectors: SectorItem[] }) {
 // ─── Mini Chart (Google Finance style) ──────────────────────────────────────
 // chg5d: 최근 5거래일 변화율, chg20d: 최근 20거래일 변화율
 // 3-anchor bezier area chart: start(day-20) → mid(day-5) → end(today)
-function MiniChart({ chg5d = 0, chg20d = 0, color, id }: {
-  chg5d?: number; chg20d?: number; color: string; id: string
+// BB(20, 2σ) 계산 — 일봉 시리즈에서 윈도우가 차는 구간만 반환
+type BBPoint = { price: number; up: number; mid: number; lo: number }
+
+function bollinger(series: number[], win = 20, k = 2) {
+  const out: BBPoint[] = []
+  for (let i = win - 1; i < series.length; i++) {
+    const w = series.slice(i - win + 1, i + 1)
+    const mean = w.reduce((a, b) => a + b, 0) / win
+    const sd = Math.sqrt(w.reduce((a, b) => a + (b - mean) ** 2, 0) / win)
+    out.push({ price: series[i], up: mean + k * sd, mid: mean, lo: mean - k * sd })
+  }
+  return out
+}
+
+function MiniChart({ chg5d = 0, chg20d = 0, color, id, series }: {
+  chg5d?: number; chg20d?: number; color: string; id: string; series?: number[]
 }) {
   const W = 64, H = 28, PX = 2, PY = 3
+  const gid = `gf-${id}`
 
-  // 3 anchor pct values relative to day-20 baseline
-  const p0 = 0                   // day -20
-  const p1 = chg20d - chg5d      // day -5
-  const p2 = chg20d              // day  0
+  // 실데이터(일봉)가 있으면 가격 라인 + 볼린저 밴드(20, 2σ)
+  const bb = series && series.length >= 25 ? bollinger(series) : null
+  if (bb && bb.length >= 2) {
+    const minV = Math.min(...bb.map(p => Math.min(p.lo, p.price)))
+    const maxV = Math.max(...bb.map(p => Math.max(p.up, p.price)))
+    const range = Math.max(maxV - minV, 1e-9)
+    const toY = (v: number) => PY + ((maxV - v) / range) * (H - PY * 2)
+    const toX = (i: number) => PX + (i / (bb.length - 1)) * (W - PX * 2)
 
+    const pts = (sel: (p: BBPoint) => number) =>
+      bb.map((p, i) => `${toX(i).toFixed(1)},${toY(sel(p)).toFixed(1)}`)
+    const bandPath =
+      `M${pts(p => p.up).join(' L')} L${pts(p => p.lo).reverse().join(' L')} Z`
+    const midPath = `M${pts(p => p.mid).join(' L')}`
+    const pricePath = `M${pts(p => p.price).join(' L')}`
+    const last = bb[bb.length - 1]
+
+    return (
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`}
+        style={{ flex: `0 0 ${W}px`, display: 'block', overflow: 'visible' }}>
+        {/* 볼린저 밴드 영역 */}
+        <path d={bandPath} fill={color} fillOpacity="0.13" />
+        {/* 상·하단 밴드 라인 */}
+        <path d={`M${pts(p => p.up).join(' L')}`} fill="none"
+          stroke={color} strokeOpacity="0.4" strokeWidth="0.7" />
+        <path d={`M${pts(p => p.lo).join(' L')}`} fill="none"
+          stroke={color} strokeOpacity="0.4" strokeWidth="0.7" />
+        {/* 중심선(SMA20) 점선 */}
+        <path d={midPath} fill="none" stroke="rgba(255,255,255,0.3)"
+          strokeWidth="0.7" strokeDasharray="2,2" />
+        {/* 가격 라인 */}
+        <path d={pricePath} fill="none" stroke={color} strokeWidth="1.6"
+          strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx={toX(bb.length - 1)} cy={toY(last.price)} r="2.2" fill={color} />
+      </svg>
+    )
+  }
+
+  // 폴백: 시리즈 없으면 기존 3포인트 베지어 스파크라인
+  const p0 = 0, p1 = chg20d - chg5d, p2 = chg20d
   const allV = [p0, p1, p2]
-  const span = Math.max(Math.abs(p2 - p0), Math.abs(p1), 0.5)  // min span to prevent flat
+  const span = Math.max(Math.abs(p2 - p0), Math.abs(p1), 0.5)
   const minV = Math.min(...allV) - span * 0.18
   const maxV = Math.max(...allV) + span * 0.18
   const range = maxV - minV
-
   const toY = (v: number) => PY + ((maxV - v) / range) * (H - PY * 2)
-
   const x0 = PX, x1 = W / 2, x2 = W - PX
   const y0 = toY(p0), y1 = toY(p1), y2 = toY(p2)
-  const yBase = Math.min(toY(0), H - PY)  // baseline clipped to bottom
-
-  // smooth bezier through 3 points (midpoint control points)
+  const yBase = Math.min(toY(0), H - PY)
   const mx = (x0 + x1) / 2, mx2 = (x1 + x2) / 2
   const linePath = `M${x0},${y0} C${mx},${y0} ${mx},${y1} ${x1},${y1} C${mx2},${y1} ${mx2},${y2} ${x2},${y2}`
   const areaPath = `${linePath} L${x2},${H} L${x0},${H} Z`
-
-  const gid = `gf-${id}`
 
   return (
     <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`}
@@ -742,15 +786,11 @@ function MiniChart({ chg5d = 0, chg20d = 0, color, id }: {
           <stop offset="100%" stopColor={color} stopOpacity="0.03" />
         </linearGradient>
       </defs>
-      {/* baseline dashed */}
       <line x1={PX} y1={yBase} x2={W - PX} y2={yBase}
         stroke="rgba(255,255,255,0.18)" strokeWidth="0.8" strokeDasharray="2.5,2.5" />
-      {/* area fill */}
       <path d={areaPath} fill={`url(#${gid})`} />
-      {/* line */}
       <path d={linePath} fill="none" stroke={color} strokeWidth="1.7"
         strokeLinecap="round" strokeLinejoin="round" />
-      {/* end dot */}
       <circle cx={x2} cy={y2} r="2.4" fill={color} />
     </svg>
   )
@@ -857,7 +897,8 @@ function SectorGrid({ sectors, macro }: { sectors: SectorItem[]; macro: MacroDet
               </div>
               {/* bottom row: chart + value */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <MiniChart chg5d={chg5d} chg20d={chg20d} color={color} id={id} />
+                <MiniChart chg5d={chg5d} chg20d={chg20d} color={color} id={id}
+                  series={macro.series1d?.[id]} />
                 <span style={{ fontSize: 13.5, fontWeight: 700, color: '#f1f5f9', flex: 1, textAlign: 'right', letterSpacing: -0.3 }}>
                   {val}
                 </span>

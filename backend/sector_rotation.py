@@ -320,15 +320,15 @@ def _macro_score() -> Tuple[float, dict]:
             "oilChg20d":    _chg(oil, 20),
             "vkospiChg1d":  _chg(vkospi_s, 1) if vkospi_s is not None and len(vkospi_s) >= 2 else 0.0,
             "growthScore":  growth_score,
-            # 일봉 시계열 (최근 30일)
+            # 일봉 시계열 (최근 44일 — BB(20) 계산 시 표시 구간 25포인트 확보)
             "series1d": {
-                "tnx":    _series(closes_d, "^TNX"),
-                "dxy":    _series(closes_d, "DX-Y.NYB"),
-                "vix":    _series(closes_d, "^VIX"),
-                "nasdaq": _series(closes_d, "^IXIC"),
-                "krw":    _series(closes_d, "KRW=X"),
-                "oil":    _series(closes_d, "CL=F"),
-                "vkospi": [round(float(v), 2) for v in vkospi_s.iloc[-30:].values] if vkospi_s is not None else [],
+                "tnx":    _series(closes_d, "^TNX", 44),
+                "dxy":    _series(closes_d, "DX-Y.NYB", 44),
+                "vix":    _series(closes_d, "^VIX", 44),
+                "nasdaq": _series(closes_d, "^IXIC", 44),
+                "krw":    _series(closes_d, "KRW=X", 44),
+                "oil":    _series(closes_d, "CL=F", 44),
+                "vkospi": [round(float(v), 2) for v in vkospi_s.iloc[-44:].values] if vkospi_s is not None else [],
             },
             # 1시간봉 시계열 (최근 48시간)
             "series1h": {
