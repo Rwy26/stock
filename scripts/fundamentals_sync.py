@@ -7,6 +7,9 @@
   1. KIS inquire_price 로 주가 + 발행주식수(상장주식수) 수집 → 시총 = 주가 × 발행주식수
   2. 네이버 금융(시총/주가)과 비교 → 1% 초과 차이는 불일치로 로그
   3. 발행주식수 등 기본적 분석 데이터를 D드라이브 캐시에 저장 (KIS 재호출 최소화)
+  4. [무결성 검증] DB 종목명 ↔ 네이버 종목명 전수 대조.
+     불일치(코드가 다른 회사를 가리킴)나 시세 없음(폐지/오타 코드)은
+     logs/name-mismatch-alert.log 에 기록 — 2026-06-10 코드 매핑 오류 13건 재발 방지.
 
 KIS는 읽기 전용(시세 조회)만 사용 — 주문/거래 없음(킬스위치 무관).
 """
@@ -59,7 +62,11 @@ def _naver_quotes(codes: list[str]) -> dict[str, dict]:
                                 continue
                     return 0.0
 
-                out[c] = {"price": num("closePriceRaw", "closePrice"), "cap": num("marketValueFullRaw")}
+                out[c] = {
+                    "price": num("closePriceRaw", "closePrice"),
+                    "cap": num("marketValueFullRaw"),
+                    "name": str(d.get("stockName") or "").strip(),
+                }
         except Exception:
             continue
     return out
@@ -80,6 +87,45 @@ def _target_codes() -> list[str]:
     return sorted(codes)
 
 
+def _db_names(codes: list[str]) -> dict[str, str]:
+    s = apollo_db.get_session_factory()()
+    try:
+        rows = s.execute(
+            select(models.Stock.code, models.Stock.name).where(models.Stock.code.in_(codes))
+        ).all()
+        return {str(c): str(n or "") for c, n in rows}
+    finally:
+        s.close()
+
+
+def verify_names(codes: list[str], naver: dict[str, dict], now: datetime) -> list[str]:
+    """DB 종목명 ↔ 네이버 종목명 전수 대조. 문제 건 리스트 반환 + 알림 파일 기록.
+
+    돈을 다루는 시스템에서 코드↔이름 불일치는 다른 회사를 매매하는 사고로 이어진다.
+    불일치 발견 시 자동 수정하지 않고 알림만 남긴다 — 정정은 사람이 확인 후 수행.
+    """
+    db_names = _db_names(codes)
+    problems: list[str] = []
+    for c in codes:
+        dbn = db_names.get(c, "")
+        nv = naver.get(c)
+        if nv is None or not nv.get("name"):
+            problems.append(f"NO-QUOTE {c} DB={dbn} — 폐지되었거나 존재하지 않는 코드일 수 있음")
+            continue
+        nvn = str(nv["name"])
+        if dbn.replace(" ", "") != nvn.replace(" ", ""):
+            problems.append(f"NAME-MISMATCH {c} DB={dbn} NAVER={nvn} — 코드가 다른 회사를 가리킴")
+
+    if problems:
+        alert = Path(__file__).resolve().parents[1] / "logs" / "name-mismatch-alert.log"
+        alert.parent.mkdir(parents=True, exist_ok=True)
+        with alert.open("a", encoding="utf-8") as f:
+            f.write(f"[{now.isoformat(timespec='seconds')}] {len(problems)}건 — 즉시 확인 필요\n")
+            for p in problems:
+                f.write(f"   {p}\n")
+    return problems
+
+
 def _admin_profile():
     s = apollo_db.get_session_factory()()
     try:
@@ -97,6 +143,7 @@ def main() -> int:
     is_paper = bool(getattr(prof, "is_paper", False))
 
     naver = _naver_quotes(codes)
+    name_problems = verify_names(codes, naver, now)
     mismatches: list[dict] = []
 
     for c in codes:
@@ -144,7 +191,10 @@ def main() -> int:
     pp = get_pipeline_paths()
     pp.logs_dir.mkdir(parents=True, exist_ok=True)
     logf = pp.logs_dir / "fundamentals-sync.log"
-    header = f"[{now.isoformat(timespec='seconds')}] synced={len(codes)} mismatches(>{MISMATCH_PCT}%)={len(mismatches)}"
+    header = (
+        f"[{now.isoformat(timespec='seconds')}] synced={len(codes)} "
+        f"mismatches(>{MISMATCH_PCT}%)={len(mismatches)} name_problems={len(name_problems)}"
+    )
     try:
         with logf.open("a", encoding="utf-8") as f:
             f.write(header + "\n")
@@ -152,12 +202,16 @@ def main() -> int:
                 f.write(
                     f"   MISMATCH {r['code']} kis_cap={r['kis_cap']:.0f} naver_cap={r['naver_cap']:.0f} diff={r['diff_pct']}%\n"
                 )
+            for p in name_problems:
+                f.write(f"   {p}\n")
     except Exception:
         pass
 
     print(header)
     for r in mismatches[:20]:
         print(f"  MISMATCH {r['code']} diff={r['diff_pct']}%")
+    for p in name_problems:
+        print(f"  {p}")
     return 0
 
 

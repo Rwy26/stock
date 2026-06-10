@@ -59,6 +59,23 @@ def fetch_logo(code: str) -> tuple[bytes | None, str]:
     return None, ""
 
 
+def naver_names(codes: list[str]) -> dict[str, str]:
+    """네이버 실시간 API로 코드→실제 종목명 조회 (코드↔이름 검증용)."""
+    out: dict[str, str] = {}
+    for i in range(0, len(codes), 40):
+        part = codes[i:i + 40]
+        url = "https://polling.finance.naver.com/api/realtime/domestic/stock/" + ",".join(part)
+        try:
+            r = httpx.get(url, headers=HEADERS, timeout=8, follow_redirects=True)
+            for d in r.json().get("datas", []):
+                c = str(d.get("itemCode") or "")
+                if c:
+                    out[c] = str(d.get("stockName") or "").strip()
+        except Exception:
+            continue
+    return out
+
+
 def as_tag_list(raw) -> list[str]:
     if isinstance(raw, str):
         try:
@@ -87,11 +104,25 @@ def main() -> None:
         ).all()
 
         print(f"[logo] total watchlist stocks: {len(rows)}")
-        ok = skipped = failed = 0
+        ok = skipped = failed = blocked = 0
+
+        # 코드↔이름 검증: DB 이름과 네이버 이름이 다르면 로고를 받지 않는다.
+        # 잘못된 코드에 로고를 입히면 다른 회사 로고가 표시된다 (2026-06-10 한화오션/HD현대중공업 사고).
+        real_names = naver_names([str(c) for c, _ in rows])
 
         for stock_code, name in rows:
             code = str(stock_code)
             name = str(name or code)
+
+            real = real_names.get(code, "")
+            if not real:
+                blocked += 1
+                print(f"  [BLOCK] {code} {name} - 네이버 시세 없음 (폐지/오타 코드 의심)")
+                continue
+            if name.replace(" ", "") != real.replace(" ", ""):
+                blocked += 1
+                print(f"  [BLOCK] {code} DB={name} NAVER={real} - 코드/이름 불일치, 로고 스킵")
+                continue
 
             # 파일 저장
             svg_path = LOGO_DIR / f"{code}.svg"
@@ -145,7 +176,7 @@ def main() -> None:
 
         session.commit()
         total = ok + skipped
-        print(f"\n[logo] done - downloaded={ok}  reused={skipped}  failed={failed}  icon_tags_updated={total}")
+        print(f"\n[logo] done - downloaded={ok}  reused={skipped}  failed={failed}  blocked={blocked}  icon_tags_updated={total}")
     finally:
         session.close()
 

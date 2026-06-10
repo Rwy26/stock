@@ -205,15 +205,26 @@ function toKoreanSectorAbbr(sector: string): string {
   if (!s) return '기타'
   const map: Record<string, string> = {
     '반도체': '반도체',
+    '로봇 AI': '로봇 AI',
     '로봇·AI수혜': '로봇·AI',
-    '기타수급': '기타수급',
+    'AI 생태계': 'AI 생태계',
+    'AI 인프라': 'AI 인프라',
+    '전력 인프라': '전력 인프라',
+    '우주항공·태양광': '우주항공·태양광',
+    '2차전지': '2차전지',
     '2차전지·ESS': '2차전지',
     '자동차·로봇': '자동차·로봇',
     'MLCC·반도체기판': 'MLCC·기판',
     '금융': '금융',
     '바이오': '바이오',
+    '방산': '방산',
+    '조선': '조선',
+    '화학': '화학',
+    '철강': '철강',
+    '소비재': '소비재',
+    '기타': '기타',
   }
-  return map[s] ?? abbreviateKoreanName(s, 6)
+  return map[s] ?? s
 }
 
 function stockIcon(item: WatchItem): string {
@@ -660,6 +671,31 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
 
                   {showName && (
                     <>
+                      {/* Logo above name — size scales with tile */}
+                      {icon.startsWith('/') || icon.startsWith('http') ? (
+                        <img
+                          src={icon}
+                          alt=""
+                          style={{
+                            width:  showXL ? 40 : showFull ? 26 : 18,
+                            height: showXL ? 40 : showFull ? 26 : 18,
+                            objectFit: 'contain',
+                            borderRadius: showXL ? 10 : 4,
+                            flexShrink: 0,
+                            marginBottom: showXL ? 7 : showFull ? 4 : 2,
+                          }}
+                        />
+                      ) : (
+                        <span style={{
+                          fontSize: showXL ? '1.6rem' : showFull ? '1.1rem' : '0.85rem',
+                          lineHeight: 1,
+                          marginBottom: showXL ? 7 : showFull ? 4 : 2,
+                        }}>
+                          {icon}
+                        </span>
+                      )}
+
+                      {/* Name */}
                       <span style={{
                         fontSize: showXL ? '1.14rem' : showFull ? '0.96rem' : '0.7rem',
                         fontWeight: 800,
@@ -671,40 +707,18 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',
                         userSelect: 'none',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 4,
                       }}>
-                        {icon.startsWith('/') || icon.startsWith('http') ? (
-                          <img
-                            src={icon}
-                            alt=""
-                            style={{
-                              width: showFull ? 18 : 14,
-                              height: showFull ? 18 : 14,
-                              objectFit: 'contain',
-                              borderRadius: 3,
-                              flexShrink: 0,
-                            }}
-                          />
-                        ) : (
-                          <span style={{ fontSize: showFull ? '0.85rem' : '0.72rem', lineHeight: 1 }}>
-                            {icon}
-                          </span>
-                        )}
                         {item.name}
                       </span>
 
                       {showFull && (
-                        <>
-                          <span style={{
-                            fontSize: showXL ? '0.96rem' : '0.82rem', fontWeight: 700, marginTop: 3,
-                            userSelect: 'none',
-                            color: 'rgba(255,255,255,0.92)',
-                          }}>
-                            {item.price > 0 ? formatPercent(item.changeRate) : '—'}
-                          </span>
-                        </>
+                        <span style={{
+                          fontSize: showXL ? '0.96rem' : '0.82rem', fontWeight: 700, marginTop: 3,
+                          userSelect: 'none',
+                          color: 'rgba(255,255,255,0.92)',
+                        }}>
+                          {item.price > 0 ? formatPercent(item.changeRate) : '—'}
+                        </span>
                       )}
                     </>
                   )}
