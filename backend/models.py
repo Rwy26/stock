@@ -418,6 +418,25 @@ class VkospiHistory(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class ExcludedStock(Base):
+    """거래 제외 종목 경량 인덱스 — exclusion_engine 전용.
+
+    원칙: 제외 종목은 종목별 데이터를 DB에 저장하지 않고 이 인덱스만 유지한다(용량 절감).
+    tags: 쉼표 구분 제외 사유 태그 (exclusion_engine.TAG_LABELS 키).
+    source: quote(실시간 탐지) | static(이름/코드 규칙) | sweep(전수 스윕) | manual(수동).
+    """
+
+    __tablename__ = "excluded_stocks"
+
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    tags: Mapped[str] = mapped_column(String(300))
+    detail: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    source: Mapped[str] = mapped_column(String(30), default="sweep")
+    first_seen: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    last_checked: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class NewsArticle(Base):
     """섹터/종목 뉴스 수집 저장소 (네이버 모바일 증권 뉴스 API).
 

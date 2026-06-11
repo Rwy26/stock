@@ -96,6 +96,15 @@ class Settings:
     google_oauth_client_id: str = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
     admin_google_email: str = os.getenv("ADMIN_GOOGLE_EMAIL", "").strip().lower()
 
+    # 거래 제외 종목 엔진 (exclusion_engine) — 끄려면 EXCLUSION_ENABLED=0
+    exclusion_enabled: bool = os.getenv("EXCLUSION_ENABLED", "1").strip() in {"1", "true", "True", "YES", "yes"}
+    # 유동성 필터: 최근 N일 평균 거래대금(원) 미달 시 LOW_LIQUIDITY (기본 10억원)
+    exclusion_min_avg_trading_value: float = float(os.getenv("EXCLUSION_MIN_AVG_TRADING_VALUE", "1000000000"))
+    # 동전주 기준 종가(원) — 미만이면 PENNY (기본 1,000원)
+    exclusion_min_price: float = float(os.getenv("EXCLUSION_MIN_PRICE", "1000"))
+    # 유동성 판정 기간(거래일)
+    exclusion_liquidity_days: int = int(os.getenv("EXCLUSION_LIQUIDITY_DAYS", "20"))
+
     # DART OpenAPI (공시 / 재무제표 실적)
     # 발급: https://opendart.fss.or.kr/uss/umt/EgovMberInfoEdit.do
     dart_api_key: str = os.getenv("DART_API_KEY", "").strip()

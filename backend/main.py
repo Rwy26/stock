@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import desc, func, select
@@ -41,6 +41,7 @@ except Exception:  # pragma: no cover
     _scoring_engine = None
 
 import auth
+import exclusion_engine
 from pipeline_paths import get_pipeline_paths
 from settings import settings
 
@@ -104,6 +105,27 @@ def get_current_user_for_refresh(credentials=Depends(bearer_scheme)):
         db.close()
 
 app = FastAPI(title="MOON STOCK")
+
+
+@app.exception_handler(exclusion_engine.ExcludedStockError)
+async def _excluded_stock_handler(request: Request, exc: exclusion_engine.ExcludedStockError):
+    """제외 종목 문의 → '의견 거부' 메시지를 정상 응답(200)으로 발행.
+
+    요청 자체를 에러로 거부하지 않는다 — 사유 태그와 원인 설명이 담긴
+    표준 메시지(excluded/opinion/reasons/message)를 내보내는 것이 정책이다.
+    """
+    return JSONResponse(status_code=200, content=exc.payload)
+
+
+def _exclusion_gate(code: str, name: str = "") -> None:
+    """세션이 없는 엔드포인트용 제외 게이트. 제외 종목이면 ExcludedStockError."""
+    if apollo_db is None:
+        return
+    _db = apollo_db.get_session_factory()()
+    try:
+        exclusion_engine.gate(_db, code, name)
+    finally:
+        _db.close()
 
 
 _kis_refresh_stop = threading.Event()
@@ -229,6 +251,10 @@ def _generate_recommendations_for_date(
 
     if not rows:
         return 0, str(score_date)
+
+    # 거래 제외 종목은 추천 테이블에 저장하지 않는다 (전역 제외 원칙)
+    excluded_codes = set(exclusion_engine.get_exclusions(db))
+    rows = [(c, s) for c, s in rows if str(c) not in excluded_codes]
 
     upserted = 0
     for rank, (stock_code, score_total) in enumerate(rows, start=1):
@@ -819,6 +845,16 @@ def _place_market_order_and_log(
     Returns (ok, message).
     """
 
+    # 거래 제외 종목 매수 차단 (매도는 기보유 청산을 위해 허용)
+    if side == "buy":
+        try:
+            entry = exclusion_engine.get_entry(db, stock_code)
+        except Exception:
+            entry = None
+        if entry is not None:
+            labels = ", ".join(exclusion_engine.TAG_LABELS.get(t, t) for t in entry["tags"])
+            return False, f"매수 차단: 거래 제외 종목 (사유: {labels})"
+
     app_key = (str(getattr(profile, "app_key", "") or "").strip())
     app_secret = (str(getattr(profile, "app_secret", "") or "").strip())
     is_paper = _effective_kis_is_paper(profile)
@@ -988,9 +1024,11 @@ def _pick_top_recommendation_code(db: Session, *, exclude_codes: set[str]) -> st
         .order_by(models.Recommendation.rank.is_(None), models.Recommendation.rank, desc(models.Recommendation.score_total))
         .limit(50)
     ).all()
+    # 거래 제외 종목은 자동매수 후보에서 차단 (과거 추천 잔존분 방어)
+    excluded_codes = set(exclusion_engine.get_exclusions(db))
     for (code,) in rows:
         c = str(code)
-        if c and c not in exclude_codes:
+        if c and c not in exclude_codes and c not in excluded_codes:
             return c
     return None
 
@@ -1593,6 +1631,10 @@ def get_recommendations(_current_user=Depends(get_current_user)):
                 .limit(30)
             ).all()
 
+        # 거래 제외 종목은 응답에서 제거 (제외 지정 이전의 잔존 추천 방어)
+        excluded_codes = set(exclusion_engine.get_exclusions(db))
+        rows = [r for r in rows if str(r[2]) not in excluded_codes]
+
         items: list[dict] = []
         kis_error: str | None = None
         for rank, score_total, stock_code, name in rows:
@@ -1651,6 +1693,8 @@ def get_king_recommendations(_current_user=Depends(get_current_user)):
             .order_by(desc(models.IndicatorScore.score_total))
             .limit(10)
         ).all()
+        excluded_codes = set(exclusion_engine.get_exclusions(db))
+        rows = [r for r in rows if str(r.stock_code) not in excluded_codes]
         top_stocks = [
             {
                 "code": r.stock_code,
@@ -1905,6 +1949,7 @@ def apply_watchlist_theme_update(payload: dict = Body(default={}), current_user=
     added_watchlist = 0
     updated_interest = 0
     unresolved: list[str] = []
+    excluded_skipped: list[str] = []
     managed_codes: set[str] = set()
 
     with apollo_db.session_scope() as session:
@@ -1925,6 +1970,15 @@ def apply_watchlist_theme_update(payload: dict = Body(default={}), current_user=
                 if not code:
                     unresolved.append(str(raw_name))
                     continue
+
+                # 거래 제외 종목은 테마 자동 등록에서 건너뛴다 (Stock 행 생성 방지)
+                if (
+                    exclusion_engine.get_entry(session, code) is not None
+                    or exclusion_engine.evaluate_static(code, name)
+                ):
+                    excluded_skipped.append(f"{name}({code})")
+                    continue
+
                 managed_codes.add(code)
 
                 stock = session.execute(select(models.Stock).where(models.Stock.code == code)).scalar_one_or_none()
@@ -2004,6 +2058,7 @@ def apply_watchlist_theme_update(payload: dict = Body(default={}), current_user=
         "removedWatchlist": removed_watchlist,
         "managedCount": len(managed_codes),
         "unresolved": unresolved,
+        "excludedSkipped": excluded_skipped,
     }
 
 
@@ -2021,6 +2076,9 @@ def add_watchlist_item(payload: dict = Body(...), current_user=Depends(get_curre
         code = str(resolved.get("code") or "").strip()
         if not code:
             raise HTTPException(status_code=400, detail="종목 식별 실패")
+
+        # 거래 제외 종목은 워치리스트 등록 거부 (Stock 행 생성 전에 차단 — DB 저장 방지)
+        exclusion_engine.gate(session, code, str(resolved.get("name") or ""))
 
         stock = session.execute(select(models.Stock).where(models.Stock.code == code)).scalar_one_or_none()
         kis_name = str(resolved.get("name") or "").strip()
@@ -2398,6 +2456,99 @@ def admin_scoring_status(_admin=Depends(require_admin)):
     }
 
 
+@app.get("/api/admin/exclusions")
+def admin_list_exclusions(_admin=Depends(require_admin)):
+    """거래 제외 종목 인덱스 전체 조회."""
+    if apollo_db is None:
+        raise HTTPException(status_code=500, detail="DB 모듈 없음")
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        entries = exclusion_engine.get_exclusions(db, force=True)
+        items = [
+            {
+                "code": code,
+                "name": e["name"] or None,
+                "tags": e["tags"],
+                "reasons": [exclusion_engine.TAG_LABELS.get(t, t) for t in e["tags"]],
+                "detail": e.get("detail"),
+            }
+            for code, e in sorted(entries.items())
+        ]
+        return {"count": len(items), "items": items}
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/exclusions/refresh")
+def admin_refresh_exclusions(payload: dict = Body(default={}), _admin=Depends(require_admin)):
+    """제외 인덱스 전수 스윕 — 정적 규칙(스팩/우선주/리츠/ETF) + 유동성 필터.
+
+    Body: {"kis": true} 면 종목당 KIS 현재가 1콜로 시장조치(거래정지/관리종목 등)도 갱신.
+    """
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB 모듈 없음")
+
+    use_kis = bool(payload.get("kis", False))
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        profile = None
+        if use_kis:
+            profile = db.execute(
+                select(models.KisProfile).where(models.KisProfile.user_id == int(_admin.id))
+            ).scalar_one_or_none()
+            if not (profile and getattr(profile, "app_key", None) and getattr(profile, "app_secret", None)):
+                raise HTTPException(status_code=400, detail="KIS 연결 필요 (kis=true 스윕)")
+
+        result = exclusion_engine.run_sweep(db, kis_profile=profile, do_kis_status=use_kis)
+        return {"ok": True, **result}
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/exclusions/{code}")
+def admin_add_exclusion(code: str, payload: dict = Body(default={}), _admin=Depends(require_admin)):
+    """수동 제외 등록 (MANUAL 태그). Body: {"reason": "메모"}"""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB 모듈 없음")
+    code = (code or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="code is required")
+
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        stock = db.execute(select(models.Stock).where(models.Stock.code == code)).scalar_one_or_none()
+        name = str(getattr(stock, "name", "") or "")
+        tags = exclusion_engine.merge_tags(
+            db, code, name, ["MANUAL"],
+            refresh_categories=set(), source="manual",
+            detail=str(payload.get("reason") or "") or None,
+        )
+        db.commit()
+        return {"ok": True, "code": code, "tags": tags}
+    finally:
+        db.close()
+
+
+@app.delete("/api/admin/exclusions/{code}")
+def admin_remove_exclusion(code: str, _admin=Depends(require_admin)):
+    """제외 인덱스에서 종목 제거 (전체 태그 해제)."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB 모듈 없음")
+    code = (code or "").strip()
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        row = db.execute(
+            select(models.ExcludedStock).where(models.ExcludedStock.code == code)
+        ).scalar_one_or_none()
+        if row is not None:
+            db.delete(row)
+            db.commit()
+            exclusion_engine.invalidate_cache()
+        return {"ok": True, "removed": row is not None}
+    finally:
+        db.close()
+
+
 @app.post("/api/admin/scoring/run")
 def admin_scoring_run(
     payload: dict = Body(default={}),
@@ -2430,6 +2581,9 @@ def admin_scoring_run(
         if not codes:
             rows = db.execute(select(models.Stock.code)).scalars().all()
             codes = list(rows)
+
+        # 거래 제외 종목은 스코어링/수급 수집/DB 저장 대상에서 제외 (전역 제외 원칙)
+        codes = exclusion_engine.filter_codes(db, codes)
         if not codes:
             return {"ok": True, "upserted": 0, "msg": "스코어링 대상 종목 없음"}
 
@@ -3058,6 +3212,10 @@ def search_stocks(
         candidate_limit = 120 if screen_norm == "big_buy" else 30
         rows = db.execute(stmt.limit(candidate_limit)).all()
 
+        # 거래 제외 종목은 검색/스크린 결과에서 제거 (KIS 시세 호출 전에 차단)
+        excluded_codes = set(exclusion_engine.get_exclusions(db))
+        rows = [r for r in rows if str(r[0]) not in excluded_codes]
+
         flow_map: dict[str, object] = {}
         if screen_norm == "big_buy" and rows:
             codes = [str(code) for code, _name, _score_total, _score_flow in rows]
@@ -3198,8 +3356,18 @@ def stock_detail(code: str, current_user=Depends(get_current_user)):
         except Exception as exc:
             raise HTTPException(status_code=503, detail=f"KIS 시세 조회 실패: {exc}") from exc
 
+        # 실시간 시장조치 탐지: 시세 응답에 거래정지/관리종목 등 플래그가 있으면
+        # 인덱스에 등재. 조회 작동은 그대로 — 의견 거부 메시지를 응답에 함께 발행한다.
+        try:
+            live_tags = exclusion_engine.record_quote(db, quote)
+            db.commit()
+        except Exception:
+            db.rollback()
+            entry = exclusion_engine.get_entry(db, stock_code)
+            live_tags = entry["tags"] if entry else []
+
         score_total = int(getattr(score_row, "score_total", 0) or 0)
-        return {
+        response = {
             "name": str(stock.name),
             "code": stock_code,
             "price": float(quote.price),
@@ -3213,6 +3381,16 @@ def stock_detail(code: str, current_user=Depends(get_current_user)):
                 "tech": int(getattr(score_row, "score_tech", 0) or 0),
             },
         }
+        if (
+            live_tags
+            and settings.exclusion_enabled
+            and stock_code not in exclusion_engine.sector_etf_codes()
+        ):
+            entry = exclusion_engine.get_entry(db, stock_code)
+            response["exclusion"] = exclusion_engine.rejection_payload(
+                stock_code, str(stock.name), live_tags, (entry or {}).get("detail")
+            )
+        return response
     finally:
         db.close()
 
@@ -4606,6 +4784,11 @@ async def ai_chart_analysis(
     - symbol만 지정하면 Yahoo Finance에서 데이터 자동 수집
     - ohlcv_records를 제공하면 해당 데이터로 분석
     """
+    # 국내 종목(6자리 코드)이면 거래 제외 게이트 적용 (해외 심볼은 대상 아님)
+    sym = (req.symbol or "").strip().upper().removesuffix(".KS").removesuffix(".KQ")
+    if re.fullmatch(r"\d{6}", sym):
+        _exclusion_gate(sym)
+
     if _chart_analysis is None:
         raise HTTPException(status_code=503, detail="chart_analysis module not available")
 
@@ -5108,6 +5291,7 @@ def admin_mtf_analysis(code: str, user=Depends(require_admin)):
 
     KIS 차트 API 사용 (호출 ~16건/종목). 결정론 계산 — LLM 없음.
     """
+    _exclusion_gate(code.strip())
     try:
         import mtf_analysis
         return mtf_analysis.analyze_mtf(code.strip())
@@ -5122,6 +5306,7 @@ def admin_stock_compass(code: str, ai: int = 1, user=Depends(require_admin)):
     1~7(시장) + 8(MTF) + 9~11(목표/손절/확률) + 12(LLM 최종 형식).
     KIS ~30콜 + LLM 1콜, 약 30초 소요.
     """
+    _exclusion_gate(code.strip())
     try:
         import stock_compass
         return stock_compass.analyze_stock(code.strip(), with_ai=bool(ai))
@@ -5132,6 +5317,7 @@ def admin_stock_compass(code: str, ai: int = 1, user=Depends(require_admin)):
 @app.get("/api/admin/stock-targets")
 def admin_stock_targets(code: str, user=Depends(require_admin)):
     """목표가 5종·손절가 3종·빈도 기반 확률 (시장 나침반 9~11단계)."""
+    _exclusion_gate(code.strip())
     try:
         import target_engine
         return target_engine.analyze_targets(code.strip())

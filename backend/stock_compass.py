@@ -199,6 +199,15 @@ def analyze_stock(code: str, with_ai: bool = True) -> dict:
 
     code = code.strip()
 
+    # 거래 제외 종목 — 분석/캐시 저장 자체를 거부 (API·스크립트 공통 방어선)
+    import db as _db
+    import exclusion_engine
+    _s = _db.get_session_factory()()
+    try:
+        exclusion_engine.gate(_s, code)
+    finally:
+        _s.close()
+
     # 1~7단계 (캐시 활용 — 시장 차원은 종목과 무관하게 재사용)
     market = market_compass.compute_market_compass(force=False, with_ai=False)
     market_ctx = {

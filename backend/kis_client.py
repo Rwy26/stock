@@ -32,6 +32,14 @@ class KisQuote:
     trading_value: float = 0.0
     trade_strength: float = 0.0
     shares: int = 0  # 상장주식수 (lstn_stcn)
+    # 시장조치 상태 (exclusion_engine 소비) — FHKST01010100 output 필드
+    status_code: str = ""            # iscd_stat_cls_code 종목상태구분코드 (원본값 보관)
+    warn_code: str = ""              # mrkt_warn_cls_code 00없음/01투자주의/02투자경고/03투자위험
+    is_admin_issue: bool = False     # mang_issu_cls_code == Y 관리종목
+    is_trade_halt: bool = False      # temp_stop_yn == Y 거래정지(임시정지)
+    is_liquidation: bool = False     # sltr_yn == Y 정리매매
+    is_invest_caution: bool = False  # invt_caful_yn == Y 투자유의
+    is_short_overheat: bool = False  # short_over_yn == Y 단기과열
 
 
 @dataclass
@@ -203,6 +211,20 @@ def inquire_price(
 
     as_of = output.get("stck_cntg_hour") or datetime.now().isoformat()
 
+    def _yn(*keys: str) -> bool:
+        for k in keys:
+            v = str(output.get(k) or output.get(k.upper()) or "").strip().upper()
+            if v == "Y":
+                return True
+        return False
+
+    def _s(*keys: str) -> str:
+        for k in keys:
+            v = str(output.get(k) or output.get(k.upper()) or "").strip()
+            if v:
+                return v
+        return ""
+
     return KisQuote(
         code=code,
         name=name,
@@ -215,6 +237,13 @@ def inquire_price(
         trading_value=trading_value,
         trade_strength=trade_strength,
         shares=shares,
+        status_code=_s("iscd_stat_cls_code"),
+        warn_code=_s("mrkt_warn_cls_code"),
+        is_admin_issue=_yn("mang_issu_cls_code"),
+        is_trade_halt=_yn("temp_stop_yn"),
+        is_liquidation=_yn("sltr_yn"),
+        is_invest_caution=_yn("invt_caful_yn"),
+        is_short_overheat=_yn("short_over_yn"),
     )
 
 

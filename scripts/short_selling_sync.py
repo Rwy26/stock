@@ -53,6 +53,13 @@ def main() -> int:
     s = apollo_db.get_session_factory()()
     try:
         codes = _all_codes(s)
+        # 거래 제외 종목은 공매도 데이터를 저장하지 않는다 (인덱스만 유지 원칙)
+        try:
+            import exclusion_engine  # noqa: E402
+
+            codes = exclusion_engine.filter_codes(s, codes)
+        except Exception:
+            pass
         prof = _admin_profile(s)
         if not codes:
             print("stocks 테이블 비어 있음 — 종료")

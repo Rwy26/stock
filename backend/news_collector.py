@@ -95,6 +95,19 @@ def collect(pages: int = 1, force: bool = False) -> dict:
 
     models.Base.metadata.create_all(db.get_engine(), tables=[models.NewsArticle.__table__])
 
+    # 거래 제외 종목은 뉴스 수집/저장 대상에서 제외 (전역 제외 원칙)
+    try:
+        import exclusion_engine
+
+        _s = db.get_session_factory()()
+        try:
+            _excluded = set(exclusion_engine.get_exclusions(_s))
+        finally:
+            _s.close()
+        code_sector = {c: s for c, s in code_sector.items() if c not in _excluded}
+    except Exception:
+        pass
+
     fetched: list[dict] = []
     for code, sector in code_sector.items():
         for row in fetch_stock_news(code, pages=pages):
