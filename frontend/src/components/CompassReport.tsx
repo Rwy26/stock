@@ -188,40 +188,53 @@ function PriceChart({ p }: { p: Dict }) {
   // 상승의 시작 바닥(기점)과 이후 되돌림 바닥을 연결한 지지선 — 사용자 매매 기준.
   // 예: SK하이닉스 3/31 바닥 → 4/13 바닥 연결선. 피보나치의 기준이 되는 선.
   // 회귀선(평균 관통선)으로는 표현 불가 — 앵커드 스윙 지지선으로 구현.
+  // 기점 탐지: 신고가 피크에서 역산 — "피크 직전 lookback 구간의 최저 바닥"이 기점.
+  //   중기(맥선): lookback 60봉 → 3/31 같은 다리 시작 바닥 (경계에 걸리면 과거로 확장)
+  //   단기:       lookback 25봉 → 4/30 같은 마지막 가속 구간의 바닥
+  // 기점 이후 되돌림 바닥(스윙 저점) 중 위반 없이 가장 많은 바닥을 받치는 연결선 선택.
+  const peakIdxAll = closes.indexOf(Math.max(...closes))
+  // 스윙 저점 전체 (종가 기준, n=2)
+  const swingLowsAll: number[] = []
+  for (let i = 2; i < closes.length - 2; i++) {
+    const win = closes.slice(i - 2, i + 3)
+    if (closes[i] === Math.min(...win)) swingLowsAll.push(i)
+  }
+  const lineThrough = (ia: number, ib: number) => {
+    const slope = (closes[ib] - closes[ia]) / (ib - ia)
+    if (slope <= 0) return null // 상승 다리의 받침선은 우상향
+    return { at: (x: number) => closes[ia] + slope * (x - ia) }
+  }
+
+  // 중기(맥선): 기점 = 피크 전 60봉 구간의 최저 바닥 (경계에 걸리면 과거로 확장),
+  //             둘째 앵커 = 기점 이후 "첫 되돌림 바닥" (예: 3/31 → 4/13)
   const backboneLine = (() => {
-    const len = closes.length
-    // 1) 상승 다리 기점: 전체 구간 최저점 (이후 충분히 상승했어야 다리로 인정)
-    let o = 0
-    for (let i = 0; i < len; i++) if (closes[i] < closes[o]) o = i
-    if (len - 1 - o < 8) return null
-    if (closes[len - 1] < closes[o] * 1.05) return null
-    // 2) 기점 이후 되돌림 바닥들 (스윙 저점, n=3)
-    const lows: number[] = []
-    for (let i = Math.max(o + 3, 3); i < len - 3; i++) {
-      const win = closes.slice(i - 3, i + 4)
-      if (closes[i] === Math.min(...win)) lows.push(i)
+    if (peakIdxAll < 10) return null
+    let ws = Math.max(0, peakIdxAll - 60)
+    let o = ws
+    for (let i = ws; i <= peakIdxAll; i++) if (closes[i] < closes[o]) o = i
+    while (o === ws && ws > 0) {
+      ws = Math.max(0, ws - 30)
+      for (let i = ws; i <= peakIdxAll; i++) if (closes[i] < closes[o]) o = i
     }
-    if (!lows.length) return null
-    // 3) 기점과 연결했을 때 위반(선 아래 2% 초과 이탈) 없이 접촉 바닥이 많은 선
-    let best: { at: (x: number) => number; score: number } | null = null
-    for (const ib of lows) {
-      if (ib - o < 5) continue
-      const slope = (closes[ib] - closes[o]) / (ib - o)
-      if (slope <= 0) continue // 맥선은 우상향
-      const at = (x: number) => closes[o] + slope * (x - o)
-      let ok = true
-      for (let i = o; i < len; i++) {
-        if (closes[i] < at(i) * 0.98) { ok = false; break }
+    if (closes[peakIdxAll] < closes[o] * 1.08) return null
+    const second = swingLowsAll.find(i => i >= o + 5 && i <= peakIdxAll)
+    if (second == null) return null
+    return lineThrough(o, second)
+  })()
+
+  // 단기: 피크 직전 "마지막 두 스윙 저점" 연결 (예: 5/4 → 5/20)
+  const shortLegLine = (() => {
+    const before = swingLowsAll.filter(i => i <= peakIdxAll)
+    for (let k = before.length - 1; k >= 1; k--) {
+      const ib = before[k]
+      // 직전 저점과 최소 3봉 간격
+      for (let j = k - 1; j >= 0; j--) {
+        if (ib - before[j] >= 3) {
+          return lineThrough(before[j], ib)
+        }
       }
-      if (!ok) continue
-      let touches = 1
-      for (const k of lows) {
-        if (Math.abs(closes[k] - at(k)) / at(k) < 0.015) touches++
-      }
-      const score = touches * 100 + (ib - o)
-      if (!best || score > best.score) best = { at, score }
     }
-    return best
+    return null
   })()
 
   // ── 추세선 3종 ──────────────────────────────────────────────────────────
@@ -239,18 +252,25 @@ function PriceChart({ p }: { p: Dict }) {
     return { x0, n, at: (gi: number) => icept + slope * (gi - x0), pctPerBar: slope / (avg || 1) }
   }
 
+  // 신고가 판정: 최근 봉이 52주 최고가(백엔드 high52w, 없으면 보이는 구간 최고)를 갱신
+  const high52w = (p.series?.high52w as number | undefined) ?? Math.max(...closes)
+  const isNewHigh = Math.max(...closes.slice(-15)) >= high52w * 0.999
+
   const curIdx = closes.length - 1
   const trendLines = [
     { label: '장기', win: closes.length, width: 2.4, dash: '', op: 0.6 },
-    { label: '중기', win: 60, width: 1.8, dash: '7,4', op: 0.8 },
-    { label: '단기', win: 20, width: 1.5, dash: '3,3', op: 0.95 },
+    { label: '중기', win: 17, width: 1.8, dash: '7,4', op: 0.8 },
+    { label: '단기', win: 9, width: 1.5, dash: '3,3', op: 0.95 },
   ].map(def => {
-    // 중기 = 맥선 우선 (현재 상승 다리의 바닥 연결선), 없으면 회귀 폴백
-    const isBackbone = def.label === '중기' && backboneLine != null
+    // 중기 = 맥선 / 단기 = 가속 구간 받침선 — 앵커드 라인 우선, 없으면 회귀 폴백
+    const anchored =
+      def.label === '중기' ? backboneLine :
+      def.label === '단기' ? shortLegLine : null
+    const isBackbone = def.label === '중기' && anchored != null
     let at: (gi: number) => number
     let pctPerBar: number
-    if (isBackbone) {
-      at = backboneLine!.at
+    if (anchored) {
+      at = anchored.at
       pctPerBar = (at(1) - at(0)) / (cur || 1)
     } else {
       const r = regress(def.win)
@@ -290,7 +310,8 @@ function PriceChart({ p }: { p: Dict }) {
     let suffix = ''
     if (broken) {
       baseColor = '#f87171'
-      suffix = ' (깨짐)'
+      // 단기·중기는 '이탈', 장기는 '깨짐'으로 표현
+      suffix = def.label === '장기' ? ' (깨짐)' : ' (이탈)'
     }
 
     // 위험 구간 세그먼트 (접근 시 현재가 주변)
@@ -407,16 +428,41 @@ function PriceChart({ p }: { p: Dict }) {
   const FS = 14
 
   // 배치 우선순위: 현재가 → 평균 목표 → 손절 → 목표 사다리 → 회귀선 → 존
-  // 현재가: 빈 공간을 찾아 멀리 가도 됨 — 점에서 라벨까지 연결선을 길게 그린다.
-  const curPos = addLabel(`현재가 ${fmt(cur)}원`, FS, curColor, [
-    { x: curX + 34, y: curY + 6, anchor: 'start' },
+  // 현재가: 평균 목표와 같은 방식 — 오른쪽 끝 정렬 + 오늘 등락률 병기.
+  // 점에서 라벨까지는 연결선을 길게 이어준다.
+  const dayChg = closes.length >= 2 && closes[closes.length - 2] > 0
+    ? (cur / closes[closes.length - 2] - 1) * 100
+    : null
+  const curText = `현재가 ${fmt(cur)}${dayChg != null ? ` (${dayChg >= 0 ? '+' : ''}${dayChg.toFixed(1)}%)` : ''}`
+  const curPos = addLabel(curText, FS, curColor, [
+    { x: W - PX, y: curY + 5, anchor: 'end' },
+    { x: W - PX, y: curY - 14, anchor: 'end' },
+    { x: W - PX, y: curY + 24, anchor: 'end' },
     { x: curX + 90, y: curY + 6, anchor: 'start' },
     { x: curX + 34, y: curY - 18, anchor: 'start' },
-    { x: curX + 90, y: curY - 18, anchor: 'start' },
     { x: curX + 34, y: curY + 28, anchor: 'start' },
-    { x: curX + 90, y: curY + 28, anchor: 'start' },
-    { x: curX - 34, y: curY - 18, anchor: 'end' },
   ], { weight: 800 })
+  const curLabelLeftX = curPos.anchor === 'end'
+    ? curPos.x - textW(curText, FS) - 6
+    : curPos.x - 5
+
+  // 현재가 방향 신호 점멸: 추가 하락 우위 = 빨강 / 상승 우위 = 파랑 밑줄
+  // 근거 = 빈도 확률(20일 상승지속) ± 구조 보정(추세 이탈 -8, 단기 방향 ±4)
+  let blink: 'up' | 'down' | null = null
+  {
+    const upRaw = Number((p.probability ?? {}).continueUpPct)
+    if (Number.isFinite(upRaw)) {
+      const adj = upRaw + (rising ? 4 : -4) + (anyBroken ? -8 : 0)
+      if (adj >= 58) blink = 'up'
+      else if (adj <= 42) blink = 'down'
+    }
+  }
+  // 점멸 위치: 하락 우위 = 텍스트 밑 / 상승 우위 = 텍스트 위 / 횡보 = 없음
+  const curUnderline = {
+    x1: curPos.anchor === 'end' ? curPos.x - textW(curText, FS) : curPos.x,
+    x2: curPos.anchor === 'end' ? curPos.x : curPos.x + textW(curText, FS),
+    y: blink === 'up' ? curPos.y - FS - 4 : curPos.y + 4,
+  }
 
   if (target) {
     const y = toY(target)
@@ -454,55 +500,119 @@ function PriceChart({ p }: { p: Dict }) {
     ], { opacity: 0.9 })
   }
 
-  // 회전 라벨 헬퍼 — 선과 같은 기울기로 선 위에, 빈 공간을 찾아 배치
+  // 선분을 장애물 박스 열로 샘플링 (라벨이 차트의 중요 선을 피해 앉도록)
+  const segBoxes = (
+    s: { x1: number; y1: number; x2: number; y2: number } | null, pad = 5,
+  ): Box[] => {
+    if (!s) return []
+    const L = Math.hypot(s.x2 - s.x1, s.y2 - s.y1)
+    const n = Math.max(2, Math.round(L / 34))
+    const out: Box[] = []
+    for (let k = 0; k <= n; k++) {
+      const x = s.x1 + (s.x2 - s.x1) * (k / n)
+      const y = s.y1 + (s.y2 - s.y1) * (k / n)
+      out.push({ x1: x - pad, x2: x + pad, y1: y - pad, y2: y + pad })
+    }
+    return out
+  }
+  const hitAny = (b: Box, obst: Box[]) =>
+    obst.some(o => b.x1 < o.x2 && b.x2 > o.x1 && b.y1 < o.y2 && b.y2 > o.y1)
+
+  // 회전 라벨 헬퍼 — 선과 같은 기울기, 다른 텍스트·중요 선을 모두 피해 배치.
+  // 1차 방향(side)의 후보 위치들 → 실패 시 반대편까지 시도.
   const placeOnLine = (
     seg: { x1: number; y1: number; x2: number; y2: number } | null,
     text: string,
     tCands: number[] = [0.42, 0.3, 0.55, 0.18, 0.68],
     side: 'above' | 'below' = 'above',
+    obstacles: Box[] = [],
   ): { x: number; y: number; deg: number } | null => {
     if (!seg) return null
     const dx = seg.x2 - seg.x1
     const dy = seg.y2 - seg.y1
     const deg = Math.atan2(dy, dx) * 180 / Math.PI
     const len = Math.hypot(dx, dy) || 1
-    const sign = side === 'above' ? 1 : -1
-    const offX = (dy / len) * 13 * sign
-    const offY = (-dx / len) * 13 * sign
-    for (const t of tCands) {
-      const x = seg.x1 + dx * t + offX
-      const y = seg.y1 + dy * t + offY
-      const w = textW(text, FS)
-      const box = { x1: x - w / 2, x2: x + w / 2, y1: y - FS, y2: y + 4 }
-      if (box.x1 >= 2 && box.x2 <= W - 2 && box.y1 >= 2 && box.y2 <= H - 2 && !collide(box)) {
-        boxes.push(box)
-        return { x, y, deg }
+    const w = textW(text, FS)
+    // 회전된 텍스트의 실제 점유 영역 (축 정렬 근사)
+    const cos = Math.abs(dx / len), sin = Math.abs(dy / len)
+    const effW = (w * cos + FS * sin) / 2
+    const effH = (w * sin + FS * cos) / 2 + 3
+    const trySide = (sign: number): { x: number; y: number; deg: number } | null => {
+      const offX = (dy / len) * 14 * sign
+      const offY = (-dx / len) * 14 * sign
+      for (const t of tCands) {
+        const x = seg.x1 + dx * t + offX
+        const y = seg.y1 + dy * t + offY
+        const box = { x1: x - effW, x2: x + effW, y1: y - effH, y2: y + effH }
+        if (box.x1 >= 2 && box.x2 <= W - 2 && box.y1 >= 2 && box.y2 <= H - 2
+          && !collide(box) && !hitAny(box, obstacles)) {
+          boxes.push(box)
+          return { x, y, deg }
+        }
       }
+      return null
     }
-    return { x: seg.x1 + dx * 0.42 + offX, y: seg.y1 + dy * 0.42 + offY, deg }
+    const primary = side === 'above' ? 1 : -1
+    const placed = trySide(primary) ?? trySide(-primary)
+    if (placed) return placed
+    // 전부 충돌 — 1차 후보 강행하되 영역은 등록
+    const offX = (dy / len) * 14 * primary
+    const offY = (-dx / len) * 14 * primary
+    const x = seg.x1 + dx * tCands[0] + offX
+    const y = seg.y1 + dy * tCands[0] + offY
+    boxes.push({ x1: x - effW, x2: x + effW, y1: y - effH, y2: y + effH })
+    return { x, y, deg }
   }
 
-  // 추세선 라벨 3종 — 선과 같은 기울기로 회전 배치 (깨짐/돌파 표기)
-  // 중기는 선의 왼쪽 아래, 나머지는 선 위쪽
-  const lineTexts = trendLines.map(t => {
-    const text = t.isBackbone
-      ? `중기 추세선·맥선${t.suffix}`
-      : `${t.label} 추세선${t.suffix}`
-    const isMid = t.label === '중기'
+  // ── 회전 라벨용 장애물: 가격 곡선 + 목표/손절 수평선 + 추세선들 ──────────
+  const priceObst: Box[] = []
+  for (let i = 0; i < closes.length; i += 4) {
+    const x = toX(i), y = toY(closes[i])
+    priceObst.push({ x1: x - 6, x2: x + 6, y1: y - 6, y2: y + 6 })
+  }
+  const hLineObst: Box[] = []
+  if (target) {
+    const y = toY(target)
+    hLineObst.push({ x1: PX, x2: W - PX, y1: y - 4, y2: y + 4 })
+  }
+  for (const d of stopDefs) {
+    const y = toY(d.price as number)
+    hLineObst.push({ x1: PX, x2: W - PX, y1: y - 4, y2: y + 4 })
+  }
+  const tlObst = trendLines.map(t => segBoxes(t))
+  const fallObst = showFall ? segBoxes(fallSeg) : []
+
+  // 추세선 라벨 3종 — 선과 같은 기울기로 회전 배치 (이탈/깨짐 표기)
+  // 다른 텍스트 + 가격 곡선 + 목표/손절선 + "자기를 제외한" 추세선들을 모두 회피
+  const lineTexts = trendLines.map((t, idx) => {
+    const baseName = t.isBackbone
+      ? (isNewHigh ? '신고가 상승 추세선' : '중기 추세선·맥선')
+      : t.label === '장기'
+        ? '장기 추세 회귀선'
+        : `${t.label} 추세선`
+    const text = `${baseName}${t.suffix}`
+    // 중기·단기는 선 아래(상승 차트에서 선 위는 가격 곡선을 가림), 장기만 선 위
+    const below = t.label === '중기' || t.label === '단기'
+    const obstacles = [
+      ...priceObst, ...hLineObst, ...fallObst,
+      ...tlObst.filter((_, j) => j !== idx).flat(),
+    ]
     return {
       line: t,
       text,
       pos: placeOnLine(
         t, text,
-        isMid ? [0.12, 0.2, 0.3, 0.42] : [0.42, 0.3, 0.55, 0.18, 0.68],
-        isMid ? 'below' : 'above',
+        below ? [0.12, 0.2, 0.3, 0.42, 0.55] : [0.42, 0.3, 0.55, 0.18, 0.68, 0.8],
+        below ? 'below' : 'above',
+        obstacles,
       ),
     }
   })
 
-  // 하락 추세선 라벨 — 선의 왼쪽 위 (고점 부근)
+  // 하락 추세선 라벨 — 선의 왼쪽 위 (고점 부근), 다른 선들 회피
   const fallText = showFall
-    ? placeOnLine(fallSeg, '하락 추세선', [0.1, 0.18, 0.28, 0.4])
+    ? placeOnLine(fallSeg, '하락 추세선', [0.1, 0.18, 0.28, 0.4],
+        'above', [...priceObst, ...hLineObst, ...tlObst.flat()])
     : null
 
   // 존 라벨: 세력 매집(거래량 집중) / 지지·저항(FVG) — 왼쪽 정렬, 쉬운 말
@@ -632,10 +742,22 @@ function PriceChart({ p }: { p: Dict }) {
       {/* 현재가 점 → 라벨 연결선 (라벨이 멀리 가면 길게 이어짐) */}
       <line
         x1={curX + 8} y1={curY}
-        x2={curPos.anchor === 'start' ? curPos.x - 5 : curPos.x + 5}
+        x2={curLabelLeftX}
         y2={curPos.y - 6}
         stroke="rgba(241,245,249,0.45)" strokeWidth="1"
       />
+
+      {/* 현재가 방향 신호 — 하락 우위: 빨강 점멸 / 상승 우위: 파랑 점멸 */}
+      {blink && (
+        <line
+          x1={curUnderline.x1} y1={curUnderline.y}
+          x2={curUnderline.x2} y2={curUnderline.y}
+          stroke={blink === 'down' ? '#f87171' : '#60a5fa'} strokeWidth="2.2"
+          strokeLinecap="round"
+        >
+          <animate attributeName="opacity" values="1;0.12;1" dur="1.1s" repeatCount="indefinite" />
+        </line>
+      )}
 
       {/* 추세선 라벨 3종 — 각 선과 같은 색·기울기로 선 위에 */}
       {lineTexts.map(lt => lt.pos && (

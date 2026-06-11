@@ -393,6 +393,8 @@ def analyze_targets(code: str) -> dict:
         "series": {
             "dates": [b["date"] for b in bars[-120:]],
             "closes": [b["close"] for b in bars[-120:]],
+            # 52주(252거래일) 최고 종가 — '신고가 상승 추세선' 판정용
+            "high52w": max(b["close"] for b in bars[-252:]),
         },
         "targets": targets,
         "avgTarget": avg_target,
