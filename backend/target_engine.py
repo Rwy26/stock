@@ -13,10 +13,14 @@
   3. 구조 손절   : 주 스윙 저점 (이탈 시 상승 구조 무효)
 
 [11단계] 확률 — 최근 ~500거래일 표본의 "빈도 기반 추정" (만들어낸 수치 아님):
-  - 상승 지속 확률  : 현재와 같은 추세 상태였던 과거 시점의 20일 후 양(+)수익 비율
-  - 목표가 도달 확률 : 같은 상태에서 손절폭 이탈 전에 목표폭 도달한 비율 (선도달 검사)
-  - 손절 이탈 확률   : 같은 상태에서 목표 도달 전 손절폭 이탈 비율
-  - 표본 수를 함께 표기 — 표본 30건 미만이면 "통계적 신뢰 낮음" 명시
+  - 유사 국면 판정: 6차원(추세·모멘텀·변동성·거래량·가격위치·단기수익률) 특징을
+    z-정규화한 뒤 현재와 유클리드 거리가 가장 가까운 과거 시점 k-NN 표본
+    (표본 부족 시 기존 단일 차원 EMA20/60 추세 상태 방식으로 폴백)
+  - 상승 지속 확률  : 유사 국면 시점들의 20일 후 양(+)수익 비율
+  - 목표가 도달 확률 : 같은 국면에서 손절폭 이탈 전에 목표폭 도달한 비율 (선도달 검사)
+  - 손절 이탈 확률   : 같은 국면에서 목표 도달 전 손절폭 이탈 비율
+  - 표본 수·매칭 일자·차원별 현재값 vs 유사표본 평균을 함께 표기 —
+    표본 30건 미만이면 "통계적 신뢰 낮음" 명시
 
 데이터 정확성 원칙: 계산 불가 항목은 None + 사유. 추정치는 표본 수와 함께 제공.
 """
@@ -29,7 +33,7 @@ from typing import Optional
 
 import httpx
 
-from mtf_analysis import _swings, _ema, _volume_profile  # noqa: F401
+from mtf_analysis import _swings, _ema, _rsi, _volume_profile  # noqa: F401
 
 NAVER_H = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
@@ -183,6 +187,162 @@ def _first_passage_prob(bars: list[dict], up_pct: float, dn_pct: float,
         "hitStopPct": round(hit_s / total * 100, 1),
         "undecidedPct": round(undecided / total * 100, 1),
         "lowConfidence": total < 30,
+    }
+
+
+# ── 다차원 유사 국면 확률 엔진 ──────────────────────────────────────────────
+# 기존 _first_passage_prob 의 "유사 국면" 판정은 EMA20>60 불리언 1차원뿐이라
+# 상승장 표본 전체가 한 덩어리로 묶였다. 아래는 6개 차원의 특징 벡터를
+# z-정규화한 뒤 현재와 유클리드 거리가 가장 가까운 과거 시점(k-NN)만 표본으로
+# 쓰는 강화판 — 확률은 동일하게 실제 결과의 빈도이며 만들어낸 수치가 아니다.
+
+_REGIME_DIMS = [
+    ("추세", "EMA20/60 괴리율 %"),
+    ("모멘텀", "RSI(14)"),
+    ("변동성", "20일 수익률 표준편차 %"),
+    ("거래량", "5일/20일 평균 거래량비"),
+    ("가격위치", "60일 범위 내 백분위 %"),
+    ("단기수익률", "20일 수익률 %"),
+]
+
+
+def _regime_features(closes: list[float], vols: list[float], i: int) -> Optional[list[float]]:
+    """i 시점의 6차원 국면 특징 — i 이후 데이터는 사용하지 않음 (미래 참조 금지).
+
+    모든 시점이 동일한 윈도우 길이로 계산되어 시점 간 비교가 공정하다.
+    """
+    if i < 120 or closes[i] <= 0:
+        return None
+    c = closes[i]
+    seg = closes[i - 119: i + 1]                      # 120봉
+    e20, e60 = _ema(seg, 20), _ema(seg, 60)
+    rsi = _rsi(closes[i - 59: i + 1], 14)             # 60봉 윈도우로 통일
+    if not e20 or not e60 or e60 <= 0 or rsi is None:
+        return None
+    rets = [
+        closes[j] / closes[j - 1] - 1
+        for j in range(i - 19, i + 1)
+        if closes[j - 1] > 0
+    ]
+    if len(rets) < 15:
+        return None
+    m = sum(rets) / len(rets)
+    vol_sd = (sum((r - m) ** 2 for r in rets) / len(rets)) ** 0.5 * 100
+    v20 = sum(vols[i - 19: i + 1]) / 20
+    vol_ratio = (sum(vols[i - 4: i + 1]) / 5) / v20 if v20 > 0 else 1.0
+    w60 = closes[i - 59: i + 1]
+    hi, lo = max(w60), min(w60)
+    pos = (c - lo) / (hi - lo) * 100 if hi > lo else 50.0
+    ret20 = (c / closes[i - 20] - 1) * 100 if closes[i - 20] > 0 else 0.0
+    return [(e20 / e60 - 1) * 100, rsi, vol_sd, vol_ratio, pos, ret20]
+
+
+def _similar_regime_prob(bars: list[dict], up_pct: float, dn_pct: float,
+                         horizon: int = 60) -> dict:
+    """현재와 가장 유사한 과거 국면(k-NN)들의 실제 결과 빈도.
+
+    출력 키는 _first_passage_prob 와 호환(sample/continueUpPct/reachTargetPct/
+    hitStopPct/undecidedPct/lowConfidence/trendState) + 다차원 근거(dimensions,
+    matchedDates, totalCandidates, method)를 추가.
+    """
+    closes = [b["close"] for b in bars]
+    vols = [b["volume"] for b in bars]
+    n = len(closes)
+    if n < 200 or up_pct <= 0 or dn_pct <= 0:
+        return {"error": "표본 부족(200봉 미만) 또는 목표/손절폭 비정상"}
+
+    cur_f = _regime_features(closes, vols, n - 1)
+    if cur_f is None:
+        return {"error": "현재 국면 특징 계산 불가"}
+
+    # 후보: 20일 후 결과가 항상 실재하는 구간만 (말단 잘림 표본 배제)
+    cands = []
+    for i in range(120, n - 21):
+        f = _regime_features(closes, vols, i)
+        if f is not None:
+            cands.append((i, f))
+    if len(cands) < 60:
+        return {"error": f"유사 국면 후보 부족 ({len(cands)}건)"}
+
+    dims = len(cur_f)
+    means, stds = [], []
+    for d in range(dims):
+        vals = [f[d] for _, f in cands]
+        mu = sum(vals) / len(vals)
+        sd = (sum((v - mu) ** 2 for v in vals) / len(vals)) ** 0.5
+        means.append(mu)
+        stds.append(sd if sd > 1e-9 else 1.0)
+
+    def _z(f: list[float]) -> list[float]:
+        return [(f[d] - means[d]) / stds[d] for d in range(dims)]
+
+    zc = _z(cur_f)
+    scored = sorted(
+        ((sum((a - b) ** 2 for a, b in zip(_z(f), zc)) ** 0.5, i, f) for i, f in cands),
+        key=lambda t: t[0],
+    )
+
+    # 자기상관 완화: 채택 시점 간 최소 5봉 간격 (연속봉은 사실상 같은 국면)
+    k_target = min(60, max(30, round(len(cands) * 0.15)))
+    picked: list[tuple[float, int, list[float]]] = []
+    for dist, i, f in scored:
+        if all(abs(i - pi) >= 5 for _, pi, _ in picked):
+            picked.append((dist, i, f))
+            if len(picked) >= k_target:
+                break
+    if not picked:
+        return {"error": "유사 국면 선택 실패"}
+
+    hit_t = hit_s = undecided = cont_up = 0
+    for _, i, _f in picked:
+        if closes[i + 20] > closes[i]:
+            cont_up += 1
+        target = closes[i] * (1 + up_pct)
+        stop = closes[i] * (1 - dn_pct)
+        outcome = 0
+        for j in range(i + 1, min(i + horizon, n)):
+            if bars[j]["high"] >= target:
+                outcome = 1
+                break
+            if bars[j]["low"] <= stop:
+                outcome = -1
+                break
+        if outcome == 1:
+            hit_t += 1
+        elif outcome == -1:
+            hit_s += 1
+        else:
+            undecided += 1
+
+    total = len(picked)
+    e20 = _ema(closes[-120:], 20) or 0
+    e60 = _ema(closes[-120:], 60) or 0
+
+    def _date(i: int) -> str:
+        d = str(bars[i]["date"])
+        return f"{d[:4]}-{d[4:6]}-{d[6:]}" if len(d) == 8 else d
+
+    return {
+        "sample": total,
+        "totalCandidates": len(cands),
+        "method": "6차원 유사 국면 k-NN (z-정규화 유클리드 거리, 5봉 간격 디커플링)",
+        "trendState": "상승(EMA20>60)" if e20 > e60 else "하락(EMA20<60)",
+        "continueUpPct": round(cont_up / total * 100, 1),
+        "reachTargetPct": round(hit_t / total * 100, 1),
+        "hitStopPct": round(hit_s / total * 100, 1),
+        "undecidedPct": round(undecided / total * 100, 1),
+        "lowConfidence": total < 30,
+        "avgDistance": round(sum(d for d, _, _ in picked) / total, 3),
+        "dimensions": [
+            {
+                "name": name,
+                "desc": desc,
+                "current": round(cur_f[d], 2),
+                "analogMean": round(sum(f[d] for _, _, f in picked) / total, 2),
+            }
+            for d, (name, desc) in enumerate(_REGIME_DIMS)
+        ],
+        "matchedDates": [_date(i) for _, i, _ in picked[:5]],
     }
 
 
@@ -370,16 +530,30 @@ def analyze_targets(code: str) -> dict:
     )[:2]
 
     # ── [11단계] 확률 (빈도 기반) ────────────────────────────────────────
+    # 1순위: 다차원 유사 국면 k-NN — 표본 부족 시 기존 단일 차원 방식으로 폴백.
     prob = {}
     stop_for_prob = tech_stop or supply_stop or struct_stop
     if avg_target and stop_for_prob and cur > 0:
         up_pct = avg_target / cur - 1
         dn_pct = 1 - stop_for_prob / cur
-        prob = _first_passage_prob(bars, up_pct, dn_pct)
-        prob["basis"] = (
-            f"최근 {len(bars)}거래일 중 현재와 같은 추세 상태 표본의 빈도 "
-            f"(목표 +{up_pct*100:.1f}% vs 손절 -{dn_pct*100:.1f}%, 60일 한도)"
-        )
+        prob = _similar_regime_prob(bars, up_pct, dn_pct)
+        if "error" in prob:
+            fallback_reason = prob["error"]
+            prob = _first_passage_prob(bars, up_pct, dn_pct)
+            if "error" not in prob:
+                prob["method"] = (
+                    f"단일 차원 폴백 — EMA20/60 추세 상태 동일 표본 (사유: {fallback_reason})"
+                )
+        if "error" not in prob:
+            sample_desc = (
+                f"6차원 유사 국면 최근접 {prob['sample']}건"
+                if prob.get("dimensions")
+                else "현재와 같은 추세 상태 표본"
+            )
+            prob["basis"] = (
+                f"최근 {len(bars)}거래일 중 {sample_desc}의 빈도 "
+                f"(목표 +{up_pct*100:.1f}% vs 손절 -{dn_pct*100:.1f}%, 60일 한도)"
+            )
     else:
         prob = {"error": "목표가 또는 손절가 산출 불가로 확률 계산 생략"}
 

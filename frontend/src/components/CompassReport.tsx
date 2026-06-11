@@ -447,12 +447,17 @@ function PriceChart({ p }: { p: Dict }) {
     : curPos.x - 5
 
   // 현재가 방향 신호 점멸: 추가 하락 우위 = 빨강 / 상승 우위 = 파랑 밑줄
-  // 근거 = 빈도 확률(20일 상승지속) ± 구조 보정(추세 이탈 -8, 단기 방향 ±4)
+  // 근거 = 유사 국면 빈도 확률(20일 상승지속 — 백엔드 6차원 k-NN 매칭)
+  //       ± 구조 보정(추세 이탈 -8, 단기 방향 ±4)
+  //       ± 선도달 우위 보정(목표 선도달% - 손절 선이탈% ≥ +15p → +3 / ≤ -15p → -3)
   let blink: 'up' | 'down' | null = null
   {
-    const upRaw = Number((p.probability ?? {}).continueUpPct)
+    const pr = p.probability ?? {}
+    const upRaw = Number(pr.continueUpPct)
     if (Number.isFinite(upRaw)) {
-      const adj = upRaw + (rising ? 4 : -4) + (anyBroken ? -8 : 0)
+      const edge = Number(pr.reachTargetPct) - Number(pr.hitStopPct)
+      const edgeAdj = Number.isFinite(edge) ? (edge >= 15 ? 3 : edge <= -15 ? -3 : 0) : 0
+      const adj = upRaw + (rising ? 4 : -4) + (anyBroken ? -8 : 0) + edgeAdj
       if (adj >= 58) blink = 'up'
       else if (adj <= 42) blink = 'down'
     }
@@ -906,6 +911,8 @@ function ProbBar({ p }: { p: Dict }) {
   const stopP = Math.round(Number(pr.hitStopPct ?? 0))
   const und = Math.max(0, 100 - reach - stopP)
   const contUp = pr.continueUpPct != null ? Math.round(Number(pr.continueUpPct) / 10) : null
+  const dims: Dict[] = Array.isArray(pr.dimensions) ? pr.dimensions : []
+  const matched: string[] = Array.isArray(pr.matchedDates) ? pr.matchedDates : []
   if (!reach && !stopP) return null
 
   // 100개 점: 초록(목표 먼저) → 회색(결판 안 남) → 빨강(손절 먼저)
@@ -920,9 +927,39 @@ function ProbBar({ p }: { p: Dict }) {
       <p style={sectionTitle}>📊 과거에 비슷한 상황에서는?</p>
 
       <p style={{ fontSize: 13.5, lineHeight: 1.7, color: 'rgba(241,245,249,0.85)', margin: '0 0 12px' }}>
-        지금과 같은 추세 국면이 과거에 <b style={{ color: '#f1f5f9' }}>{pr.sample}번</b> 있었습니다.
-        그때마다 100번 중 —
+        {dims.length > 0 ? (
+          <>
+            {dims.length}개 차원({dims.map(d => d.name).join('·')})에서 지금과 가장 비슷한
+            과거 국면 <b style={{ color: '#f1f5f9' }}>{pr.sample}건</b>
+            {pr.totalCandidates ? ` (후보 ${pr.totalCandidates}건 중 최근접)` : ''}을 찾았습니다.
+            그때마다 100번 중 —
+          </>
+        ) : (
+          <>
+            지금과 같은 추세 국면이 과거에 <b style={{ color: '#f1f5f9' }}>{pr.sample}번</b> 있었습니다.
+            그때마다 100번 중 —
+          </>
+        )}
       </p>
+
+      {/* 다차원 근거: 차원별 현재값 vs 유사 표본 평균 — 점멸 신호의 판단 근거 공개 */}
+      {dims.length > 0 && (
+        <div style={{
+          display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'center',
+          margin: '0 0 12px',
+        }}>
+          {dims.map(d => (
+            <span key={d.name} title={d.desc} style={{
+              fontSize: 11, padding: '3px 8px', borderRadius: 10,
+              background: 'rgba(96,165,250,0.12)', border: '1px solid rgba(96,165,250,0.25)',
+              color: 'rgba(241,245,249,0.8)',
+            }}>
+              {d.name} <b style={{ color: '#93c5fd' }}>{d.current}</b>
+              <span style={{ color: '#64748b' }}> / 표본평균 {d.analogMean}</span>
+            </span>
+          ))}
+        </div>
+      )}
 
       {/* 와플 차트: 10 × 10 */}
       <div style={{
@@ -954,6 +991,9 @@ function ProbBar({ p }: { p: Dict }) {
       )}
 
       <p style={{ fontSize: 11, color: '#64748b', textAlign: 'center', marginTop: 8 }}>
+        {matched.length > 0 ? `가장 비슷했던 시점: ${matched.join(' · ')}` : ''}
+      </p>
+      <p style={{ fontSize: 11, color: '#64748b', textAlign: 'center', marginTop: 4 }}>
         {pr.lowConfidence ? '⚠ 과거 사례가 적어 참고만 하세요 · ' : ''}
         과거 통계일 뿐, 미래를 보장하지 않습니다
       </p>
