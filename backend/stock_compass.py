@@ -20,6 +20,46 @@ from pathlib import Path
 from typing import Optional
 
 
+def _stock_news(code: str, sector: Optional[str], limit: int = 8) -> list[dict]:
+    """모멘텀 판정용 최근 7일 뉴스 — 종목 직접 기사 우선, 부족하면 섹터 기사."""
+    try:
+        from datetime import timedelta
+
+        import db
+        import models
+        from sqlalchemy import select, or_
+
+        s = db.get_session_factory()()
+        try:
+            d7 = datetime.now() - timedelta(days=7)
+            cond = (models.NewsArticle.stock_code == code)
+            if sector:
+                cond = or_(cond, models.NewsArticle.sector == sector)
+            rows = s.execute(
+                select(
+                    models.NewsArticle.title,
+                    models.NewsArticle.press,
+                    models.NewsArticle.published_at,
+                    models.NewsArticle.stock_code,
+                )
+                .where(models.NewsArticle.published_at >= d7)
+                .where(cond)
+                .order_by(
+                    (models.NewsArticle.stock_code != code),  # 종목 직접 기사 우선
+                    models.NewsArticle.published_at.desc(),
+                )
+                .limit(limit)
+            ).all()
+        finally:
+            s.close()
+        return [
+            {"title": t, "press": p, "at": at.strftime("%m-%d"), "direct": c == code}
+            for t, p, at, c in rows
+        ]
+    except Exception:
+        return []
+
+
 def _stock_sector(code: str) -> Optional[str]:
     """sector_classification.json 에서 종목의 섹터."""
     try:
@@ -98,11 +138,28 @@ _SYSTEM_PROMPT = """당신은 월가 헤지펀드 PM, 글로벌 매크로 전략
 
 ---
 
+# 모멘텀 (보유 이유)
+핵심 모멘텀 : (이 종목을 보유하는 이유가 되는 재료 1~3개 — recentNews 헤드라인,
+              섹터 순위·당일 자금 흐름, 수급(외인/기관/공매도 추세) 중 데이터가
+              실제로 지지하는 것만. 뚜렷한 재료가 없으면 "뚜렷한 모멘텀 없음"이라고 쓸 것)
+모멘텀 상태 : 살아있음 / 약화 / 소멸 중 하나 — 판정 근거 병기
+              (예: 섹터 순위 상위 + 외인 유입 지속 = 살아있음 / 뉴스 소강 + 당일 자금 이탈 = 약화)
+소멸 판정 기준 : (관측 가능한 구체 조건 2~3개 — 예: 일봉 구조 LH+LL 전환,
+                섹터 순위 6위 밖 이탈 지속, 공매도 비중 증가 전환, 외인 레이어 50 미만 하락)
+소멸 시 행동 : 모멘텀 소멸 = 보유 이유 소멸 = 매도 전환.
+              가격 손절과 별개로 작동하는 두 번째 청산 트리거임을 명시할 것.
+              (가격이 손절선 위에 있어도 모멘텀이 죽으면 정리한다)
+
+---
+
 # 투자 행동
-진입 이유 : (구조 이벤트·수급 레이어·섹터 위치 중 데이터가 지지하는 것만 2~3줄)
+진입 이유 : (위 핵심 모멘텀을 매수 근거로 연결 — 모멘텀 없는 진입은 권하지 않는다)
 신규 진입 : (권고/조건부/비권고 + 근거)
-분할 매수 계획 : (tradePlan.buyLevels의 1·2·3차 가격을 그대로 인용 — "하락 시 계속 담는" 구간)
-단계별 목표 : (tradePlan.stagedTargets의 1·2·3차 가격 + 각 산출 근거)
+분할 매수 계획 : (tradePlan.buyLevels의 1·2·3차 가격을 그대로 인용 — "하락 시 계속 담는" 구간.
+                mtf 일봉 fvg.bullish(미충전 상승 갭 = 스마트머니 매수 흔적)와 겹치는 레벨이
+                있으면 "ICT FVG 지지 구간과 일치 — 우선 매수 구간"으로 명시)
+단계별 목표 : (tradePlan.stagedTargets의 1·2·3차 가격 + 각 산출 근거.
+              경로상 fvg.bearish(미충전 하락 갭)가 있으면 통과해야 할 저항 구간으로 언급)
 익절 계획 : (1차 목표 도달 시 부분 익절, 최종 목표에서 정리 등 — 제공된 레벨로만)
 손절 : (stops 중 타당한 것 + "추세 진행 시 손절선을 따라 올리는" 운용 규칙 언급)
 수급 읽기 : (외인/기관/스마트 레이어 점수 해석 + tradePlan.accumulationZones를
@@ -183,6 +240,7 @@ def analyze_stock(code: str, with_ai: bool = True) -> dict:
                     "liquidity": t.get("liquidity"),
                     "cdv": t.get("cdv"),
                     "volumeProfile": t.get("volumeProfile"),  # 매물대 — 핵심 차트에 밴드로 표시
+                    "fvg": t.get("fvg"),  # ICT FVG (미충전 갭) — 스마트머니 매물대
                     "error": t.get("error"),
                 }
                 for t in mtf.get("timeframes", [])
@@ -198,6 +256,7 @@ def analyze_stock(code: str, with_ai: bool = True) -> dict:
         "series": targets.get("series"),
         "tradePlan": targets.get("tradePlan"),
         "shortSelling": targets.get("shortSelling"),
+        "recentNews": _stock_news(code, sector),  # 모멘텀 판정 근거 (최근 7일)
         "composite": composite,
     }
 

@@ -66,7 +66,7 @@ function PriceChart({ p }: { p: Dict }) {
   const target = p.targets?.avgTarget as number | null
   const stop = (p.stops?.['기술적 손절']?.price ?? p.stops?.['구조 손절']?.price) as number | null
 
-  const W = 680, H = 400, PX = 10, PT = 34, PB = 24
+  const W = 680, H = 400, PX = 10, PT = 20, PB = 24
   const GOLDEN = 0.618
   const plotEnd = PX + (W - PX * 2) * GOLDEN // 현재가 위치 (황금비)
 
@@ -95,7 +95,8 @@ function PriceChart({ p }: { p: Dict }) {
   const curX = toX(closes.length - 1)
   const curY = toY(cur)
 
-  // 자동 추세선 — 우측 미래 영역까지 연장, 차트 경계에서 클립
+  // 추세선 (스윙 저점 연결, 1개) — 우측 미래 영역까지 연장.
+  // 저항·지지는 선이 아니라 ICT 매물대(FVG·거래량 존)가 담당한다.
   const tl = autoTrendlines(closes)
   const extIdx = (closes.length - 1) * (0.92 / GOLDEN) // x≈92% 지점까지 연장
   const trendSeg = (t: { i1: number; at: (x: number) => number } | null) => {
@@ -111,10 +112,13 @@ function PriceChart({ p }: { p: Dict }) {
       if (xe <= t.i1) return null
       ye = bound
     }
-    return { x1: toX(t.i1), y1: toY(y1v), x2: PX + (xe / (closes.length - 1)) * (plotEnd - PX), y2: toY(ye) }
+    return {
+      x1: toX(t.i1), y1: toY(y1v),
+      x2: PX + (xe / (closes.length - 1)) * (plotEnd - PX), y2: toY(ye),
+      label: '추세선', color: '#a78bfa',
+    }
   }
   const supSeg = trendSeg(tl.support)
-  const resSeg = trendSeg(tl.resistance)
 
   // 매물대 (MTF 일봉 거래량 프로파일) — 가격 밴드로 표시
   const dailyTf = (p.mtf?.timeframes ?? []).find((t: Dict) => t.label === '일봉')
@@ -123,18 +127,61 @@ function PriceChart({ p }: { p: Dict }) {
   )
   const biggest = zones.length ? Math.max(...zones.map((z: Dict) => z.volumePct)) : 0
 
-  // MTF 추세 화살표 (패널 대신 차트 상단에 통합)
-  const TF_SHORT: Record<string, string> = {
-    '월봉': '월', '주봉': '주', '일봉': '일', '60분(5일)': '60분', '15분(5일)': '15분',
+  // ICT FVG (미충전 갭 = 스마트머니 매물대) — 상승=지지(초록), 하락=저항(빨강)
+  const fvgBull: Dict[] = (dailyTf?.fvg?.bullish ?? [])
+    .filter((z: Dict) => z.top > lo && z.bottom < hi).slice(-2)
+  const fvgBear: Dict[] = (dailyTf?.fvg?.bearish ?? [])
+    .filter((z: Dict) => z.top > lo && z.bottom < hi).slice(-2)
+
+  // MTF 추세 → 회귀 추세선 3개 (장기 120봉 / 중기 60봉 / 단기 20봉)
+  // 기울기 방향으로 색: 상승 초록 / 하락 빨강 / 횡보 노랑 — 한눈에 읽히는 추세선
+  const regress = (win: number) => {
+    const seg = closes.slice(-win)
+    const n = seg.length
+    if (n < Math.max(10, win * 0.6)) return null
+    const x0 = closes.length - n
+    let sx = 0, sy = 0, sxy = 0, sxx = 0
+    seg.forEach((y, i) => { sx += i; sy += y; sxy += i * y; sxx += i * i })
+    const slope = (n * sxy - sx * sy) / (n * sxx - sx * sx || 1)
+    const icept = (sy - slope * sx) / n
+    const avg = sy / n
+    const pctPerBar = slope / (avg || 1)
+    return { x0, n, yAt: (i: number) => icept + slope * i, pctPerBar }
   }
-  const arrows = (p.mtf?.timeframes ?? []).map((t: Dict) => {
-    const tr = String(t.trend ?? '')
-    return {
-      label: TF_SHORT[t.label] ?? t.label,
-      glyph: t.error ? '·' : tr.includes('상승') ? '▲' : tr.includes('하락') ? '▼' : '▬',
-      color: t.error ? '#475569' : tr.includes('상승') ? '#34d399' : tr.includes('하락') ? '#f87171' : '#eab308',
+  const trendLines = [
+    { label: '장기', win: closes.length, width: 2.4, dash: '', op: 0.55 },
+    { label: '중기', win: 60, width: 1.8, dash: '7,4', op: 0.75 },
+    { label: '단기', win: 20, width: 1.5, dash: '3,3', op: 0.95 },
+  ].map(def => {
+    const r = regress(def.win)
+    if (!r) return null
+    const flat = Math.abs(r.pctPerBar) < 0.0006 // 봉당 ±0.06% 미만 = 횡보
+    const color = flat ? '#eab308' : r.pctPerBar > 0 ? '#34d399' : '#f87171'
+    const glyph = flat ? '→' : r.pctPerBar > 0 ? '↗' : '↘'
+    const y1 = r.yAt(0)
+    // 우측 미래 영역으로 연장 (시간 시계열 체감) — 경계 밖이면 교차점에서 절단
+    const extN = Math.round((closes.length - 1) * 0.28)
+    let iEnd = r.n - 1 + extN
+    let yEnd = r.yAt(iEnd)
+    if (yEnd < lo || yEnd > hi) {
+      const bound = yEnd < lo ? lo : hi
+      const slopePer = r.yAt(1) - r.yAt(0)
+      if (Math.abs(slopePer) > 1e-9) {
+        iEnd = Math.min(iEnd, Math.max(r.n - 1, (bound - r.yAt(0)) / slopePer))
+        yEnd = r.yAt(iEnd)
+      }
     }
-  })
+    if ((y1 < lo && yEnd < lo) || (y1 > hi && yEnd > hi)) return null
+    const cl = (v: number) => Math.min(Math.max(v, lo), hi)
+    return {
+      ...def, color, glyph,
+      x1: toX(r.x0), y1: toY(cl(y1)),
+      x2: toX(r.x0 + iEnd), y2: toY(cl(yEnd)),
+    }
+  }).filter(Boolean) as Array<{
+    label: string; width: number; dash: string; op: number
+    color: string; glyph: string; x1: number; y1: number; x2: number; y2: number
+  }>
 
   const path = closes.map((c, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(c).toFixed(1)}`).join(' ')
   const area = `${path} L${curX},${H - PB} L${toX(0)},${H - PB} Z`
@@ -152,12 +199,16 @@ function PriceChart({ p }: { p: Dict }) {
         </linearGradient>
       </defs>
 
-      {/* MTF 추세 통합 스트립 (차트 상단) */}
-      <text x={PX} y={16} fontSize="11" fill="#64748b" fontWeight="700">추세</text>
-      {arrows.map((a: { label: string; glyph: string; color: string }, i: number) => (
-        <text key={a.label} x={PX + 38 + i * 64} y={16} fontSize="11.5" fill={a.color} fontWeight="800">
-          {a.label} {a.glyph}
-        </text>
+      {/* 추세선 (장기/중기/단기 회귀선 — 가격 라인 아래 레이어) */}
+      {trendLines.map(t => (
+        <g key={t.label}>
+          <line x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2}
+            stroke={t.color} strokeWidth={t.width} strokeOpacity={t.op}
+            strokeDasharray={t.dash} strokeLinecap="round" />
+          <text x={t.x2 + 5} y={t.y2 + 4} fontSize="11" fill={t.color} fontWeight="800">
+            {t.label}{t.glyph}
+          </text>
+        </g>
       ))}
 
       {/* 매물대 밴드 */}
@@ -175,6 +226,26 @@ function PriceChart({ p }: { p: Dict }) {
                 매물대 {z.volumePct}%
               </text>
             )}
+          </g>
+        )
+      })}
+
+      {/* ICT FVG 존 — 미충전 갭 (스마트머니 매물대) */}
+      {([
+        ...fvgBull.map((z: Dict): Dict => ({ ...z, color: '#34d399', name: 'FVG 지지' })),
+        ...fvgBear.map((z: Dict): Dict => ({ ...z, color: '#f87171', name: 'FVG 저항' })),
+      ] as Dict[]).map((z, i) => {
+        const yTop = Math.max(toY(Math.min(z.top, hi)), PT)
+        const yBot = Math.min(toY(Math.max(z.bottom, lo)), H - PB)
+        if (yBot <= yTop) return null
+        return (
+          <g key={`fvg-${i}`}>
+            <rect x={PX} y={yTop} width={W - PX * 2} height={yBot - yTop}
+              fill={z.color} fillOpacity="0.09"
+              stroke={z.color} strokeOpacity="0.35" strokeWidth="0.7" strokeDasharray="3,3" />
+            <text x={PX + 4} y={yBot - 4} fontSize="9.5" fill={z.color} fillOpacity="0.8">
+              {z.name}{z.ceTouched ? ' (절반 충전)' : ''}
+            </text>
           </g>
         )
       })}
@@ -227,18 +298,13 @@ function PriceChart({ p }: { p: Dict }) {
 
       <path d={area} fill="url(#cr-area)" />
 
-      {/* 자동 추세선 (미래 영역까지 연장) */}
+      {/* 추세선 (스윙 저점 연결 — 미래 영역까지 연장) */}
       {supSeg && (
-        <>
-          <line {...supSeg} stroke="#a78bfa" strokeWidth="1.5" strokeOpacity="0.85" />
-          <text x={supSeg.x2 + 4} y={supSeg.y2 + 4} fontSize="10.5" fill="#a78bfa">지지 추세선</text>
-        </>
-      )}
-      {resSeg && (
-        <>
-          <line {...resSeg} stroke="#f59e0b" strokeWidth="1.5" strokeOpacity="0.85" />
-          <text x={resSeg.x2 + 4} y={resSeg.y2 + 4} fontSize="10.5" fill="#f59e0b">저항 추세선</text>
-        </>
+        <g>
+          <line x1={supSeg.x1} y1={supSeg.y1} x2={supSeg.x2} y2={supSeg.y2}
+            stroke={supSeg.color} strokeWidth="1.5" strokeOpacity="0.85" />
+          <text x={supSeg.x2 + 4} y={supSeg.y2 + 4} fontSize="10.5" fill={supSeg.color}>{supSeg.label}</text>
+        </g>
       )}
 
       <path d={path} fill="none" stroke="#60a5fa" strokeWidth="2.2" strokeLinejoin="round" />
@@ -489,10 +555,11 @@ export function CompassReport({ data }: { data: Dict }) {
   // AI 리포트 섹션 분해: 종목 평가는 제목·차트와 중복이라 제외,
   // 투자 행동·시나리오는 차트 바로 아래, 나머지(시장 해석)는 하단 노트로.
   const sections = data.aiReport ? splitSections(String(data.aiReport)) : []
+  const momentumSec = sections.find(s => s.title.includes('모멘텀'))
   const actionSec = sections.find(s => s.title.includes('투자 행동'))
   const scenarioSec = sections.find(s => s.title.includes('시나리오') || s.title.includes('불확실'))
   const restSecs = sections.filter(s =>
-    s !== actionSec && s !== scenarioSec && !s.title.includes('종목 평가'))
+    s !== momentumSec && s !== actionSec && s !== scenarioSec && !s.title.includes('종목 평가'))
 
   return (
     <div style={{ maxWidth: 680, margin: '0 auto' }}>
@@ -541,6 +608,15 @@ export function CompassReport({ data }: { data: Dict }) {
         <div style={card}>
           <p style={sectionTitle}>핵심 차트 — 가격 vs 목표·손절 (일봉 120)</p>
           <PriceChart p={data} />
+        </div>
+      )}
+
+      {/* ── 모멘텀 (보유 이유 — 사라지면 매도 전환) ── */}
+      {momentumSec && (
+        <div style={{ ...card, borderColor: 'rgba(251,191,36,0.35)' }}>
+          <p style={sectionTitle}>🔥 모멘텀 — 보유 이유 <span style={{ letterSpacing: 0, color: '#92700c' }}>
+            (소멸 시 매도 전환)</span></p>
+          <Story text={momentumSec.body} />
         </div>
       )}
 

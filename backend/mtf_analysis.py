@@ -171,6 +171,45 @@ def _cdv(opens: list[float], closes: list[float], volumes: list[float]) -> dict:
     }
 
 
+def _fvg_zones(bars: list[dict], max_keep: int = 3) -> dict:
+    """ICT Fair Value Gap (스마트머니 매물대) — 3봉 패턴, 미충전 갭만 반환.
+
+    Pine 로직 이식 (ICT FVG & Swing Detector):
+      bullish FVG: high[i-2] < low[i]  → 지지 구간 [high[i-2], low[i]]  (기관 매수 흔적)
+      bearish FVG: low[i-2] > high[i] → 저항 구간 [high[i], low[i-2]]  (기관 매도 흔적)
+    충전(mitigation) 판정: 이후 봉이 갭 반대편 끝까지 관통하면 무효 — 미충전만 유효.
+    ceTouched: 갭 중앙선(CE, Consequent Encroachment) 터치 여부 — 절반 충전.
+    """
+    bulls: list[dict] = []
+    bears: list[dict] = []
+    n = len(bars)
+    for i in range(2, n):
+        when = bars[i].get("date") or bars[i].get("time") or ""
+        # bullish FVG
+        h2, l0 = bars[i - 2]["high"], bars[i]["low"]
+        if h2 < l0:
+            bottom, top = h2, l0
+            mid = (top + bottom) / 2
+            if not any(bars[j]["low"] <= bottom for j in range(i + 1, n)):
+                bulls.append({
+                    "type": "bullish", "top": top, "bottom": bottom,
+                    "mid": round(mid, 1), "at": when,
+                    "ceTouched": any(bars[j]["low"] <= mid for j in range(i + 1, n)),
+                })
+        # bearish FVG
+        l2, h0 = bars[i - 2]["low"], bars[i]["high"]
+        if l2 > h0:
+            bottom, top = h0, l2
+            mid = (top + bottom) / 2
+            if not any(bars[j]["high"] >= top for j in range(i + 1, n)):
+                bears.append({
+                    "type": "bearish", "top": top, "bottom": bottom,
+                    "mid": round(mid, 1), "at": when,
+                    "ceTouched": any(bars[j]["high"] >= mid for j in range(i + 1, n)),
+                })
+    return {"bullish": bulls[-max_keep:], "bearish": bears[-max_keep:]}
+
+
 def analyze_timeframe(bars: list[dict], label: str) -> dict:
     """단일 타임프레임 종합 분석."""
     if len(bars) < 25:
@@ -199,6 +238,7 @@ def analyze_timeframe(bars: list[dict], label: str) -> dict:
         "structureEvent": st["event"],
         "liquidity": _liquidity(sw, closes[-1]),
         "volumeProfile": _volume_profile(closes, vols),
+        "fvg": _fvg_zones(bars),
         "fibonacci": _fibonacci(highs, lows, closes),
         "volumeRatio5v20": round(vol_recent / vol_base, 2) if vol_base else None,
         "cdv": _cdv(opens, closes, vols),
