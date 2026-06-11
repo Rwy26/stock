@@ -164,6 +164,19 @@ def fetch_supply_demand_batch(
     elif not kis_ok:
         logger.debug("KIS_APP_KEY/SECRET 미설정 — 수급 데이터 조회 건너뜀")
 
+    # ── 2.5 공매도 급증 플래그 (short_selling_daily — scripts/short_selling_sync.py가 매일 적재) ──
+    if db_session is not None:
+        try:
+            import short_selling
+            surge_flags = short_selling.compute_short_surge_flags(db_session, stock_codes)
+            for code, flags in surge_flags.items():
+                for k, v in flags.items():
+                    if k not in result[code]:   # 수동 주입값 우선
+                        result[code][k] = v
+            logger.info("공매도 급증 판정: %d종목 (데이터 충분 종목만)", len(surge_flags))
+        except Exception as exc:
+            logger.warning("공매도 급증 판정 실패 (스코어링은 N/A로 계속): %s", exc)
+
     # ── 3. DART 재무 데이터 수집 ─────────────────────────────────────────────
     if dart_api_key:
         logger.info("DART 재무 데이터 조회: %d종목", len(stock_codes))

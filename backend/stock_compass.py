@@ -114,6 +114,11 @@ _SYSTEM_PROMPT = """당신은 월가 헤지펀드 PM, 글로벌 매크로 전략
 2. 점수/등급/목표가/손절가/확률은 이미 계산되어 제공된다 — 그대로 인용하고 해석만 한다.
 3. 불확실성과 반대 시나리오를 반드시 포함한다.
 4. 한국어 마크다운. 아래 형식을 정확히 따른다.
+5. probability.dotcomAnalogs 와 dotcomCasebook 이 제공되면 "닷컴 대조" 섹션을 쓴다 —
+   1995~2002 미국 닷컴 버블에서 현재와 가장 비슷했던 국면의 검증 기록이다.
+   매칭 국면의 실제 20일 후 분포·당시 밸류에이션·경영진 어조 지표를 그대로 인용해
+   현재 판단의 보조 근거(특히 한국 ~500봉에 없는 과열·붕괴 국면 경고)로 쓰되,
+   "다른 시장·다른 시대의 유사 국면 — 참고용"임을 명시한다. 없으면 섹션 생략.
 
 문체: 간결한 트레이딩 저널체 — 베테랑 트레이더가 자기 매매일지에 쓰듯 직설적으로.
 종목의 본질을 꿰뚫는 비유 1개 허용 (예: "서부 개척 시대에 청바지 파는 격",
@@ -127,6 +132,13 @@ _SYSTEM_PROMPT = """당신은 월가 헤지펀드 PM, 글로벌 매크로 전략
 섹터 순환 위치 :
 유입 자금 : (어디서 → 어디로)
 위험 신호 :
+
+---
+
+# 닷컴 대조 (1995~2002 · 참고용 — 데이터 제공 시에만)
+매칭 국면 : (dotcomAnalogs.phaseDistribution — 예: 과열기 12건 · 붕괴기 5건)
+당시 기록 : (dotcomCasebook 의 해당 국면 — 나스닥 변화·대표 P/E·실제 20일 후 분포 인용)
+시사점 : (현재 종목 판단에 주는 경고 또는 지지 — 1~2문장, 다른 시장·시대임을 명시)
 
 ---
 
@@ -259,6 +271,16 @@ def analyze_stock(code: str, with_ai: bool = True) -> dict:
         "recentNews": _stock_news(code, sector),  # 모멘텀 판정 근거 (최근 7일)
         "composite": composite,
     }
+
+    # 닷컴 사례집 — 유사 국면 매칭이 있을 때만 해당 국면 검증 기록 주입 (실패 무영향)
+    try:
+        import dotcom_casebook
+        _dc = (context.get("probability") or {}).get("dotcomAnalogs") or {}
+        _cb = dotcom_casebook.context_block(_dc)
+        if _cb:
+            context["dotcomCasebook"] = _cb
+    except Exception:
+        pass
 
     ai_report, provider = (None, "skipped")
     if with_ai:

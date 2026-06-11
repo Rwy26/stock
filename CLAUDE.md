@@ -26,6 +26,7 @@ endpoints directly on a single `app` object (no `APIRouter` split). Supporting m
   - `scoring_engine.py` — 3-tier stock recommendation scoring (sector leadership → breakout → negative filter).
   - `sector_rotation.py` — 7-layer KOSPI sector-rotation scoring (macro/foreign/institutional/momentum/news/volume/smart-money).
   - `supply_demand.py` — foreign/institutional flow + DART financials aggregation feeding the scoring engine.
+  - `short_selling.py` — daily short-selling volume (KIS, T+1) / balance (KRX login required, T+2) ingestion into `short_selling_daily` + 3-day surge flag (`short_sell_surge_3d`) for the scoring engine's negative filter. Daily sync: `scripts/short_selling_sync.py` (scheduled task, 18:40 KST).
   - `chart_analysis.py` — AI chart analysis (OpenAI Vision / Gemini / Groq) from ticker, CSV, JSON, or screenshot.
 - **External clients**: `kis_client.py` (Korea Investment & Securities OpenAPI — quotes, balances, orders; live + paper base URLs), `dart_client.py` (DART financial statements via OpenDartReader). Market data also comes from yfinance / pykrx / FinanceDataReader.
 - **Background threads** started in `@app.on_event("startup")`: `kis-token-refresh`, `autotrade-tick`, `recommendations-refresh` (all daemon threads, stopped via `threading.Event`s on shutdown).

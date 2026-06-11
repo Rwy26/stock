@@ -365,11 +365,42 @@ class DailyInvestorFlow(Base):
     )
 
 
+class ShortSellingDaily(Base):
+    """종목별 일별 공매도 데이터.
+
+    거래량(short_qty/short_ratio): KIS 공매도 일별추이 (TR FHPST04830000) — T+1 공표.
+    잔고(balance_qty/balance_ratio): KRX 정보데이터시스템 — KRX_ID/KRX_PW 로그인 필요, T+2 공표.
+        (data.krx.co.kr·short.krx.co.kr 모두 로그인 필수 — 무료 회원가입 후 set-krx-env.ps1로 설정)
+    수집: scripts/short_selling_sync.py (매일 18:40 작업 스케줄러)
+    소비: supply_demand.fetch_supply_demand_batch → scoring_engine 위험2(short_sell_surge_3d)
+    """
+
+    __tablename__ = "short_selling_daily"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    stock_code: Mapped[str] = mapped_column(String(20), index=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    # 공매도 거래 (KIS)
+    short_qty: Mapped[int] = mapped_column(BigInteger, default=0)        # 공매도 체결 수량
+    short_ratio: Mapped[float] = mapped_column(Float, default=0.0)       # 거래량 대비 공매도 비중 %
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # 공매도 잔고 (KRX — 자격증명 없으면 NULL 유지)
+    balance_qty: Mapped[int | None] = mapped_column(BigInteger, nullable=True)    # 잔고 수량
+    balance_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)     # 시총 대비 잔고 비중 %
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("uq_short_selling_code_date", "stock_code", "trade_date", unique=True),
+    )
+
+
 class VkospiHistory(Base):
     """VKOSPI(코스피 변동성지수) 일별 이력.
 
-    현물 VKOSPI는 야후/네이버/다음 미제공, KRX 정보데이터시스템은 이 네트워크에서
-    DNS 불가 — KRX 변동성지수 선물 연속물(VKI1!)을 TradingView 차트 데이터로 수집한다.
+    현물 VKOSPI는 야후/네이버/다음 미제공. KRX 정보데이터시스템(data.krx.co.kr)은
+    접속 가능하나 로그인(KRX_ID/KRX_PW) 필수 — 과거 "DNS 불가" 결론은 잘못된 도메인
+    (data.krx.go.kr)으로 테스트한 오판(2026-06-12 확인). 현재는 KRX 변동성지수
+    선물 연속물(VKI1!)을 TradingView 차트 데이터로 수집한다.
     초기 적재: scripts/vkospi_crawl.py (과거 일봉 전체)
     일일 갱신: scripts/fundamentals_sync.py (07:00 / 20:10)
     해석: 20~30 평시, 30 이상 공포 (2008년 위기 ~80).
