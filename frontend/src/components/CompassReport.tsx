@@ -450,6 +450,8 @@ function PriceChart({ p }: { p: Dict }) {
   // 근거 = 유사 국면 빈도 확률(20일 상승지속 — 백엔드 6차원 k-NN 매칭)
   //       ± 구조 보정(추세 이탈 -8, 단기 방향 ±4)
   //       ± 선도달 우위 보정(목표 선도달% - 손절 선이탈% ≥ +15p → +3 / ≤ -15p → -3)
+  //       ± 닷컴 대조 보정(1995~2002 미국 유사 국면 상승비율 ≥60% → +3 / ≤40% → -3,
+  //         표본 15건 이상일 때만)
   let blink: 'up' | 'down' | null = null
   {
     const pr = p.probability ?? {}
@@ -457,7 +459,11 @@ function PriceChart({ p }: { p: Dict }) {
     if (Number.isFinite(upRaw)) {
       const edge = Number(pr.reachTargetPct) - Number(pr.hitStopPct)
       const edgeAdj = Number.isFinite(edge) ? (edge >= 15 ? 3 : edge <= -15 ? -3 : 0) : 0
-      const adj = upRaw + (rising ? 4 : -4) + (anyBroken ? -8 : 0) + edgeAdj
+      const dc = pr.dotcomAnalogs ?? {}
+      const dcUp = Number(dc.continueUpPct)
+      const dcAdj = Number.isFinite(dcUp) && Number(dc.sample) >= 15
+        ? (dcUp >= 60 ? 3 : dcUp <= 40 ? -3 : 0) : 0
+      const adj = upRaw + (rising ? 4 : -4) + (anyBroken ? -8 : 0) + edgeAdj + dcAdj
       if (adj >= 58) blink = 'up'
       else if (adj <= 42) blink = 'down'
     }
@@ -913,6 +919,9 @@ function ProbBar({ p }: { p: Dict }) {
   const contUp = pr.continueUpPct != null ? Math.round(Number(pr.continueUpPct) / 10) : null
   const dims: Dict[] = Array.isArray(pr.dimensions) ? pr.dimensions : []
   const matched: string[] = Array.isArray(pr.matchedDates) ? pr.matchedDates : []
+  const dc: Dict = pr.dotcomAnalogs ?? {}
+  const dcOk = Number.isFinite(Number(dc.continueUpPct)) && Number(dc.sample) > 0
+  const dcUpCount = dcOk ? Math.round(Number(dc.continueUpPct) / 100 * Number(dc.sample)) : 0
   if (!reach && !stopP) return null
 
   // 100개 점: 초록(목표 먼저) → 회색(결판 안 남) → 빨강(손절 먼저)
@@ -988,6 +997,34 @@ function ProbBar({ p }: { p: Dict }) {
             <span style={{ color: 'rgba(255,255,255,0.15)' }}>{'●'.repeat(10 - contUp)}</span>
           </span>
         </p>
+      )}
+
+      {/* 닷컴(1995~2002 미국) 대조 — 한국 표본에 없는 과열·붕괴 국면과의 비교 */}
+      {dcOk && (
+        <div style={{
+          marginTop: 14, padding: '10px 12px', borderRadius: 10,
+          background: 'rgba(96,165,250,0.07)', border: '1px solid rgba(96,165,250,0.18)',
+        }}>
+          <p style={{ fontSize: 12.5, lineHeight: 1.65, color: 'rgba(241,245,249,0.85)', margin: 0 }}>
+            🇺🇸 <b>닷컴 버블(1995~2002) 대조</b> — 미국 기술주·나스닥에서 지금과 가장
+            비슷했던 국면 <b style={{ color: '#f1f5f9' }}>{dc.sample}건</b> 중{' '}
+            <b style={{ color: dcUpCount * 2 >= Number(dc.sample) ? '#34d399' : '#f87171' }}>
+              {dcUpCount}건
+            </b>이 20일 후 상승 (수익률 중앙값 {Number(dc.medianFwd20Pct) >= 0 ? '+' : ''}{dc.medianFwd20Pct}%)
+          </p>
+          {dc.phaseDistribution && (
+            <p style={{ fontSize: 11.5, color: 'rgba(241,245,249,0.6)', margin: '6px 0 0' }}>
+              매칭 국면: {Object.entries(dc.phaseDistribution as Record<string, number>)
+                .map(([k, v]) => `${k} ${v}건`).join(' · ')}
+            </p>
+          )}
+          {Array.isArray(dc.topMatches) && dc.topMatches.length > 0 && (
+            <p style={{ fontSize: 11, color: '#64748b', margin: '5px 0 0' }}>
+              예: {dc.topMatches.slice(0, 3).map((m: Dict) =>
+                `${m.symbol} ${m.date}(${m.phase})`).join(' · ')}
+            </p>
+          )}
+        </div>
       )}
 
       <p style={{ fontSize: 11, color: '#64748b', textAlign: 'center', marginTop: 8 }}>
