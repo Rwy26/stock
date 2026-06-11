@@ -9,7 +9,7 @@ type WatchItem = {
   changeRate: number; score: number; sector: string; icon?: string
   marketCap?: number
 }
-type WatchlistResponse = { items: WatchItem[] }
+type WatchlistResponse = { items: WatchItem[]; quoteBasis?: string }
 type StockRow = { name: string; code: string; price: number; changeRate: number; score: number }
 type SearchResponse = { items: StockRow[] }
 type TRect = { id: string; x: number; y: number; w: number; h: number }
@@ -502,6 +502,11 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
               </span>
             )}
           </div>
+          {data?.quoteBasis === 'prevClose' && (
+            <div className="status-pill" style={{ color: '#fbbf24' }}>
+              🕘 장 시작 전 · 전일 등락 기준
+            </div>
+          )}
           <div className="status-pill">총 {items.length}개</div>
           {!publicMode && (
             <button className="btn" type="button" onClick={() => setShowSearch(v => !v)}>

@@ -1767,7 +1767,12 @@ def get_watchlist(current_user=Depends(get_current_user)):
         except Exception:
             pass
 
-        return {"items": items}
+        # 장전/휴장에는 마지막 세션 등락률로 색 유지 (quoteBasis로 표시)
+        try:
+            basis = _apply_session_fallback(items)
+        except Exception:
+            basis = "today"
+        return {"items": items, "quoteBasis": basis}
     finally:
         db.close()
 
@@ -5230,13 +5235,58 @@ def public_etf_quotes():
     if _PUBLIC_ETF_CACHE["items"] is not None and (now - _PUBLIC_ETF_CACHE["ts"]) < _PUBLIC_ETF_TTL:
         return {"items": _PUBLIC_ETF_CACHE["items"], "cached": True}
     quotes = _naver_quotes(_PUBLIC_ETF_CODES)
-    items = {
-        code: {"price": p, "changeRate": r}
-        for code, (p, r, _cap) in quotes.items()
-    }
+    lst = [{"code": code, "price": p, "changeRate": r} for code, (p, r, _cap) in quotes.items()]
+    basis = _apply_session_fallback(lst)
+    items = {d["code"]: {"price": d["price"], "changeRate": d["changeRate"]} for d in lst}
     _PUBLIC_ETF_CACHE["items"] = items
     _PUBLIC_ETF_CACHE["ts"] = now
-    return {"items": items, "cached": False}
+    return {"items": items, "cached": False, "quoteBasis": basis}
+
+
+def _last_session_quotes_path():
+    """마지막 거래 세션 등락률 스냅샷 파일 (D드라이브 파이프라인)."""
+    from pipeline_paths import get_pipeline_paths
+
+    d = get_pipeline_paths().data_external
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "last_session_quotes.json"
+
+
+def _apply_session_fallback(items: list) -> str:
+    """장전/휴장(전 종목 등락률 0)에는 마지막 세션의 등락률로 색을 입힌다.
+
+    장중 데이터(0이 아닌 등락률 존재)면 스냅샷을 갱신하고 'today' 반환.
+    전부 0이면 스냅샷에서 등락률을 복원하고 'prevClose' 반환 — 화면에는
+    "전일 등락 기준" 배지가 뜬다. 가격은 항상 실데이터(전일 종가) 그대로.
+    """
+    rated = [it for it in items if float(it.get("price") or 0) > 0]
+    nonzero = [it for it in rated if abs(float(it.get("changeRate") or 0)) > 1e-9]
+    path = _last_session_quotes_path()
+
+    if nonzero:
+        try:
+            data = {}
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+            ratios = data.get("ratios", {})
+            for it in nonzero:
+                ratios[str(it["code"])] = float(it["changeRate"])
+            path.write_text(json.dumps({"ratios": ratios}, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+        return "today"
+
+    if not rated:
+        return "today"
+    try:
+        ratios = json.loads(path.read_text(encoding="utf-8")).get("ratios", {})
+    except Exception:
+        return "today"
+    if not ratios:
+        return "today"
+    for it in items:
+        it["changeRate"] = float(ratios.get(str(it["code"]), 0.0))
+    return "prevClose"
 
 
 def _naver_quotes(codes: list[str]) -> dict[str, tuple[float, float, float]]:
@@ -5294,7 +5344,11 @@ def public_watchlist():
     now = time.time()
     cached_items = _PUBLIC_WATCHLIST_CACHE.get("items")
     if cached_items is not None and (now - _PUBLIC_WATCHLIST_CACHE.get("ts", 0.0)) < _PUBLIC_WATCHLIST_TTL:
-        return {"items": cached_items, "cached": True}
+        return {
+            "items": cached_items,
+            "cached": True,
+            "quoteBasis": _PUBLIC_WATCHLIST_CACHE.get("basis", "today"),
+        }
 
     db: Session = apollo_db.get_session_factory()()
     try:
@@ -5346,9 +5400,11 @@ def public_watchlist():
         cap = (p * sh) if (sh > 0 and p > 0) else ncap  # 시총 = 주가 × 발행주식수(D캐시), 없으면 네이버값
         items.append({**b, "price": p, "changeRate": cr, "marketCap": cap})
 
+    basis = _apply_session_fallback(items)
     _PUBLIC_WATCHLIST_CACHE["items"] = items
+    _PUBLIC_WATCHLIST_CACHE["basis"] = basis
     _PUBLIC_WATCHLIST_CACHE["ts"] = time.time()
-    return {"items": items, "cached": False}
+    return {"items": items, "cached": False, "quoteBasis": basis}
 
 
 @app.post("/api/public/ai-request")
