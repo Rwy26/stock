@@ -2,8 +2,8 @@
 
 원칙 (2026-06-12 확정):
   1. 제외 종목은 종목별 데이터의 DB 저장(스코어/일봉/수급/뉴스/AI캐시 등)을 하지 않는다.
-  2. 제외 종목 문의 발생 시 "의견 거부"를 *발행*한다 — 요청 자체를 에러로 거부하는 것이
-     아니라, 제외 사유 태그와 원인 설명이 담긴 메시지를 정상 응답(HTTP 200)으로 내보낸다.
+  2. 제외 종목 문의 발생 시 "투자 주의" 메시지를 *발행*한다 — 요청 자체를 에러로 거부하는
+     것이 아니라, 제외 사유 태그와 원인 설명이 담긴 메시지를 정상 응답(HTTP 200)으로 내보낸다.
   3. DB에는 경량 인덱스(excluded_stocks: 코드/이름/태그/사유)만 저장해 용량 부담을 줄인다.
   4. 이 원칙은 MOON STOCK 모든 파이프라인·엔드포인트에 적용한다.
 
@@ -91,7 +91,7 @@ def sector_etf_codes() -> set[str]:
 
 
 class ExcludedStockError(Exception):
-    """제외 종목 문의에 대한 의견 거부. payload는 표준 거부 메시지."""
+    """제외 종목 문의에 대한 투자 주의 통지. payload는 표준 메시지."""
 
     def __init__(self, payload: dict):
         super().__init__(payload.get("message", "excluded stock"))
@@ -357,7 +357,7 @@ def record_quote(session: Session, quote: Any) -> list[str]:
     )
 
 
-# ─── 의견 거부 메시지 (요구사항 2) ───────────────────────────────────────────
+# ─── 투자 주의 메시지 (요구사항 2) ───────────────────────────────────────────
 
 def rejection_payload(code: str, name: str, tags: list[str], detail: str | None = None) -> dict:
     labels = [TAG_LABELS.get(t, t) for t in tags]
@@ -365,21 +365,21 @@ def rejection_payload(code: str, name: str, tags: list[str], detail: str | None 
     return {
         "ok": False,
         "excluded": True,
-        "opinion": "REFUSED",
+        "opinion": "CAUTION",
         "policy": "excluded-stock-no-opinion",
         "code": code,
         "name": name or None,
         "tags": tags,
         "reasons": [{"tag": t, "label": TAG_LABELS.get(t, t)} for t in tags],
         "detail": detail,
-        "message": f"[의견 거부] {disp} — 거래 제외 종목입니다. 분석/추천 의견을 제공하지 않습니다. 사유: {', '.join(labels)}",
+        "message": f"[투자 주의] {disp} — 거래 제외 종목입니다. 분석/추천 의견을 제공하지 않습니다. 사유: {', '.join(labels)}",
     }
 
 
 def gate(session: Session, code: str, name: str = "") -> None:
     """문의/저장 진입 게이트 — 제외 종목이면 ExcludedStockError를 발생시킨다.
 
-    이 에러는 main.py 핸들러가 HTTP 200의 '의견 거부' 메시지(사유 태그 포함)로
+    이 에러는 main.py 핸들러가 HTTP 200의 '투자 주의' 메시지(사유 태그 포함)로
     발행한다 — 요청을 에러로 거부하는 것이 아니다.
 
     인덱스에 없어도 이름/코드 기반 정적 규칙(스팩/우선주/리츠)에 걸리면 즉시 거부하고

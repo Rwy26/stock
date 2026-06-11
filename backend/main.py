@@ -109,7 +109,7 @@ app = FastAPI(title="MOON STOCK")
 
 @app.exception_handler(exclusion_engine.ExcludedStockError)
 async def _excluded_stock_handler(request: Request, exc: exclusion_engine.ExcludedStockError):
-    """제외 종목 문의 → '의견 거부' 메시지를 정상 응답(200)으로 발행.
+    """제외 종목 문의 → '투자 주의' 메시지를 정상 응답(200)으로 발행.
 
     요청 자체를 에러로 거부하지 않는다 — 사유 태그와 원인 설명이 담긴
     표준 메시지(excluded/opinion/reasons/message)를 내보내는 것이 정책이다.
@@ -3357,7 +3357,7 @@ def stock_detail(code: str, current_user=Depends(get_current_user)):
             raise HTTPException(status_code=503, detail=f"KIS 시세 조회 실패: {exc}") from exc
 
         # 실시간 시장조치 탐지: 시세 응답에 거래정지/관리종목 등 플래그가 있으면
-        # 인덱스에 등재. 조회 작동은 그대로 — 의견 거부 메시지를 응답에 함께 발행한다.
+        # 인덱스에 등재. 조회 작동은 그대로 — 투자 주의 메시지를 응답에 함께 발행한다.
         try:
             live_tags = exclusion_engine.record_quote(db, quote)
             db.commit()

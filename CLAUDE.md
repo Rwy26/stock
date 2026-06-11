@@ -29,10 +29,13 @@ endpoints directly on a single `app` object (no `APIRouter` split). Supporting m
   - `short_selling.py` — daily short-selling volume (KIS, T+1) / balance (KRX login required, T+2) ingestion into `short_selling_daily` + 3-day surge flag (`short_sell_surge_3d`) for the scoring engine's negative filter. Daily sync: `scripts/short_selling_sync.py` (scheduled task, 18:40 KST).
   - `chart_analysis.py` — AI chart analysis (OpenAI Vision / Gemini / Groq) from ticker, CSV, JSON, or screenshot.
   - `exclusion_engine.py` — **global excluded-stock policy** (single source of truth). Excluded stocks
-    (거래정지/정리매매/관리종목/투자경고·위험/단기과열/스팩/우선주/리츠/ETF/저유동성/동전주) are
-    (1) skipped by every per-stock DB write pipeline, (2) answered with a tagged "의견 거부" payload
-    (HTTP 403) on any inquiry endpoint, (3) tracked only in the lightweight `excluded_stocks` index
-    table. Buy orders are blocked, sells allowed. Sweep: `scripts/refresh_exclusions.py` or
+    (거래정지/정리매매/관리종목/스팩/우선주/리츠/비섹터 ETF/저유동성/동전주) are
+    (1) skipped by every per-stock DB write pipeline, (2) answered with a tagged "투자 주의" payload
+    *published as a normal HTTP 200 response* (the request is never error-rejected) on inquiry
+    endpoints, (3) tracked only in the lightweight `excluded_stocks` index table. **NOT excluded**
+    (store everything normally): price/overheat-driven market measures (투자주의/경고/위험, 단기과열)
+    and sector-representative ETFs (`scoring_engine.SECTOR_ETF_MAP` — hard-exempt everywhere).
+    Buy orders are blocked, sells allowed. Sweep: `scripts/refresh_exclusions.py` or
     `POST /api/admin/exclusions/refresh` (`{"kis": true}` adds market-action flags via KIS quotes —
     prefer the in-process endpoint to avoid KIS token churn with the running backend). Liquidity
     judgments hold off (no exclusion) on stale or zero-volume daily_prices data. Settings:
