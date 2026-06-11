@@ -21,6 +21,9 @@
   - 손절 이탈 확률   : 같은 국면에서 목표 도달 전 손절폭 이탈 비율
   - 표본 수·매칭 일자·차원별 현재값 vs 유사표본 평균을 함께 표기 —
     표본 30건 미만이면 "통계적 신뢰 낮음" 명시
+  - 닷컴 보조 표본(dotcomAnalogs): 1995~2002 미국 검증 데이터셋(regime_analogs)
+    에서 동일 6차원 최근접 시점들의 실제 20일 후 수익 빈도 — 한국 ~500봉에
+    없는 과열·붕괴 국면 대조용 (데이터 부재 시 error 블록, 본 확률엔 무영향)
 
 데이터 정확성 원칙: 계산 불가 항목은 None + 사유. 추정치는 표본 수와 함께 제공.
 """
@@ -318,6 +321,14 @@ def _similar_regime_prob(bars: list[dict], up_pct: float, dn_pct: float,
     e20 = _ema(closes[-120:], 20) or 0
     e60 = _ema(closes[-120:], 60) or 0
 
+    # 닷컴(1995~2002 미국) 보조 표본 — 한국 ~500봉에 없는 과열·붕괴 국면 대조.
+    # 실패해도 본 확률 계산에는 영향 없음 (데이터 폴더 부재 등 → error 블록).
+    try:
+        import regime_analogs
+        dotcom = regime_analogs.find_analogs(zc)
+    except Exception as exc:  # noqa: BLE001
+        dotcom = {"error": f"닷컴 표본 조회 실패: {type(exc).__name__}"}
+
     def _date(i: int) -> str:
         d = str(bars[i]["date"])
         return f"{d[:4]}-{d[4:6]}-{d[6:]}" if len(d) == 8 else d
@@ -343,6 +354,7 @@ def _similar_regime_prob(bars: list[dict], up_pct: float, dn_pct: float,
             for d, (name, desc) in enumerate(_REGIME_DIMS)
         ],
         "matchedDates": [_date(i) for _, i, _ in picked[:5]],
+        "dotcomAnalogs": dotcom,
     }
 
 
