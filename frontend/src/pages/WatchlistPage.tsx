@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJson } from '../lib/api'
 import { publicFetch } from '../lib/publicApi'
+import { StockReportModal } from '../components/StockReportModal'
 import { formatNumber, formatPercent } from '../lib/format'
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -315,6 +316,7 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
   const containerRef              = useRef<HTMLDivElement>(null)
   const [dims, setDims]           = useState({ w: 900, h: 620 })
   const [etfQuotes, setEtfQuotes] = useState<Record<string, { price: number; changeRate: number }>>({})
+  const [reportTarget, setReportTarget] = useState<{ code: string; name: string } | null>(null)
 
   // ETF 태그 시세 (공개 엔드포인트, 서버측 60초 캐시)
   useEffect(() => {
@@ -696,10 +698,8 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
                   key={id}
                   onMouseEnter={() => setHovered(id)}
                   onMouseLeave={() => setHovered(null)}
-                  onClick={() =>
-                    window.open(`https://finance.naver.com/item/main.naver?code=${item.code}`, '_blank', 'noreferrer')
-                  }
-                  title={`${item.name} (${item.code})  ${item.price > 0 ? formatNumber(item.price) + '원  ' : ''}${formatPercent(item.changeRate)}  점수 ${item.score}`}
+                  onClick={() => setReportTarget({ code: item.code, name: item.name })}
+                  title={`${item.name} (${item.code})  ${item.price > 0 ? formatNumber(item.price) + '원  ' : ''}${formatPercent(item.changeRate)}  점수 ${item.score} — 클릭: AI 분석 리포트`}
                   style={{
                     position: 'absolute', left: x, top: y, width: w, height: h,
                     boxSizing: 'border-box',
@@ -802,6 +802,15 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
         ))}
 
       </div>
+
+      {/* 종목 클릭 → AI 분석 리포트 */}
+      {reportTarget && (
+        <StockReportModal
+          code={reportTarget.code}
+          name={reportTarget.name}
+          onClose={() => setReportTarget(null)}
+        />
+      )}
     </>
   )
 }

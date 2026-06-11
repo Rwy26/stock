@@ -35,25 +35,42 @@ function headline(p: Dict): string {
   return `${action}${up != null ? ` · 평균 목표까지 +${up}%` : ''}`
 }
 
-// ── 자동 추세선: 스윙 고/저점 검출 → 최근 두 점 연결 ────────────────────────
-// n봉 좌우보다 높은/낮은 점 = 스윙. 마지막 두 스윙 저점 연결 = 지지 추세선,
-// 마지막 두 스윙 고점 연결 = 저항 추세선. 차트 우측 끝까지 연장.
-function autoTrendlines(closes: number[], n = 4) {
-  const highs: number[] = []
+// ── 자동 추세선: 신뢰도 최대 지지선 탐색 ────────────────────────────────────
+// 원칙: 많은 저점을 스치며 방향성을 가질수록 신뢰도가 높은 추세선이다.
+// 스윙 저점 쌍을 전수 평가 — 접촉 저점 수(±1%)가 많고 기간이 길수록 고득점,
+// 종가가 선 아래로 2% 이상 이탈한 봉이 많으면(8% 초과) 탈락.
+function supportTrendline(closes: number[], n = 4) {
   const lows: number[] = []
   for (let i = n; i < closes.length - n; i++) {
     const win = closes.slice(i - n, i + n + 1)
-    if (closes[i] === Math.max(...win)) highs.push(i)
     if (closes[i] === Math.min(...win)) lows.push(i)
   }
-  const line = (idx: number[]) => {
-    if (idx.length < 2) return null
-    const [i1, i2] = idx.slice(-2)
-    if (i2 === i1) return null
-    const slope = (closes[i2] - closes[i1]) / (i2 - i1)
-    return { i1, i2, slope, at: (x: number) => closes[i1] + slope * (x - i1) }
+  if (lows.length < 2) return null
+
+  let best: { i1: number; at: (x: number) => number; score: number } | null = null
+  for (let a = 0; a < lows.length - 1; a++) {
+    for (let b = a + 1; b < lows.length; b++) {
+      const ia = lows[a], ib = lows[b]
+      if (ib - ia < 10) continue // 너무 짧은 구간 제외
+      const slope = (closes[ib] - closes[ia]) / (ib - ia)
+      const at = (x: number) => closes[ia] + slope * (x - ia)
+      // 유효성: 선 형성 이후 종가가 선을 크게 이탈하면 추세선 자격 없음
+      let viol = 0
+      for (let i = ia; i < closes.length; i++) {
+        if (closes[i] < at(i) * 0.98) viol++
+      }
+      if (viol > (closes.length - ia) * 0.08) continue
+      // 접촉 저점 수 (선에서 ±1% 이내)
+      let touches = 0
+      for (const k of lows) {
+        if (k >= ia && Math.abs(closes[k] - at(k)) / at(k) < 0.01) touches++
+      }
+      if (touches < 2) continue
+      const score = touches * 100 + (ib - ia)
+      if (!best || score > best.score) best = { i1: ia, at, score }
+    }
   }
-  return { support: line(lows), resistance: line(highs) }
+  return best
 }
 
 // ── 핵심 차트: 종가 120봉 + 목표/손절 + 자동 추세선 + 매물대 + MTF 추세 ──────
@@ -95,9 +112,9 @@ function PriceChart({ p }: { p: Dict }) {
   const curX = toX(closes.length - 1)
   const curY = toY(cur)
 
-  // 추세선 (스윙 저점 연결, 1개) — 우측 미래 영역까지 연장.
+  // 추세선 (다점 접촉 최고 신뢰 지지선, 1개) — 우측 미래 영역까지 연장.
   // 저항·지지는 선이 아니라 ICT 매물대(FVG·거래량 존)가 담당한다.
-  const tl = autoTrendlines(closes)
+  const tlSupport = supportTrendline(closes)
   const extIdx = (closes.length - 1) * (0.92 / GOLDEN) // x≈92% 지점까지 연장
   const trendSeg = (t: { i1: number; at: (x: number) => number } | null) => {
     if (!t) return null
@@ -118,7 +135,7 @@ function PriceChart({ p }: { p: Dict }) {
       label: '추세선', color: '#a78bfa',
     }
   }
-  const supSeg = trendSeg(tl.support)
+  const supSeg = trendSeg(tlSupport)
 
   // 매물대 (MTF 일봉 거래량 프로파일) — 가격 밴드로 표시
   const dailyTf = (p.mtf?.timeframes ?? []).find((t: Dict) => t.label === '일봉')
@@ -190,6 +207,168 @@ function PriceChart({ p }: { p: Dict }) {
     return d.length === 8 ? `${d.slice(2, 4)}.${d.slice(4, 6)}` : d
   }
 
+  // 존 사각형 좌표 사전 계산 (렌더 + 라벨 배치 공용)
+  const zoneRects = zones.map((z: Dict) => ({
+    yTop: Math.max(toY(Math.min(z.priceTo, hi)), PT),
+    yBot: Math.min(toY(Math.max(z.priceFrom, lo)), H - PB),
+    main: z.volumePct === biggest,
+    pct: z.volumePct,
+  })).filter(r => r.yBot > r.yTop)
+  const fvgRects = ([
+    ...fvgBull.map((z: Dict): Dict => ({ ...z, color: '#34d399', name: 'FVG 지지' })),
+    ...fvgBear.map((z: Dict): Dict => ({ ...z, color: '#f87171', name: 'FVG 저항' })),
+  ] as Dict[]).map(z => ({
+    yTop: Math.max(toY(Math.min(z.top, hi)), PT),
+    yBot: Math.min(toY(Math.max(z.bottom, lo)), H - PB),
+    color: z.color as string,
+    name: `${z.name}${z.ceTouched ? ' (절반 충전)' : ''}`,
+  })).filter(r => r.yBot > r.yTop)
+
+  // ── 라벨 충돌 회피 엔진 ────────────────────────────────────────────────
+  // 위치를 고정하지 않고 기준선의 우/상/하/좌 후보를 순서대로 시도해 빈 자리에 배치.
+  type LabelSpec = {
+    text: string; x: number; y: number; anchor: 'start' | 'end'
+    fill: string; fs: number; weight?: number; opacity?: number
+  }
+  type Box = { x1: number; y1: number; x2: number; y2: number }
+  const boxes: Box[] = []
+  const labels: LabelSpec[] = []
+  const textW = (t: string, fs: number) => {
+    let w = 0
+    for (const ch of t) w += /[가-힣]/.test(ch) ? fs : fs * 0.62
+    return w
+  }
+  const collide = (b: Box) =>
+    boxes.some(o => b.x1 < o.x2 && b.x2 > o.x1 && b.y1 < o.y2 && b.y2 > o.y1)
+  const addLabel = (
+    text: string, fs: number, fill: string,
+    cands: Array<{ x: number; y: number; anchor: 'start' | 'end' }>,
+    opts: { weight?: number; opacity?: number } = {},
+  ) => {
+    const w = textW(text, fs)
+    for (const c of cands) {
+      const x1 = c.anchor === 'start' ? c.x : c.x - w
+      const box = { x1, x2: x1 + w, y1: c.y - fs, y2: c.y + 3 }
+      if (box.x1 >= 2 && box.x2 <= W - 2 && box.y1 >= 2 && box.y2 <= H - 2 && !collide(box)) {
+        boxes.push(box)
+        labels.push({ text, fill, fs, ...c, ...opts })
+        return c
+      }
+    }
+    // 모든 후보가 충돌 — 첫 후보 강행 (박스는 등록해 이후 라벨이 피하게)
+    const c = cands[0]
+    const x1 = c.anchor === 'start' ? c.x : c.x - w
+    boxes.push({ x1, x2: x1 + w, y1: c.y - fs, y2: c.y + 3 })
+    labels.push({ text, fill, fs, ...c, ...opts })
+    return c
+  }
+
+  // 장애물 선등록: 현재가 점 주변 + x축 날짜 행
+  boxes.push({ x1: curX - 14, y1: curY - 14, x2: curX + 14, y2: curY + 14 })
+  boxes.push({ x1: 0, y1: H - 18, x2: W, y2: H })
+
+  // 배치 우선순위: 현재가 → 평균 목표 → 손절 → 목표 사다리 → 회귀선 → 존
+  // 현재가: 빈 공간을 찾아 멀리 가도 됨 — 점에서 라벨까지 연결선을 길게 그린다.
+  const curPos = addLabel(`현재가 ${fmt(cur)}원`, 16, '#f1f5f9', [
+    { x: curX + 34, y: curY + 6, anchor: 'start' },
+    { x: curX + 90, y: curY + 6, anchor: 'start' },
+    { x: curX + 34, y: curY - 18, anchor: 'start' },
+    { x: curX + 90, y: curY - 18, anchor: 'start' },
+    { x: curX + 34, y: curY + 28, anchor: 'start' },
+    { x: curX + 90, y: curY + 28, anchor: 'start' },
+    { x: curX - 34, y: curY - 18, anchor: 'end' },
+  ], { weight: 800 })
+
+  if (target) {
+    const y = toY(target)
+    addLabel(`평균 목표 ${fmt(target)} (+${p.targets?.avgTargetUpside}%)`, 14, '#34d399', [
+      { x: W - PX, y: y - 7, anchor: 'end' },
+      { x: W - PX, y: y + 18, anchor: 'end' },
+      { x: PX + 4, y: y - 7, anchor: 'start' },
+      { x: PX + 4, y: y + 18, anchor: 'start' },
+    ], { weight: 800 })
+  }
+  if (stop) {
+    const y = toY(stop)
+    addLabel(`손절 ${fmt(stop)} (${((stop / cur - 1) * 100).toFixed(1)}%)`, 14, '#f87171', [
+      { x: W - PX, y: y + 18, anchor: 'end' },
+      { x: W - PX, y: y - 7, anchor: 'end' },
+      { x: PX + 4, y: y + 18, anchor: 'start' },
+      { x: PX + 4, y: y - 7, anchor: 'start' },
+    ], { weight: 700 })
+  }
+
+  // 목표 사다리 — 오른쪽 끝에 붙여 정렬 (선 위/아래로 회피)
+  const ladderItems = indivTargets
+    .map(t => ({ ...t, y: toY(t.price) }))
+    .filter(t => t.y > PT + 8 && t.y < H - PB - 8)
+    .sort((a, b) => a.y - b.y)
+  for (const t of ladderItems) {
+    addLabel(`${t.label} ${fmt(t.price)}`, 12, '#6ee7b7', [
+      { x: W - PX, y: t.y - 6, anchor: 'end' },
+      { x: W - PX, y: t.y + 16, anchor: 'end' },
+      { x: W * 0.8 - 6, y: t.y + 4, anchor: 'end' },
+      { x: W * 0.8 - 6, y: t.y - 9, anchor: 'end' },
+    ], { opacity: 0.9 })
+  }
+
+  // 회귀 추세선 라벨 (장/중/단기) — 선과 같은 색, 선 끝의 우/상/하
+  for (const t of trendLines) {
+    addLabel(`${t.label}${t.glyph}`, 13, t.color, [
+      { x: t.x2 + 6, y: t.y2 + 5, anchor: 'start' },
+      { x: t.x2 + 6, y: t.y2 - 10, anchor: 'start' },
+      { x: t.x2 + 6, y: t.y2 + 20, anchor: 'start' },
+      { x: t.x2 - 5, y: t.y2 - 10, anchor: 'end' },
+      { x: t.x1 - 6, y: t.y1 + 5, anchor: 'end' },
+    ], { weight: 800 })
+  }
+
+  // 존 라벨 (매물대/FVG) — 좌측 안쪽 우선, 막히면 존 위/우측
+  for (const r of zoneRects) {
+    if (!r.main) continue
+    addLabel(`매물대 ${r.pct}%`, 12, '#94a3b8', [
+      { x: PX + 4, y: r.yTop + 14, anchor: 'start' },
+      { x: PX + 4, y: r.yBot - 5, anchor: 'start' },
+      { x: W - PX - 4, y: r.yTop + 14, anchor: 'end' },
+    ])
+  }
+  for (const r of fvgRects) {
+    addLabel(r.name, 11.5, r.color, [
+      { x: PX + 4, y: r.yBot - 5, anchor: 'start' },
+      { x: PX + 4, y: r.yTop + 13, anchor: 'start' },
+      { x: PX + 4, y: r.yTop - 5, anchor: 'start' },
+      { x: PX + 4, y: r.yBot + 13, anchor: 'start' },
+    ], { opacity: 0.85 })
+  }
+
+  // '추세선' 글자 — 선과 같은 기울기로 선 위에 배치 (위치는 유동: 빈 공간 탐색)
+  let trendlineText: { x: number; y: number; deg: number } | null = null
+  if (supSeg) {
+    const dx = supSeg.x2 - supSeg.x1
+    const dy = supSeg.y2 - supSeg.y1
+    const deg = Math.atan2(dy, dx) * 180 / Math.PI
+    const len = Math.hypot(dx, dy) || 1
+    // 선에 수직으로 12px 위 오프셋
+    const offX = (dy / len) * 12
+    const offY = (-dx / len) * 12
+    for (const t of [0.42, 0.3, 0.55, 0.18, 0.68]) {
+      const x = supSeg.x1 + dx * t + offX
+      const y = supSeg.y1 + dy * t + offY
+      const w = textW('추세선', 12.5)
+      const box = { x1: x - w / 2, x2: x + w / 2, y1: y - 13, y2: y + 4 }
+      if (box.x1 >= 2 && box.x2 <= W - 2 && box.y1 >= 2 && box.y2 <= H - 2 && !collide(box)) {
+        boxes.push(box)
+        trendlineText = { x, y, deg }
+        break
+      }
+    }
+    if (!trendlineText) {
+      const x = supSeg.x1 + dx * 0.42 + offX
+      const y = supSeg.y1 + dy * 0.42 + offY
+      trendlineText = { x, y, deg }
+    }
+  }
+
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', display: 'block' }}>
       <defs>
@@ -199,117 +378,56 @@ function PriceChart({ p }: { p: Dict }) {
         </linearGradient>
       </defs>
 
-      {/* 추세선 (장기/중기/단기 회귀선 — 가격 라인 아래 레이어) */}
+      {/* 매물대 밴드 */}
+      {zoneRects.map((r, i) => (
+        <rect key={`z-${i}`} x={PX} y={r.yTop} width={W - PX * 2} height={r.yBot - r.yTop}
+          fill="#94a3b8" fillOpacity={r.main ? 0.1 : 0.055} />
+      ))}
+
+      {/* ICT FVG 존 */}
+      {fvgRects.map((r, i) => (
+        <rect key={`f-${i}`} x={PX} y={r.yTop} width={W - PX * 2} height={r.yBot - r.yTop}
+          fill={r.color} fillOpacity="0.09"
+          stroke={r.color} strokeOpacity="0.35" strokeWidth="0.7" strokeDasharray="3,3" />
+      ))}
+
+      {/* 회귀 추세선 (장/중/단기) */}
       {trendLines.map(t => (
+        <line key={t.label} x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2}
+          stroke={t.color} strokeWidth={t.width} strokeOpacity={t.op}
+          strokeDasharray={t.dash} strokeLinecap="round" />
+      ))}
+
+      {/* 평균 목표 / 손절 라인 */}
+      {target && (
+        <line x1={PX} y1={toY(target)} x2={W - PX} y2={toY(target)}
+          stroke="#34d399" strokeWidth="1.6" strokeDasharray="5,4" />
+      )}
+      {stop && (
+        <line x1={PX} y1={toY(stop)} x2={W - PX} y2={toY(stop)}
+          stroke="#f87171" strokeWidth="1.4" strokeDasharray="5,4" />
+      )}
+
+      {/* 목표 사다리 틱 */}
+      {ladderItems.map(t => (
         <g key={t.label}>
-          <line x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2}
-            stroke={t.color} strokeWidth={t.width} strokeOpacity={t.op}
-            strokeDasharray={t.dash} strokeLinecap="round" />
-          <text x={t.x2 + 5} y={t.y2 + 4} fontSize="11" fill={t.color} fontWeight="800">
-            {t.label}{t.glyph}
-          </text>
+          <line x1={W * 0.8} y1={t.y} x2={W - PX - 4} y2={t.y}
+            stroke="#6ee7b7" strokeWidth="1" strokeOpacity="0.5" strokeDasharray="2,3" />
+          <circle cx={W * 0.8} cy={t.y} r="2.2" fill="#6ee7b7" fillOpacity="0.8" />
         </g>
       ))}
 
-      {/* 매물대 밴드 */}
-      {zones.map((z: Dict, i: number) => {
-        const yTop = Math.max(toY(Math.min(z.priceTo, hi)), PT)
-        const yBot = Math.min(toY(Math.max(z.priceFrom, lo)), H - PB)
-        if (yBot <= yTop) return null
-        const main = z.volumePct === biggest
-        return (
-          <g key={i}>
-            <rect x={PX} y={yTop} width={W - PX * 2} height={yBot - yTop}
-              fill="#94a3b8" fillOpacity={main ? 0.1 : 0.055} />
-            {main && (
-              <text x={PX + 4} y={yTop + 12} fontSize="10" fill="#94a3b8">
-                매물대 {z.volumePct}%
-              </text>
-            )}
-          </g>
-        )
-      })}
-
-      {/* ICT FVG 존 — 미충전 갭 (스마트머니 매물대) */}
-      {([
-        ...fvgBull.map((z: Dict): Dict => ({ ...z, color: '#34d399', name: 'FVG 지지' })),
-        ...fvgBear.map((z: Dict): Dict => ({ ...z, color: '#f87171', name: 'FVG 저항' })),
-      ] as Dict[]).map((z, i) => {
-        const yTop = Math.max(toY(Math.min(z.top, hi)), PT)
-        const yBot = Math.min(toY(Math.max(z.bottom, lo)), H - PB)
-        if (yBot <= yTop) return null
-        return (
-          <g key={`fvg-${i}`}>
-            <rect x={PX} y={yTop} width={W - PX * 2} height={yBot - yTop}
-              fill={z.color} fillOpacity="0.09"
-              stroke={z.color} strokeOpacity="0.35" strokeWidth="0.7" strokeDasharray="3,3" />
-            <text x={PX + 4} y={yBot - 4} fontSize="9.5" fill={z.color} fillOpacity="0.8">
-              {z.name}{z.ceTouched ? ' (절반 충전)' : ''}
-            </text>
-          </g>
-        )
-      })}
-
-      {/* 평균 목표가 */}
-      {target && (
-        <>
-          <line x1={PX} y1={toY(target)} x2={W - PX} y2={toY(target)}
-            stroke="#34d399" strokeWidth="1.6" strokeDasharray="5,4" />
-          <text x={W - PX} y={toY(target) - 6} textAnchor="end" fontSize="12" fill="#34d399" fontWeight="800">
-            평균 목표 {fmt(target)} (+{p.targets?.avgTargetUpside}%)
-          </text>
-        </>
-      )}
-
-      {/* 목표가 산출 5종 — 우측 가격 사다리 (겹침 방지 정렬) */}
-      {(() => {
-        const items = indivTargets
-          .map(t => ({ ...t, y: toY(t.price) }))
-          .filter(t => t.y > PT + 8 && t.y < H - PB - 8)
-          .sort((a, b) => a.y - b.y)
-        // 라벨 겹침 방지: 위에서부터 최소 14px 간격으로 밀어내기
-        let prevY = -Infinity
-        const placed = items.map(t => {
-          const ly = Math.max(t.y, prevY + 14)
-          prevY = ly
-          return { ...t, ly }
-        })
-        return placed.map(t => (
-          <g key={t.label}>
-            <line x1={W * 0.8} y1={t.y} x2={W - PX - 4} y2={t.y}
-              stroke="#6ee7b7" strokeWidth="1" strokeOpacity="0.5" strokeDasharray="2,3" />
-            <circle cx={W * 0.8} cy={t.y} r="2.2" fill="#6ee7b7" fillOpacity="0.8" />
-            <text x={W * 0.8 - 5} y={t.ly + 3.5} textAnchor="end" fontSize="9.8" fill="#6ee7b7" fillOpacity="0.85">
-              {t.label} {fmt(t.price)}
-            </text>
-          </g>
-        ))
-      })()}
-      {/* 손절가 */}
-      {stop && (
-        <>
-          <line x1={PX} y1={toY(stop)} x2={W - PX} y2={toY(stop)}
-            stroke="#f87171" strokeWidth="1.4" strokeDasharray="5,4" />
-          <text x={W - PX} y={toY(stop) + 15} textAnchor="end" fontSize="12" fill="#f87171" fontWeight="700">
-            손절 {fmt(stop)} ({((stop / cur - 1) * 100).toFixed(1)}%)
-          </text>
-        </>
-      )}
-
       <path d={area} fill="url(#cr-area)" />
 
-      {/* 추세선 (스윙 저점 연결 — 미래 영역까지 연장) */}
+      {/* 추세선 (스윙 저점 연결) */}
       {supSeg && (
-        <g>
-          <line x1={supSeg.x1} y1={supSeg.y1} x2={supSeg.x2} y2={supSeg.y2}
-            stroke={supSeg.color} strokeWidth="1.5" strokeOpacity="0.85" />
-          <text x={supSeg.x2 + 4} y={supSeg.y2 + 4} fontSize="10.5" fill={supSeg.color}>{supSeg.label}</text>
-        </g>
+        <line x1={supSeg.x1} y1={supSeg.y1} x2={supSeg.x2} y2={supSeg.y2}
+          stroke={supSeg.color} strokeWidth="1.5" strokeOpacity="0.85" />
       )}
 
       <path d={path} fill="none" stroke="#60a5fa" strokeWidth="2.2" strokeLinejoin="round" />
 
-      {/* 현재가 — 0.618 지점에서 펄스 + 우측 설명 */}
+      {/* 현재가 — 0.618 지점 펄스 + 라벨 연결선 */}
       <circle cx={curX} cy={curY} r="5" fill="#f1f5f9" opacity="0.5">
         <animate attributeName="r" values="5;13;5" dur="1.8s" repeatCount="indefinite" />
         <animate attributeName="opacity" values="0.5;0;0.5" dur="1.8s" repeatCount="indefinite" />
@@ -317,18 +435,39 @@ function PriceChart({ p }: { p: Dict }) {
       <circle cx={curX} cy={curY} r="4.2" fill="#f1f5f9">
         <animate attributeName="opacity" values="1;0.55;1" dur="1.8s" repeatCount="indefinite" />
       </circle>
-      <line x1={curX + 8} y1={curY} x2={curX + 26} y2={curY} stroke="rgba(241,245,249,0.4)" strokeWidth="1" />
-      <text x={curX + 30} y={curY - 3} fontSize="11" fill="#94a3b8">현재가</text>
-      <text x={curX + 30} y={curY + 13} fontSize="14.5" fill="#f1f5f9" fontWeight="800">
-        {fmt(cur)}원
-      </text>
+      {/* 현재가 점 → 라벨 연결선 (라벨이 멀리 가면 길게 이어짐) */}
+      <line
+        x1={curX + 8} y1={curY}
+        x2={curPos.anchor === 'start' ? curPos.x - 5 : curPos.x + 5}
+        y2={curPos.y - 6}
+        stroke="rgba(241,245,249,0.45)" strokeWidth="1"
+      />
 
-      {/* x축 날짜 (가격 구간만) */}
-      <text x={PX} y={H - 7} fontSize="10" fill="#475569">{dlabel(0)}</text>
-      <text x={(PX + plotEnd) / 2} y={H - 7} fontSize="10" fill="#475569" textAnchor="middle">
+      {/* '추세선' — 선과 같은 색·같은 기울기로 선 위에 */}
+      {trendlineText && supSeg && (
+        <text
+          x={trendlineText.x} y={trendlineText.y}
+          textAnchor="middle" fontSize="12.5" fill={supSeg.color} fontWeight="700"
+          transform={`rotate(${trendlineText.deg.toFixed(1)} ${trendlineText.x.toFixed(1)} ${trendlineText.y.toFixed(1)})`}
+        >
+          추세선
+        </text>
+      )}
+
+      {/* 모든 라벨 (충돌 회피 배치 결과 — 최상위 레이어) */}
+      {labels.map((l, i) => (
+        <text key={i} x={l.x} y={l.y} textAnchor={l.anchor} fontSize={l.fs}
+          fill={l.fill} fontWeight={l.weight ?? 400} fillOpacity={l.opacity ?? 1}>
+          {l.text}
+        </text>
+      ))}
+
+      {/* x축 날짜 */}
+      <text x={PX} y={H - 7} fontSize="11" fill="#64748b">{dlabel(0)}</text>
+      <text x={(PX + plotEnd) / 2} y={H - 7} fontSize="11" fill="#64748b" textAnchor="middle">
         {dlabel(Math.floor(closes.length / 2))}
       </text>
-      <text x={plotEnd} y={H - 7} fontSize="10" fill="#475569" textAnchor="middle">{dlabel(closes.length - 1)}</text>
+      <text x={plotEnd} y={H - 7} fontSize="11" fill="#64748b" textAnchor="middle">{dlabel(closes.length - 1)}</text>
     </svg>
   )
 }

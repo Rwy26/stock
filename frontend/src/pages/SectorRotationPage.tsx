@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchJson } from '../lib/api'
 import { publicFetch } from '../lib/publicApi'
+import { StockReportModal } from '../components/StockReportModal'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -800,7 +801,10 @@ function MiniChart({ chg5d = 0, chg20d = 0, color, id, series }: {
 // 원형 도넛 → 3×3 사각형 그리드 (동=1위, 시계방향)
 // 각 셀: 섹터 태그 + 점수 + 생애주기 + 대표 종목 3개(14거래일 수익률)
 
-function SectorGrid({ sectors, macro }: { sectors: SectorItem[]; macro: MacroDetail }) {
+function SectorGrid({ sectors, macro, onStockClick }: {
+  sectors: SectorItem[]; macro: MacroDetail
+  onStockClick?: (code: string, name: string) => void
+}) {
   if (sectors.length < 2) return null
 
   const displayed = sectors.slice(0, 8)
@@ -957,11 +961,18 @@ function SectorGrid({ sectors, macro }: { sectors: SectorItem[]; macro: MacroDet
                       <div key={stock.code} style={{
                         display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 4,
                       }}>
-                        <span style={{
-                          fontSize: 11, color: 'rgba(241,245,249,0.78)',
-                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                          flex: 1, minWidth: 0,
-                        }}>{stock.name}</span>
+                        <span
+                          onClick={() => onStockClick?.(stock.code, stock.name)}
+                          title="클릭: AI 분석 리포트"
+                          style={{
+                            fontSize: 11, color: 'rgba(241,245,249,0.78)',
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            flex: 1, minWidth: 0,
+                            cursor: onStockClick ? 'pointer' : 'default',
+                            textDecoration: onStockClick ? 'underline dotted rgba(255,255,255,0.25)' : 'none',
+                            textUnderlineOffset: 3,
+                          }}
+                        >{stock.name}</span>
                         {today != null && (
                           <span style={{
                             fontSize: 11, fontWeight: 700, flexShrink: 0,
@@ -1031,6 +1042,7 @@ export function SectorRotationPage({ publicMode = false }: { publicMode?: boolea
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [reportTarget, setReportTarget] = useState<{ code: string; name: string } | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [stale, setStale] = useState(init.stale)
   const [nextRefreshAt, setNextRefreshAt] = useState<number>(init.savedAt ? init.savedAt + REFRESH_INTERVAL : 0)
@@ -1167,7 +1179,8 @@ export function SectorRotationPage({ publicMode = false }: { publicMode?: boolea
 
       {data && (
         <>
-          <SectorGrid sectors={data.sectors} macro={data.macroDetail} />
+          <SectorGrid sectors={data.sectors} macro={data.macroDetail}
+            onStockClick={(code, name) => setReportTarget({ code, name })} />
 
           {/* TOP 3 highlights */}
           {data.topSectors.length > 0 && (
@@ -1243,6 +1256,15 @@ export function SectorRotationPage({ publicMode = false }: { publicMode?: boolea
             ※ 매크로: Yahoo Finance(TNX/DXY/VIX) · 캐시 TTL 8시간 | 강제 갱신 시 30~60초 소요 | 투자 참고용 정보이며 투자 권유가 아닙니다
           </div>
         </>
+      )}
+
+      {/* 종목 클릭 → AI 분석 리포트 */}
+      {reportTarget && (
+        <StockReportModal
+          code={reportTarget.code}
+          name={reportTarget.name}
+          onClose={() => setReportTarget(null)}
+        />
       )}
     </div>
   )
