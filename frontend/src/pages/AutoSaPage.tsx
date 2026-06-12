@@ -409,7 +409,7 @@ export function AutoSaPage() {
                 <ul className="engine-list">
                   <li>
                     <span>엔진</span>
-                    <StatusChip on={enabled}>{enabled ? 'ON' : 'OFF'}</StatusChip>
+                    <StatusChip on={enabled ?? undefined}>{enabled ? 'ON' : 'OFF'}</StatusChip>
                   </li>
                   <li>
                     <span>오늘 거래</span>

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchJson } from '../lib/api'
 import { formatNumber, formatKRW, formatPercent } from '../lib/format'
-import type { PortfolioPosition, PortfolioResponse } from '../lib/types'
+import type { PortfolioResponse } from '../lib/types'
 
 export function PortfolioPage() {
   const [data, setData] = useState<PortfolioResponse | null>(null)

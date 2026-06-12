@@ -160,17 +160,20 @@ interface QuantLine {
   x1: number; y1: number; x2: number; y2: number   // 차트 좌표 (클립됨)
   cx1: number; cy1: number; cx2: number; cy2: number // 채널 평행선
   i1: number; i2: number                             // 데이터 인덱스
+  p1: number; p2: number                             // 앵커 가격 (교차점 계산용)
   touches: number; dur: number; score: number
   isSup: boolean; rank: number
   valNow: number; broken: boolean
   strength: '강' | '보통' | '약'
+  fadeBar?: number | null   // 이탈/돌파 시작 봉 — 이 지점부터 우측 페이드 아웃
 }
 
 // Top-N 추세선 탐색 + 차트 좌표 변환
 function qtFindLines(
   pivots: Array<{ idx: number; price: number; score: number }>,
   isSup: boolean,
-  highs: number[], lows: number[], volumes: number[], volMAs: number[], atrs: number[],
+  highs: number[], lows: number[], closes: number[],
+  volumes: number[], volMAs: number[], atrs: number[],
   topN: number, minTouches: number, atrTol: number,
   lo: number, hi: number, extIdx: number, curIdx: number,
   toX: (i: number) => number, toY: (v: number) => number,
@@ -232,8 +235,11 @@ function qtFindLines(
     }
     const chanOff = isSup ? maxDev : -maxDev
 
+    // 이탈/돌파 판정은 종가 기준 — 꼬리(저가/고가)가 선을 찔러도 종가가 지키면 유효.
+    // 걸쳐있는(테스트 중) 상태를 이탈로 오판하지 않도록 0.5% 여유폭.
     const valNow = at(curIdx)
-    const broken = isSup ? (lows[curIdx] || 0) < valNow * 0.998 : (highs[curIdx] || 0) > valNow * 1.002
+    const curClose = closes[curIdx] || 0
+    const broken = isSup ? curClose < valNow * 0.995 : curClose > valNow * 1.005
     const strength: QuantLine['strength'] =
       c.touches >= 4 || (c.touches >= 3 && c.dur >= 60) ? '강'
       : c.touches >= 3 || (c.touches >= 2 && c.dur >= 30) ? '보통'
@@ -245,6 +251,7 @@ function qtFindLines(
       cx1: toX(xs), cy1: toY(clip(ys + chanOff)),
       cx2: toX(xe), cy2: toY(clip(ye + chanOff)),
       i1: c.i1, i2: c.i2,
+      p1: c.p1, p2: c.p2,
       touches: c.touches, dur: c.dur, score: bsc,
       isSup, rank,
       valNow, broken,
@@ -336,9 +343,76 @@ function PriceChart({ p }: { p: Dict }) {
   }))
 
   // Top-3 지지선 (녹색) + 저항선 (적색)
-  const supLines = qtFindLines(plPivots, true,  highs, lows, volumes, volMAs, atrs, 3, 2, 0.5, lo, hi, extIdx, curIdx, toX, toY)
-  const resLines = qtFindLines(phPivots, false, highs, lows, volumes, volMAs, atrs, 3, 2, 0.5, lo, hi, extIdx, curIdx, toX, toY)
+  const supRaw = qtFindLines(plPivots, true,  highs, lows, closes, volumes, volMAs, atrs, 3, 2, 0.5, lo, hi, extIdx, curIdx, toX, toY)
+  const resRaw = qtFindLines(phPivots, false, highs, lows, closes, volumes, volMAs, atrs, 3, 2, 0.5, lo, hi, extIdx, curIdx, toX, toY)
+
+  // ── 생애주기: 돌파당한 추세선은 페이드 → 반대 추세 확정 시 소멸 ──────────
+  // 종가 기준 연속 이탈 run을 역산해:
+  //   · run 3봉 이상 + 현재가가 선에서 ATR×4 초과 → 선 자체 제거 (의미 상실)
+  //   · 그 전(현재가가 아직 선 부근 — 선이 하락/상승의 이유를 시각적으로 설명) → 페이드 유지
+  const lifecycle = (t: QuantLine): QuantLine | null => {
+    const m = (t.p2 - t.p1) / Math.max(t.i2 - t.i1, 1)
+    const b0 = t.p1 - m * t.i1
+    const beyond = (i: number) => {
+      const lv = m * i + b0
+      return t.isSup ? closes[i] < lv * 0.995 : closes[i] > lv * 1.005
+    }
+    if (!beyond(curIdx)) return { ...t, broken: false, fadeBar: null }
+    let bb = curIdx
+    while (bb - 1 > t.i2 && beyond(bb - 1)) bb--
+    const atr = atrs[curIdx] || 1
+    const dist = Math.abs(closes[curIdx] - (m * curIdx + b0)) / atr
+    if (curIdx - bb + 1 >= 3 && dist > 4) return null  // 소멸
+    return { ...t, broken: true, fadeBar: bb }
+  }
+  const supLines = supRaw.map(lifecycle).filter((t): t is QuantLine => t != null)
+  const resLines = resRaw.map(lifecycle).filter((t): t is QuantLine => t != null)
   const allTrendLines = [...supLines, ...resLines]
+
+  // ── 수렴 감지: 상승 지지선 ↔ 하락 저항선이 교차점을 향해 좁혀질 때 색 전이 ──
+  // 교차점(apex)이 curIdx 기준 -20 ~ +80봉 범위 내에 있으면 활성화.
+  // 지지선: 교차점 방향 끝이 붉게 물듦 (위협)
+  // 저항선: 교차점 방향 끝이 녹색으로 물듦 (돌파 기대)
+  interface ConvGrad {
+    supIdx: number; resIdx: number
+    ixBar: number   // apex bar index
+    proximity: number  // 0→1 (0=80봉 전, 1=apex)
+    supGradId: string; resGradId: string
+  }
+  const convGrads: ConvGrad[] = []
+  for (let si = 0; si < supLines.length; si++) {
+    const sup = supLines[si]
+    const mSup = (sup.p2 - sup.p1) / Math.max(sup.i2 - sup.i1, 1)
+    const bSup = sup.p1 - mSup * sup.i1
+    for (let ri = 0; ri < resLines.length; ri++) {
+      const res = resLines[ri]
+      const mRes = (res.p2 - res.p1) / Math.max(res.i2 - res.i1, 1)
+      const bRes = res.p1 - mRes * res.i1
+      // 수렴 조건: 지지선 우상향(mSup>0), 저항선 우하향(mRes<0), 교차점이 두 선 시작보다 오른쪽
+      if (mSup <= 0 || mRes >= 0) continue
+      if (Math.abs(mSup - mRes) < 1e-9) continue
+      const ixBar = (bRes - bSup) / (mSup - mRes)
+      if (ixBar < Math.max(sup.i1, res.i1)) continue
+      const barsToApex = ixBar - curIdx
+      if (barsToApex < -20 || barsToApex > 80) continue
+      const proximity = Math.max(0, Math.min(1, 1 - barsToApex / 80))
+      convGrads.push({
+        supIdx: si, resIdx: ri,
+        ixBar, proximity,
+        supGradId: `cg-sup-${si}-${ri}`,
+        resGradId: `cg-res-${si}-${ri}`,
+      })
+    }
+  }
+  // 각 라인이 속한 최강 gradient 매핑
+  const supGradMap: Record<number, ConvGrad> = {}
+  const resGradMap: Record<number, ConvGrad> = {}
+  for (const cg of convGrads) {
+    if (!supGradMap[cg.supIdx] || cg.proximity > supGradMap[cg.supIdx].proximity)
+      supGradMap[cg.supIdx] = cg
+    if (!resGradMap[cg.resIdx] || cg.proximity > resGradMap[cg.resIdx].proximity)
+      resGradMap[cg.resIdx] = cg
+  }
 
   // 현재가 방향 계산용: 가장 가까운 지지선 값
   const nearestSupVal = supLines.length ? supLines[0].valNow : null
@@ -530,112 +604,8 @@ function PriceChart({ p }: { p: Dict }) {
     ], { opacity: 0.9 })
   }
 
-  // 선분을 장애물 박스 열로 샘플링 (라벨이 차트의 중요 선을 피해 앉도록)
-  const segBoxes = (
-    s: { x1: number; y1: number; x2: number; y2: number } | null, pad = 5,
-  ): Box[] => {
-    if (!s) return []
-    const L = Math.hypot(s.x2 - s.x1, s.y2 - s.y1)
-    const n = Math.max(2, Math.round(L / 34))
-    const out: Box[] = []
-    for (let k = 0; k <= n; k++) {
-      const x = s.x1 + (s.x2 - s.x1) * (k / n)
-      const y = s.y1 + (s.y2 - s.y1) * (k / n)
-      out.push({ x1: x - pad, x2: x + pad, y1: y - pad, y2: y + pad })
-    }
-    return out
-  }
-  const hitAny = (b: Box, obst: Box[]) =>
-    obst.some(o => b.x1 < o.x2 && b.x2 > o.x1 && b.y1 < o.y2 && b.y2 > o.y1)
-
-  // 회전 라벨 헬퍼 — 선과 같은 기울기, 다른 텍스트·중요 선을 모두 피해 배치.
-  // 1차 방향(side)의 후보 위치들 → 실패 시 반대편까지 시도.
-  const placeOnLine = (
-    seg: { x1: number; y1: number; x2: number; y2: number } | null,
-    text: string,
-    tCands: number[] = [0.42, 0.3, 0.55, 0.18, 0.68],
-    side: 'above' | 'below' = 'above',
-    obstacles: Box[] = [],
-  ): { x: number; y: number; deg: number } | null => {
-    if (!seg) return null
-    const dx = seg.x2 - seg.x1
-    const dy = seg.y2 - seg.y1
-    const deg = Math.atan2(dy, dx) * 180 / Math.PI
-    const len = Math.hypot(dx, dy) || 1
-    const w = textW(text, FS)
-    // 회전된 텍스트의 실제 점유 영역 (축 정렬 근사)
-    const cos = Math.abs(dx / len), sin = Math.abs(dy / len)
-    const effW = (w * cos + FS * sin) / 2
-    const effH = (w * sin + FS * cos) / 2 + 3
-    const trySide = (sign: number): { x: number; y: number; deg: number } | null => {
-      const offX = (dy / len) * 14 * sign
-      const offY = (-dx / len) * 14 * sign
-      for (const t of tCands) {
-        const x = seg.x1 + dx * t + offX
-        const y = seg.y1 + dy * t + offY
-        const box = { x1: x - effW, x2: x + effW, y1: y - effH, y2: y + effH }
-        if (box.x1 >= 2 && box.x2 <= W - 2 && box.y1 >= 2 && box.y2 <= H - 2
-          && !collide(box) && !hitAny(box, obstacles)) {
-          boxes.push(box)
-          return { x, y, deg }
-        }
-      }
-      return null
-    }
-    const primary = side === 'above' ? 1 : -1
-    const placed = trySide(primary) ?? trySide(-primary)
-    if (placed) return placed
-    // 전부 충돌 — 1차 후보 강행하되 영역은 등록
-    const offX = (dy / len) * 14 * primary
-    const offY = (-dx / len) * 14 * primary
-    const x = seg.x1 + dx * tCands[0] + offX
-    const y = seg.y1 + dy * tCands[0] + offY
-    boxes.push({ x1: x - effW, x2: x + effW, y1: y - effH, y2: y + effH })
-    return { x, y, deg }
-  }
-
-  // ── 회전 라벨용 장애물: 가격 곡선 + 목표/손절 수평선 + 추세선들 ──────────
-  const priceObst: Box[] = []
-  for (let i = 0; i < closes.length; i += 4) {
-    const x = toX(i), y = toY(closes[i])
-    priceObst.push({ x1: x - 6, x2: x + 6, y1: y - 6, y2: y + 6 })
-  }
-  const hLineObst: Box[] = []
-  if (target) {
-    const y = toY(target)
-    hLineObst.push({ x1: PX, x2: W - PX, y1: y - 4, y2: y + 4 })
-  }
-  for (const d of stopDefs) {
-    const y = toY(d.price as number)
-    hLineObst.push({ x1: PX, x2: W - PX, y1: y - 4, y2: y + 4 })
-  }
-  // 퀀트 추세선 장애물 + 라벨 배치
-  const tlObstAll = allTrendLines.map(t => segBoxes(t))
-
-  // 강도 접두어: 강=실선 굵게, 보통=실선, 약=점선
-  const strengthLabel = (t: QuantLine) => {
-    const side = t.isSup ? '지지' : '저항'
-    const broken = t.broken ? (t.isSup ? ' (이탈)' : ' (돌파)') : ''
-    return `${t.strength} ${side}${broken}`
-  }
-  const qtLineTexts = allTrendLines.map((t, idx) => {
-    const text = strengthLabel(t)
-    const below = t.isSup  // 지지선은 선 아래 라벨
-    const obstacles = [
-      ...priceObst, ...hLineObst,
-      ...tlObstAll.filter((_, j) => j !== idx).flat(),
-    ]
-    return {
-      line: t,
-      text,
-      pos: placeOnLine(
-        t, text,
-        below ? [0.12, 0.22, 0.35, 0.48, 0.6] : [0.42, 0.3, 0.55, 0.18, 0.68],
-        below ? 'below' : 'above',
-        obstacles,
-      ),
-    }
-  })
+  // 추세선은 이름 없이 색으로만 표현 — 상승=녹색, 하락=적색.
+  // 지지·저항 명칭은 매물대(FVG·거래량 존) 라벨 전용.
 
   // 존 라벨: 세력 매집(거래량 집중) / 지지·저항(FVG) — 왼쪽 정렬, 쉬운 말
   for (const r of zoneRects) {
@@ -693,6 +663,55 @@ function PriceChart({ p }: { p: Dict }) {
           <stop offset="0%" stopColor="#60a5fa" stopOpacity="0.26" />
           <stop offset="100%" stopColor="#60a5fa" stopOpacity="0.02" />
         </linearGradient>
+
+        {/* 이탈/돌파 페이드 gradient — 자기 색(상승=녹/하락=적) 유지,
+            이탈 시작 봉부터 오른쪽으로 페이드 아웃 (선의 효력 상실 구간) */}
+        {[
+          ...supLines.map((t, i) => ({ t, id: `bo-sup-${i}`, col: '#34d399' })),
+          ...resLines.map((t, i) => ({ t, id: `bo-res-${i}`, col: '#f87171' })),
+        ].map(({ t, id, col }) => {
+          if (!t.broken || t.fadeBar == null) return null
+          const fadeX = toX(t.fadeBar)
+          const frac = Math.max(0.1, Math.min(0.95, (fadeX - t.x1) / Math.max(t.x2 - t.x1, 1)))
+          return (
+            <linearGradient key={id} id={id} gradientUnits="userSpaceOnUse"
+              x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2}>
+              <stop offset="0%" stopColor={col} stopOpacity="0.9" />
+              <stop offset={`${(frac * 100).toFixed(1)}%`} stopColor={col} stopOpacity="0.85" />
+              <stop offset="100%" stopColor={col} stopOpacity="0.04" />
+            </linearGradient>
+          )
+        })}
+
+        {/* 수렴 구간 색 전이 gradient — 지지선(녹→적) / 저항선(적→녹) */}
+        {convGrads.map(cg => {
+          const sup = supLines[cg.supIdx]
+          const res = resLines[cg.resIdx]
+          const p = cg.proximity
+          // 수렴 색 전이는 선 끝부분만 — 시작점(추세 근거 피벗)은 항상 본래 색.
+          // apex에 바짝 붙어도 최소 75%까지는 본래 색 유지 (이탈/돌파와 혼동 방지)
+          const tintStart = Math.max(0.75, 1 - p * 0.35).toFixed(3)
+          return (
+            <g key={`cg-defs-${cg.supIdx}-${cg.resIdx}`}>
+              {/* 지지선: 끝 부분이 붉게 — 선 방향(x1,y1→x2,y2) */}
+              <linearGradient id={cg.supGradId} gradientUnits="userSpaceOnUse"
+                x1={sup.x1} y1={sup.y1} x2={sup.x2} y2={sup.y2}>
+                <stop offset="0%"        stopColor="#34d399" stopOpacity="0.9" />
+                <stop offset={`${(+tintStart * 100).toFixed(1)}%`}
+                                         stopColor="#34d399" stopOpacity="0.9" />
+                <stop offset="100%"      stopColor="#f87171" stopOpacity={Math.min(0.85, p * 0.9).toFixed(2)} />
+              </linearGradient>
+              {/* 저항선: 끝 부분이 녹색으로 — 선 방향 */}
+              <linearGradient id={cg.resGradId} gradientUnits="userSpaceOnUse"
+                x1={res.x1} y1={res.y1} x2={res.x2} y2={res.y2}>
+                <stop offset="0%"        stopColor="#f87171" stopOpacity="0.85" />
+                <stop offset={`${(+tintStart * 100).toFixed(1)}%`}
+                                         stopColor="#f87171" stopOpacity="0.85" />
+                <stop offset="100%"      stopColor="#34d399" stopOpacity={Math.min(0.85, p * 0.9).toFixed(2)} />
+              </linearGradient>
+            </g>
+          )
+        })}
       </defs>
 
       {/* 매물대 밴드 */}
@@ -709,10 +728,22 @@ function PriceChart({ p }: { p: Dict }) {
       ))}
 
       {/* 퀀트 추세선 — 지지(녹) / 저항(적), 채널(점선), 강도별 굵기 */}
+      {/* 수렴 구간에서는 gradient로 색 전이 (지지선 끝 붉게, 저항선 끝 녹색) */}
       {allTrendLines.map(t => {
-        const col = t.isSup
-          ? (t.broken ? '#f87171' : '#34d399')
-          : (t.broken ? '#ef4444' : '#f87171')
+        const lineIdx = t.isSup
+          ? supLines.findIndex(s => s === t)
+          : resLines.findIndex(r => r === t)
+        const cg = t.isSup ? supGradMap[lineIdx] : resGradMap[lineIdx]
+        const convGradId = cg ? (t.isSup ? cg.supGradId : cg.resGradId) : null
+        // 돌파/이탈 gradient가 수렴 gradient보다 우선:
+        //   하락 저항선 돌파 중 → 적→녹 (상방 돌파 진행 신호)
+        //   상승 지지선 이탈 중 → 녹→적 (하방 이탈 경고)
+        const breakGradId = t.broken ? `bo-${t.isSup ? 'sup' : 'res'}-${lineIdx}` : null
+        const gradId = breakGradId ?? convGradId
+
+        const baseCol = t.isSup ? '#34d399' : '#f87171'  // 상승=녹 / 하락=적 고정
+        const col = gradId ? `url(#${gradId})` : baseCol
+        const chanCol = baseCol
         const opacity = Math.max(0.35, 0.85 - t.rank * 0.2)
         const width = Math.max(1, 3 - t.rank) * (t.strength === '강' ? 1.2 : 1)
         const dash = t.strength === '약' ? '4,4' : ''
@@ -721,13 +752,33 @@ function PriceChart({ p }: { p: Dict }) {
             {/* 채널 (1위 선만) */}
             {t.rank === 0 && (
               <line x1={t.cx1} y1={t.cy1} x2={t.cx2} y2={t.cy2}
-                stroke={col} strokeWidth="1" strokeOpacity={opacity * 0.45}
+                stroke={chanCol} strokeWidth="1" strokeOpacity={opacity * 0.45}
                 strokeDasharray="5,5" strokeLinecap="round" />
             )}
             {/* 메인 추세선 */}
             <line x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2}
               stroke={col} strokeWidth={width} strokeOpacity={opacity}
               strokeDasharray={dash} strokeLinecap="round" />
+            {/* 수렴 구간 강조: apex 근처에 반짝이는 원 */}
+            {cg && t.rank === 0 && (() => {
+              const ap = cg.proximity
+              if (ap < 0.3) return null
+              const apexX = toX(Math.min(cg.ixBar, extIdx))
+              const mLine = (t.p2 - t.p1) / Math.max(t.i2 - t.i1, 1)
+              const bLine = t.p1 - mLine * t.i1
+              const apexPrice = mLine * Math.min(cg.ixBar, curIdx + 60) + bLine
+              const apexY = toY(Math.min(Math.max(apexPrice, lo), hi))
+              return (
+                <circle cx={apexX} cy={apexY} r={5 * ap} fill="none"
+                  stroke={t.isSup ? '#f87171' : '#34d399'}
+                  strokeWidth="1.5" strokeOpacity={ap * 0.8}>
+                  <animate attributeName="r" values={`${4 * ap};${9 * ap};${4 * ap}`}
+                    dur="2s" repeatCount="indefinite" />
+                  <animate attributeName="opacity" values="0.8;0.1;0.8"
+                    dur="2s" repeatCount="indefinite" />
+                </circle>
+              )
+            })()}
           </g>
         )
       })}
@@ -784,22 +835,6 @@ function PriceChart({ p }: { p: Dict }) {
           <animate attributeName="opacity" values="1;0.12;1" dur="1.1s" repeatCount="indefinite" />
         </line>
       )}
-
-      {/* 퀀트 추세선 라벨 — 강도·방향 표기, 선과 같은 기울기 */}
-      {qtLineTexts.map(lt => lt.pos && (
-        <text
-          key={`lbl-${lt.text}-${lt.line.rank}`}
-          x={lt.pos.x} y={lt.pos.y}
-          textAnchor="middle" fontSize={FS}
-          fill={lt.line.isSup
-            ? (lt.line.broken ? '#f87171' : '#34d399')
-            : (lt.line.broken ? '#ef4444' : '#f87171')}
-          fontWeight="700"
-          transform={`rotate(${lt.pos.deg.toFixed(1)} ${lt.pos.x.toFixed(1)} ${lt.pos.y.toFixed(1)})`}
-        >
-          {lt.text}
-        </text>
-      ))}
 
       {/* 모든 라벨 (충돌 회피 배치 결과 — 최상위 레이어) */}
       {labels.map((l, i) => (
