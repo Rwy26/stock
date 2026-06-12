@@ -123,7 +123,12 @@ export function MarketCompassPage() {
         if (!r.items.length) throw new Error(`'${q}' 검색 결과 없음`)
         c = r.items[0].code
       }
-      const data = await fetchJson<StockData>(`/api/admin/stock-compass?code=${c}`)
+      const data = await fetchJson<StockData & { excluded?: boolean; message?: string }>(`/api/admin/stock-compass?code=${c}`)
+      if (data.excluded) {
+        // 거래 제외 종목 — 분석 대신 '투자 주의' 메시지 발행 (HTTP 200)
+        setSErr(data.message ?? '[투자 주의] 거래 제외 종목입니다.')
+        return
+      }
       setStock(data)
     } catch (e) {
       setSErr(e instanceof Error ? e.message : String(e))

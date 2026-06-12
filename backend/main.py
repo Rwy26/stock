@@ -1779,6 +1779,10 @@ def get_watchlist(current_user=Depends(get_current_user)):
                         return v
             return _icon_from_map(name=name, sector=sector)
 
+        # 기등록 종목이 거래 제외 상태면 '투자 주의' 정보를 항목에 동봉해 공유한다
+        excluded_map = exclusion_engine.get_exclusions(db)
+        sector_etfs = exclusion_engine.sector_etf_codes()
+
         items: list[dict] = []
         for stock_code, name, raw_tags in rows:
             try:
@@ -1787,17 +1791,21 @@ def get_watchlist(current_user=Depends(get_current_user)):
                 price, change_rate = 0, 0.0
             score = _get_latest_score_total(db, stock_code)
             sector = _load_sector_map().get(stock_code) or _extract_sector(raw_tags)
-            items.append(
-                {
-                    "name": name,
-                    "code": stock_code,
-                    "price": float(price),
-                    "changeRate": float(change_rate),
-                    "score": int(score),
-                    "sector": sector,
-                    "icon": _extract_icon(raw_tags, name=str(name or ""), sector=sector),
-                }
-            )
+            item = {
+                "name": name,
+                "code": stock_code,
+                "price": float(price),
+                "changeRate": float(change_rate),
+                "score": int(score),
+                "sector": sector,
+                "icon": _extract_icon(raw_tags, name=str(name or ""), sector=sector),
+            }
+            entry = excluded_map.get(str(stock_code))
+            if entry and str(stock_code) not in sector_etfs:
+                item["exclusion"] = exclusion_engine.rejection_payload(
+                    str(stock_code), str(name or entry["name"]), entry["tags"], entry.get("detail")
+                )
+            items.append(item)
 
         # 시총 = 주가 × 발행주식수(D캐시). 캐시 없으면 네이버 시총으로 폴백.
         try:
@@ -3216,8 +3224,9 @@ def search_stocks(
         rows = db.execute(stmt.limit(candidate_limit)).all()
 
         # 거래 제외 종목은 검색/스크린 결과에서 제거 (KIS 시세 호출 전에 차단)
-        excluded_codes = set(exclusion_engine.get_exclusions(db))
-        rows = [r for r in rows if str(r[0]) not in excluded_codes]
+        # — 단, 검색어와 일치하는 제외 종목은 아래에서 '투자 주의' 메시지로 발행한다
+        excluded_map = exclusion_engine.get_exclusions(db)
+        rows = [r for r in rows if str(r[0]) not in excluded_map]
 
         flow_map: dict[str, object] = {}
         if screen_norm == "big_buy" and rows:
@@ -3301,6 +3310,23 @@ def search_stocks(
             items = items[:30]
 
         response = {"items": items, "screen": screen_norm or None}
+
+        # 검색창 문의가 거래 제외 종목과 일치하면 '투자 주의' 메시지를 함께 발행
+        if q_norm:
+            sector_etfs = exclusion_engine.sector_etf_codes()
+            cautions: list[dict] = []
+            for ex_code, entry in excluded_map.items():
+                if ex_code in sector_etfs:
+                    continue
+                ex_name = str(entry["name"] or "")
+                if ex_code.startswith(q_norm) or (len(q_norm) >= 2 and q_norm in ex_name):
+                    cautions.append(
+                        exclusion_engine.rejection_payload(ex_code, ex_name, entry["tags"], entry.get("detail"))
+                    )
+            if cautions:
+                response["cautions"] = cautions
+                response["cautionMessage"] = cautions[0]["message"]
+
         if screen_norm == "big_buy":
             response["criteria"] = {
                 "minBigBuyScore": 58,
@@ -5372,6 +5398,19 @@ def public_ai_history():
             .order_by(models.AiAnalysisCache.analyzed_at.desc())
             .limit(50)
         ).scalars().all()
+
+        # 거래 제외 종목이면 '투자 주의' 정보 동봉 (이력 목록에서도 주의 공유)
+        excluded_map = exclusion_engine.get_exclusions(db)
+        sector_etfs = exclusion_engine.sector_etf_codes()
+
+        def _item_exclusion(item_code: str, item_name: str | None):
+            entry = excluded_map.get(str(item_code))
+            if entry is None or str(item_code) in sector_etfs:
+                return None
+            return exclusion_engine.rejection_payload(
+                str(item_code), str(item_name or entry["name"]), entry["tags"], entry.get("detail")
+            )
+
         return {
             "items": [
                 {
@@ -5389,6 +5428,7 @@ def public_ai_history():
                         isinstance(r.result_json, dict)
                         and r.result_json.get("source") == "market-compass-12stage"
                     ),
+                    "exclusion": _item_exclusion(r.stock_code, r.stock_name),
                 }
                 for r in rows
             ]
@@ -5399,19 +5439,43 @@ def public_ai_history():
 
 @app.get("/api/public/ai-history/{code}")
 def public_ai_history_detail(code: str):
-    """공개 AI 분석 상세 (뉴스레터 리포트 데이터)."""
+    """공개 AI 분석 상세 (뉴스레터 리포트 데이터).
+
+    거래 제외 종목이면 인덱스의 '투자 주의' 정보를 exclusion 필드로 동봉한다.
+    리포트가 없어도 제외 종목이면 404 대신 주의 정보만 담아 200으로 응답한다
+    (AI 리포트 모달이 사유를 표시할 수 있도록).
+    """
     if apollo_db is None or models is None:
         raise HTTPException(status_code=500, detail="DB module not available")
+    stock_code = code.strip()
     db: Session = apollo_db.get_session_factory()()
     try:
+        # 제외 인덱스 조회 (섹터 대표 ETF는 주의 대상 아님)
+        exclusion_payload = None
+        entry = exclusion_engine.get_entry(db, stock_code)
+        if entry is not None and stock_code not in exclusion_engine.sector_etf_codes():
+            exclusion_payload = exclusion_engine.rejection_payload(
+                stock_code, entry["name"], entry["tags"], entry.get("detail")
+            )
+
         row = db.execute(
             select(models.AiAnalysisCache).where(
-                models.AiAnalysisCache.stock_code == code.strip()
+                models.AiAnalysisCache.stock_code == stock_code
             )
         ).scalar_one_or_none()
         if row is None:
+            if exclusion_payload is not None:
+                return {
+                    "code": stock_code,
+                    "name": exclusion_payload.get("name"),
+                    "signal": None,
+                    "confidence": None,
+                    "analyzedAt": None,
+                    "result_json": None,
+                    "exclusion": exclusion_payload,
+                }
             raise HTTPException(status_code=404, detail="분석 이력 없음")
-        return {
+        response = {
             "code": row.stock_code,
             "name": row.stock_name,
             "signal": row.signal,
@@ -5419,6 +5483,9 @@ def public_ai_history_detail(code: str):
             "analyzedAt": row.analyzed_at.isoformat() if row.analyzed_at else None,
             "result_json": row.result_json,
         }
+        if exclusion_payload is not None:
+            response["exclusion"] = exclusion_payload
+        return response
     finally:
         db.close()
 
@@ -5604,16 +5671,26 @@ def public_watchlist():
                         return v
             return _icon_from_map(name=name, sector=sector)
 
+        # 거래 제외 종목이면 '투자 주의' 정보를 공개 화면에도 동일하게 공유
+        excluded_map = exclusion_engine.get_exclusions(db)
+        sector_etfs = exclusion_engine.sector_etf_codes()
+
         base: list[dict] = []
         for code, name, raw_tags in rows:
             sector = _load_sector_map().get(code) or _extract_sector(raw_tags)
-            base.append({
+            row_item = {
                 "name": name,
                 "code": code,
                 "score": int(_get_latest_score_total(db, code)),
                 "sector": sector,
                 "icon": _extract_icon(raw_tags, name=str(name or ""), sector=sector),
-            })
+            }
+            entry = excluded_map.get(str(code))
+            if entry and str(code) not in sector_etfs:
+                row_item["exclusion"] = exclusion_engine.rejection_payload(
+                    str(code), str(name or entry["name"]), entry["tags"], entry.get("detail")
+                )
+            base.append(row_item)
     finally:
         db.close()
 

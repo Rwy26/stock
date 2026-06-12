@@ -41,6 +41,16 @@ def _admin_profile(s):
     return s.execute(select(models.KisProfile).where(models.KisProfile.user_id == 1)).scalar_one_or_none()
 
 
+def _append_log(logf: Path, lines: list[str]) -> None:
+    try:
+        logf.parent.mkdir(parents=True, exist_ok=True)
+        with logf.open("a", encoding="utf-8") as f:
+            for line in lines:
+                f.write(line + "\n")
+    except Exception:
+        pass
+
+
 def main() -> int:
     days = 30
     if "--days" in sys.argv:
@@ -50,6 +60,9 @@ def main() -> int:
             pass
 
     now = datetime.now()
+    logf = Path(__file__).resolve().parents[1] / "logs" / "short-selling-sync.log"
+    _append_log(logf, [f"[{now.isoformat(timespec='seconds')}] START days={days}"])
+
     s = apollo_db.get_session_factory()()
     try:
         codes = _all_codes(s)
@@ -62,31 +75,43 @@ def main() -> int:
             pass
         prof = _admin_profile(s)
         if not codes:
-            print("stocks 테이블 비어 있음 — 종료")
+            msg = "stocks 테이블 비어 있음 — 종료"
+            print(msg)
+            _append_log(logf, [f"[{now.isoformat(timespec='seconds')}] ERROR {msg}"])
             return 1
         if prof is None or not prof.app_key:
-            print("관리자 KIS 프로필 없음 — 종료")
+            msg = "관리자 KIS 프로필 없음 — 종료"
+            print(msg)
+            _append_log(logf, [f"[{now.isoformat(timespec='seconds')}] ERROR {msg}"])
             return 1
 
         # 1. KIS 공매도 거래량/비중
-        kis_ok, kis_rows, kis_failed = short_selling.sync_kis_short_sale(
-            s, codes,
-            app_key=str(prof.app_key),
-            app_secret=str(prof.app_secret),
-            is_paper=False,
-            live_base_url=settings.kis_live_base_url,
-            paper_base_url=settings.kis_paper_base_url,
-            days=days,
-        )
+        try:
+            kis_ok, kis_rows, kis_failed = short_selling.sync_kis_short_sale(
+                s, codes,
+                app_key=str(prof.app_key),
+                app_secret=str(prof.app_secret),
+                is_paper=False,
+                live_base_url=settings.kis_live_base_url,
+                paper_base_url=settings.kis_paper_base_url,
+                days=days,
+            )
+        except Exception as exc:
+            _append_log(logf, [f"[{now.isoformat(timespec='seconds')}] CRASH sync_kis_short_sale: {exc}"])
+            raise
 
         # 2. KRX 잔고 (자격증명 있을 때만) + 교차검증
         end = date.today()
         start = end - timedelta(days=days)
         if short_selling.krx_credentials_available():
-            krx_ok, krx_rows, krx_failed, mismatches = short_selling.sync_krx_balance(
-                s, codes, start=start, end=end,
-            )
-            krx_note = f" krx(ok={krx_ok} rows={krx_rows} fail={len(krx_failed)} mismatch={len(mismatches)})"
+            try:
+                krx_ok, krx_rows, krx_failed, mismatches = short_selling.sync_krx_balance(
+                    s, codes, start=start, end=end,
+                )
+                krx_note = f" krx(ok={krx_ok} rows={krx_rows} fail={len(krx_failed)} mismatch={len(mismatches)})"
+            except Exception as exc:
+                _append_log(logf, [f"[{now.isoformat(timespec='seconds')}] CRASH sync_krx_balance: {exc}"])
+                raise
         else:
             mismatches = []
             krx_note = " krx(SKIP — KRX_ID/KRX_PW 미설정, 잔고 미수집)"
@@ -100,17 +125,8 @@ def main() -> int:
         f"fail={len(kis_failed)}){krx_note} table_total={total_rows}"
     )
 
-    logf = Path(__file__).resolve().parents[1] / "logs" / "short-selling-sync.log"
-    logf.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with logf.open("a", encoding="utf-8") as f:
-            f.write(header + "\n")
-            for c in kis_failed:
-                f.write(f"   KIS-FAIL {c}\n")
-            for m in mismatches:
-                f.write(f"   {m}\n")
-    except Exception:
-        pass
+    lines = [header] + [f"   KIS-FAIL {c}" for c in kis_failed] + [f"   {m}" for m in mismatches]
+    _append_log(logf, lines)
 
     print(header)
     for c in kis_failed[:20]:

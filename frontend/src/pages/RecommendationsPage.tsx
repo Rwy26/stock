@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchJson } from '../lib/api'
+import type { OkOrCaution } from '../lib/exclusion'
 import { formatNumber, formatPercent } from '../lib/format'
 
 type RecommendationItem = {
@@ -329,12 +330,17 @@ export function RecommendationsPage() {
                           title={alreadyAdded ? '이미 관심종목에 추가됨' : '관심종목에 추가'}
                           onClick={() => {
                             setBusyCode(item.code)
-                            fetchJson<{ ok: boolean }>('/api/watchlist', {
+                            fetchJson<OkOrCaution>('/api/watchlist', {
                               method: 'POST',
                               headers: { 'Content-Type': 'application/json' },
                               body: JSON.stringify({ code: item.code }),
                             })
-                              .then(() => {
+                              .then((resp) => {
+                                if (resp.excluded) {
+                                  // 거래 제외 종목 — 등록 대신 '투자 주의' 메시지 발행
+                                  window.alert(resp.message ?? '[투자 주의] 거래 제외 종목입니다.')
+                                  return
+                                }
                                 setWatchCodes((prev) => {
                                   const next = new Set(prev)
                                   next.add(item.code)

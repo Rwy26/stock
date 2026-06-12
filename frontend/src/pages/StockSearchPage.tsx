@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchJson } from '../lib/api'
+import { CAUTION_BANNER_STYLE, type ExclusionInfo, type OkOrCaution } from '../lib/exclusion'
 import { formatNumber, formatPercent } from '../lib/format'
 
 type StockRow = {
@@ -12,6 +13,8 @@ type StockRow = {
 
 type SearchResponse = {
   items: StockRow[]
+  cautions?: ExclusionInfo[]
+  cautionMessage?: string
 }
 
 type WatchlistResponse = {
@@ -26,6 +29,7 @@ type StockDetail = StockRow & {
     growth: number
     tech: number
   }
+  exclusion?: ExclusionInfo
 }
 
 type ScreenKey = '' | 'leading' | 'big_buy' | 'bottom_escape' | 'crash_risk'
@@ -90,8 +94,10 @@ export function StockSearchPage() {
   const [sort, setSort] = useState('관련도')
   const [screen, setScreen] = useState<ScreenKey>('')
   const [rows, setRows] = useState<StockRow[]>([])
+  const [cautions, setCautions] = useState<ExclusionInfo[]>([])
   const [selected, setSelected] = useState<StockDetail | null>(null)
   const [watchlistBusy, setWatchlistBusy] = useState(false)
+  const [watchMessage, setWatchMessage] = useState<string | null>(null)
   const [watchCodes, setWatchCodes] = useState<Set<string>>(new Set())
 
   const activeScreen = SCREENS.find(s => s.key === screen) ?? null
@@ -102,6 +108,7 @@ export function StockSearchPage() {
       .then((payload) => {
         if (cancelled) return
         setRows(payload.items)
+        setCautions(payload.cautions ?? [])
         if (!selected && payload.items.length > 0) {
           // Default to first item for the detail panel.
           void fetchJson<StockDetail>(`/api/stocks/${encodeURIComponent(payload.items[0].code)}`).then((detail) => {
@@ -121,8 +128,14 @@ export function StockSearchPage() {
   useEffect(() => {
     const handle = window.setTimeout(() => {
       fetchJson<SearchResponse>(`/api/stocks/search?q=${encodeURIComponent(q)}&market=${encodeURIComponent(market)}&sort=${encodeURIComponent(sort)}&screen=${encodeURIComponent(screen)}`)
-        .then((payload) => setRows(payload.items))
-        .catch(() => setRows([]))
+        .then((payload) => {
+          setRows(payload.items)
+          setCautions(payload.cautions ?? [])
+        })
+        .catch(() => {
+          setRows([])
+          setCautions([])
+        })
     }, 200)
     return () => window.clearTimeout(handle)
   }, [q, market, sort, screen])
@@ -259,6 +272,20 @@ export function StockSearchPage() {
             </label>
           </div>
           <div className="divider"></div>
+
+          {/* 거래 제외 종목 검색 시 '투자 주의' 메시지 발행 */}
+          {cautions.map((c) => (
+            <div key={`caution-${c.code}`} style={CAUTION_BANNER_STYLE}>
+              <span style={{ fontSize: 15, lineHeight: 1 }}>⚠️</span>
+              <div>
+                <b>{c.message}</b>
+                {c.detail && (
+                  <div style={{ color: 'rgba(251,191,36,0.75)', marginTop: 2 }}>{c.detail}</div>
+                )}
+              </div>
+            </div>
+          ))}
+
           <div className="table-wrap">
             <table>
               <thead>
@@ -282,6 +309,7 @@ export function StockSearchPage() {
                         className="btn secondary"
                         type="button"
                         onClick={() => {
+                          setWatchMessage(null)
                           fetchJson<StockDetail>(`/api/stocks/${encodeURIComponent(row.code)}`)
                             .then((detail) => setSelected(detail))
                             .catch(() => setSelected(null))
@@ -302,6 +330,20 @@ export function StockSearchPage() {
             <h3>종목 상세</h3>
             <p className="subtle">현재가/등락률, 일봉 차트, 14개 지표 점수</p>
           </div>
+
+          {/* 선택 종목이 거래 제외 상태면 '투자 주의' 공유 */}
+          {selected?.exclusion && (
+            <div style={CAUTION_BANNER_STYLE}>
+              <span style={{ fontSize: 15, lineHeight: 1 }}>⚠️</span>
+              <div>
+                <b>{selected.exclusion.message}</b>
+                {selected.exclusion.detail && (
+                  <div style={{ color: 'rgba(251,191,36,0.75)', marginTop: 2 }}>{selected.exclusion.detail}</div>
+                )}
+              </div>
+            </div>
+          )}
+
           <ul className="engine-list">
             <li>
               <span>종목</span>
@@ -365,12 +407,18 @@ export function StockSearchPage() {
                 onClick={() => {
                   if (!selected) return
                   setWatchlistBusy(true)
-                  fetchJson<{ ok: boolean }>('/api/watchlist', {
+                  setWatchMessage(null)
+                  fetchJson<OkOrCaution>('/api/watchlist', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ code: selected.code }),
                   })
-                    .then(() => {
+                    .then((resp) => {
+                      if (resp.excluded) {
+                        // 거래 제외 종목 — 등록 대신 '투자 주의' 메시지 발행
+                        setWatchMessage(resp.message ?? '[투자 주의] 거래 제외 종목입니다.')
+                        return
+                      }
                       setWatchCodes((prev) => {
                         const next = new Set(prev)
                         next.add(selected.code)
@@ -385,6 +433,12 @@ export function StockSearchPage() {
               >
                 {selectedAlreadyAdded ? 'v 관심 추가됨' : '☆ 관심 추가'}
               </button>
+              {watchMessage && (
+                <div style={CAUTION_BANNER_STYLE}>
+                  <span style={{ fontSize: 15, lineHeight: 1 }}>⚠️</span>
+                  <div><b>{watchMessage}</b></div>
+                </div>
+              )}
               <p className="hint" style={{ marginTop: 10 }}>
                 점수 상세는 지표별로 확장 예정
               </p>

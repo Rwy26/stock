@@ -1,8 +1,10 @@
 /* 종목 이름 클릭 → AI 분석 리포트 모달.
    데이터: /api/public/ai-history/{code} (인증 불필요 — 관리자·게스트 공용)
-   리포트가 없으면 안내 + 네이버 시세 링크. */
+   리포트가 없으면 안내 + 네이버 시세 링크.
+   거래 제외 종목이면 exclusion 필드(투자 주의)가 동봉된다 — 리포트 유무와 무관하게 표시. */
 
 import { useEffect, useState } from 'react'
+import { CAUTION_BANNER_STYLE, type ExclusionInfo } from '../lib/exclusion'
 import { publicFetch } from '../lib/publicApi'
 import { CompassReport } from './CompassReport'
 
@@ -12,6 +14,7 @@ type Detail = {
   signal: string | null
   analyzedAt: string | null
   result_json: Record<string, unknown> | null
+  exclusion?: ExclusionInfo | null
 }
 
 export function StockReportModal({
@@ -64,6 +67,19 @@ export function StockReportModal({
           </p>
         )}
 
+        {/* 거래 제외 종목 — 인덱스의 '투자 주의' 정보 표시 (리포트 유무 무관) */}
+        {state !== 'loading' && detail?.exclusion && (
+          <div style={{ ...CAUTION_BANNER_STYLE, marginTop: 14 }}>
+            <span style={{ fontSize: 15, lineHeight: 1 }}>⚠️</span>
+            <div>
+              <b>{detail.exclusion.message}</b>
+              {detail.exclusion.detail && (
+                <div style={{ color: 'rgba(251,191,36,0.75)', marginTop: 2 }}>{detail.exclusion.detail}</div>
+              )}
+            </div>
+          </div>
+        )}
+
         {state === 'ok' && isCompass && (
           <CompassReport data={detail!.result_json as Record<string, never>} />
         )}
@@ -72,10 +88,14 @@ export function StockReportModal({
           <div style={{ textAlign: 'center', padding: '26px 8px' }}>
             <h3 style={{ marginBottom: 8 }}>{name ?? detail?.name ?? code}</h3>
             <p style={{ color: '#94a3b8', fontSize: 13.5, lineHeight: 1.7 }}>
-              아직 이 종목의 AI 분석이 없습니다.
+              {detail?.exclusion
+                ? '거래 제외 종목은 AI 분석을 수행하지 않습니다.'
+                : '아직 이 종목의 AI 분석이 없습니다.'}
               <br />
               <span style={{ color: '#64748b', fontSize: 12.5 }}>
-                매일 밤 9시 전 종목 자동 분석이 돌고 나면 여기서 바로 볼 수 있습니다.
+                {detail?.exclusion
+                  ? '제외 사유가 해소되면 자동 분석 대상에 다시 포함됩니다.'
+                  : '매일 밤 9시 전 종목 자동 분석이 돌고 나면 여기서 바로 볼 수 있습니다.'}
               </span>
             </p>
             <a

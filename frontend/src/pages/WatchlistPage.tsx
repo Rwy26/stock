@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchJson } from '../lib/api'
 import { publicFetch } from '../lib/publicApi'
 import { StockReportModal } from '../components/StockReportModal'
+import { CAUTION_BANNER_STYLE, type ExclusionInfo, type OkOrCaution } from '../lib/exclusion'
 import { formatNumber, formatPercent } from '../lib/format'
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -9,10 +10,11 @@ type WatchItem = {
   name: string; code: string; price: number
   changeRate: number; score: number; sector: string; icon?: string
   marketCap?: number
+  exclusion?: ExclusionInfo   // 거래 제외 종목이면 '투자 주의' 정보 동봉
 }
 type WatchlistResponse = { items: WatchItem[]; quoteBasis?: string }
 type StockRow = { name: string; code: string; price: number; changeRate: number; score: number }
-type SearchResponse = { items: StockRow[] }
+type SearchResponse = { items: StockRow[]; cautions?: ExclusionInfo[]; cautionMessage?: string }
 type TRect = { id: string; x: number; y: number; w: number; h: number }
 
 const WATCHLIST_CACHE_KEY = 'moon-watchlist-cache-v1'
@@ -299,6 +301,7 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
   const [busyCode, setBusyCode]   = useState<string | null>(null)
   const [q, setQ]                 = useState('')
   const [searchRows, setSearchRows] = useState<StockRow[]>([])
+  const [searchCaution, setSearchCaution] = useState<string | null>(null)
   const [addBusyCode, setAddBusyCode] = useState<string | null>(null)
   const [showSearch, setShowSearch]   = useState(false)
   const [hovered, setHovered]     = useState<string | null>(null)
@@ -382,11 +385,15 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
 
   // Debounced search
   useEffect(() => {
-    if (!q.trim()) { setSearchRows([]); return }
+    if (!q.trim()) { setSearchRows([]); setSearchCaution(null); return }
     const h = setTimeout(() => {
       fetchJson<SearchResponse>(
         `/api/stocks/search?q=${encodeURIComponent(q)}&market=ALL&sort=${encodeURIComponent('관련도')}`
-      ).then(p => setSearchRows(p.items.slice(0, 8))).catch(() => setSearchRows([]))
+      ).then(p => {
+        setSearchRows(p.items.slice(0, 8))
+        // 거래 제외 종목 문의 시 '투자 주의' 메시지 발행
+        setSearchCaution(p.cautionMessage ?? null)
+      }).catch(() => { setSearchRows([]); setSearchCaution(null) })
     }, 200)
     return () => clearTimeout(h)
   }, [q])
@@ -530,6 +537,12 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
               />
             </label>
           </div>
+          {searchCaution && (
+            <div style={CAUTION_BANNER_STYLE}>
+              <span style={{ fontSize: 15, lineHeight: 1 }}>⚠️</span>
+              <div><b>{searchCaution}</b></div>
+            </div>
+          )}
           {searchRows.length > 0 && (
             <table style={{ fontSize: '0.82rem', width: '100%' }}>
               <tbody>
@@ -548,11 +561,18 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
                           disabled={already || addBusyCode === row.code}
                           onClick={() => {
                             setAddBusyCode(row.code)
-                            fetchJson<{ ok: boolean }>('/api/watchlist', {
+                            fetchJson<OkOrCaution>('/api/watchlist', {
                               method: 'POST',
                               headers: { 'Content-Type': 'application/json' },
                               body: JSON.stringify({ code: row.code }),
-                            }).then(() => { refresh(); setQ('') }).finally(() => setAddBusyCode(null))
+                            }).then((resp) => {
+                              if (resp.excluded) {
+                                // 거래 제외 종목 — 등록 대신 '투자 주의' 메시지 발행
+                                setSearchCaution(resp.message ?? '[투자 주의] 거래 제외 종목입니다.')
+                                return
+                              }
+                              refresh(); setQ('')
+                            }).finally(() => setAddBusyCode(null))
                           }}
                         >
                           {already ? '추가됨' : '추가'}
@@ -699,7 +719,10 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
                   onMouseEnter={() => setHovered(id)}
                   onMouseLeave={() => setHovered(null)}
                   onClick={() => setReportTarget({ code: item.code, name: item.name })}
-                  title={`${item.name} (${item.code})  ${item.price > 0 ? formatNumber(item.price) + '원  ' : ''}${formatPercent(item.changeRate)}  점수 ${item.score} — 클릭: AI 분석`}
+                  title={
+                    `${item.name} (${item.code})  ${item.price > 0 ? formatNumber(item.price) + '원  ' : ''}${formatPercent(item.changeRate)}  점수 ${item.score} — 클릭: AI 분석`
+                    + (item.exclusion ? `\n${item.exclusion.message}${item.exclusion.detail ? `\n${item.exclusion.detail}` : ''}` : '')
+                  }
                   style={{
                     position: 'absolute', left: x, top: y, width: w, height: h,
                     boxSizing: 'border-box',
@@ -714,6 +737,27 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
                     alignItems: 'center', justifyContent: 'center',
                   }}
                 >
+                  {/* 거래 제외 종목 — '투자 주의' 뱃지 (툴팁에 사유 표시) */}
+                  {item.exclusion && showTiny && (
+                    <span
+                      style={{
+                        position: 'absolute', top: 2, left: 2,
+                        fontSize: w >= 62 ? '0.66rem' : '0.56rem',
+                        lineHeight: 1,
+                        padding: '1px 4px',
+                        background: 'rgba(251,191,36,0.18)',
+                        border: '1px solid rgba(251,191,36,0.5)',
+                        borderRadius: 3,
+                        color: '#fbbf24',
+                        fontWeight: 800,
+                        zIndex: 4,
+                        pointerEvents: 'none',
+                      }}
+                    >
+                      ⚠{w >= 84 ? ' 투자 주의' : ''}
+                    </span>
+                  )}
+
                   {/* Hover: delete button */}
                   {isHov && !publicMode && (
                     <button
