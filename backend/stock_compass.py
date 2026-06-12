@@ -60,6 +60,43 @@ def _stock_news(code: str, sector: Optional[str], limit: int = 8) -> list[dict]:
         return []
 
 
+_ETF_PREFIXES = ("KODEX", "TIGER", "KBSTAR", "ARIRANG", "KINDEX", "SOL ", "ACE ", "HANARO", "KOSEF", "TIMEFOLIO")
+
+def _is_etf(code: str, name: str) -> bool:
+    if any(name.upper().startswith(p.upper()) for p in _ETF_PREFIXES):
+        return True
+    # 코드가 알파벳으로 시작하면 해외 ETF
+    if code and code[0].isalpha():
+        return True
+    return False
+
+
+def _etf_holdings(code: str) -> list[dict]:
+    """ETF 구성종목 상위 10개 — pykrx PDF (KRX 로그인 필요)."""
+    try:
+        from pykrx import stock as krx_stock
+        df = krx_stock.get_etf_portfolio_deposit_file(code)
+        if df is None or df.empty:
+            return []
+        # 컬럼: [종목명, 수량, 금액, 시가총액, 비중]
+        df = df.reset_index()
+        cols = df.columns.tolist()
+        # 인덱스=티커, 컬럼 순서: 종목명(0), 수량(1), 금액(2), 시가총액(3), 비중(4)
+        holdings = []
+        for _, row in df.iterrows():
+            ticker = str(row.iloc[0]) if len(row) > 0 else ""  # 티커
+            name_val = str(row.iloc[1]) if len(row) > 1 else ""  # 종목명
+            weight = float(row.iloc[5]) if len(row) > 5 else 0.0  # 비중%
+            if not ticker or ticker == "nan":
+                continue
+            holdings.append({"code": ticker.zfill(6), "name": name_val, "weight": round(weight, 2)})
+        # 비중 내림차순 상위 10개
+        holdings.sort(key=lambda x: -x["weight"])
+        return holdings[:10]
+    except Exception:
+        return []
+
+
 def _stock_sector(code: str) -> Optional[str]:
     """sector_classification.json 에서 종목의 섹터."""
     try:
@@ -139,6 +176,14 @@ _SYSTEM_PROMPT = """당신은 월가 헤지펀드 PM, 글로벌 매크로 전략
 매칭 국면 : (dotcomAnalogs.phaseDistribution — 예: 과열기 12건 · 붕괴기 5건)
 당시 기록 : (dotcomCasebook 의 해당 국면 — 나스닥 변화·대표 P/E·실제 20일 후 분포 인용)
 시사점 : (현재 종목 판단에 주는 경고 또는 지지 — 1~2문장, 다른 시장·시대임을 명시)
+
+---
+
+# ETF 구성종목 (etfHoldings 제공 시에만 — 일반 종목은 이 섹션 생략)
+상위 구성종목 : (etfHoldings 의 종목명·비중 상위 5개를 표로 정리.
+               합산 비중이 50% 이상이면 "소수 종목 집중형", 이하면 "분산형"으로 명시)
+ETF 특성 : (추종 지수·섹터·테마 + 현재 테마 사이클 내 포지션)
+주요 구성종목 모멘텀 : (상위 3개 종목의 현재 흐름을 1~2줄로 — 시황 나침반 섹터 데이터 활용)
 
 ---
 
@@ -311,6 +356,13 @@ def analyze_stock(code: str, with_ai: bool = True) -> dict:
         "recentNews": _stock_news(code, sector),  # 모멘텀 판정 근거 (최근 7일)
         "composite": composite,
     }
+
+    # ETF 구성종목 — ETF로 판별되면 상위 10개 주입
+    stock_name = targets.get("name", code)
+    if _is_etf(code, stock_name or ""):
+        holdings = _etf_holdings(code)
+        if holdings:
+            context["etfHoldings"] = holdings
 
     # 닷컴 사례집 — 유사 국면 매칭이 있을 때만 해당 국면 검증 기록 주입 (실패 무영향)
     try:

@@ -10,6 +10,7 @@ type GNode = {
   code: string; name: string; sector: string
   cap: number; capNorm: number; score: number
   signal: string | null; hasReport: boolean; chg1d: number
+  aligned?: boolean; alignStr?: number; isEtf?: boolean; leader?: boolean
   x: number; y: number; vx: number; vy: number
 }
 type GEdge = { a: number; b: number; w: number }
@@ -36,9 +37,9 @@ function chgColor(chg: number): string {
   return `rgb(${Math.round(100 + t * 75)},${Math.round(116 - t * 36)},${Math.round(139 - t * 59)})`
 }
 
-// 시총 → 반지름 (비선형: 대형주 강조)
+// 시총 → 반지름 (지수 0.95: 거의 선형 → 시총 격차가 크기로 직결)
 function nodeRadius(capNorm: number): number {
-  return 3 + Math.pow(capNorm, 0.65) * 22  // 범위 3px(소형) ~ 25px(대형)
+  return 2.5 + Math.pow(capNorm, 0.95) * 31  // 범위 2.5px(소형) ~ 33.5px(대형)
 }
 
 // 종목명 표시 오버라이드 (길거나 어색한 이름 → 짧은 커스텀 레이블)
@@ -233,17 +234,78 @@ export function PublicAiHistoryPage() {
               }
             }
 
-            // ── 스프링 (유기적 호흡) ──
+            // ── 스프링 (유기적 호흡 + 질량 비대칭 힘 전달) ──
+            // 가벼운 노드(밴더)가 무거운 노드(주도주) 쪽으로 더 많이 끌려감 —
+            // 엣지 가중치 w가 인과 강도, 질량비가 힘 전달 방향을 결정
             for (const e of g.edges) {
               const na = g.nodes[e.a], nb = g.nodes[e.b]
               const dx = nb.x - na.x, dy = nb.y - na.y
               const d = Math.max(Math.sqrt(dx * dx + dy * dy), 1)
               const breathPhase = (e.a * 1.618 + e.b * 0.927) % (Math.PI * 2)
               const L = 80 + (1 - e.w) * 200 + Math.sin(t * 0.35 + breathPhase) * 5
-              const boost = na.sector === nb.sector ? (g.sectorBoost[na.sector] ?? 1) : 1
+              // 같은 섹터 스프링 강화: 기후 boost × 고정 1.6배
+              const boost = na.sector === nb.sector ? (g.sectorBoost[na.sector] ?? 1) * 1.6 : 1
               const f = 0.006 * e.w * boost * (d - L) * a
-              na.vx += (dx / d) * f; na.vy += (dy / d) * f
-              nb.vx -= (dx / d) * f; nb.vy -= (dy / d) * f
+              const mA = 0.35 + na.capNorm * 1.8   // 질량 ∝ 시총
+              const mB = 0.35 + nb.capNorm * 1.8
+              na.vx += (dx / d) * f / mA; na.vy += (dy / d) * f / mA
+              nb.vx -= (dx / d) * f / mB; nb.vy -= (dy / d) * f / mB
+            }
+
+            // ── 섹터 무게중심 인력: 엣지 없어도 같은 섹터끼리 모임 ──
+            const cents = new Map<string, { x: number; y: number; n: number }>()
+            for (const n of g.nodes) {
+              if (n.sector === '기타' || n.sector === 'ETF') continue
+              const c = cents.get(n.sector)
+              if (c) { c.x += n.x; c.y += n.y; c.n++ }
+              else cents.set(n.sector, { x: n.x, y: n.y, n: 1 })
+            }
+            for (const n of g.nodes) {
+              const c = cents.get(n.sector)
+              if (!c || c.n < 2) continue
+              const cx = c.x / c.n, cy = c.y / c.n
+              const dx = cx - n.x, dy = cy - n.y
+              const d = Math.sqrt(dx * dx + dy * dy)
+              if (d < 60) continue  // 이미 충분히 가까우면 무시 (과밀 방지)
+              const f = 0.012 * (g.sectorBoost[n.sector] ?? 1) * a
+              n.vx += (dx / d) * f * Math.min(d, 250)
+              n.vy += (dy / d) * f * Math.min(d, 250)
+            }
+
+            // ── ETF → 구성종목 섹터의 중심으로 (엣지 가중치로 지배 섹터 판정) ──
+            for (let i = 0; i < N; i++) {
+              const n = g.nodes[i]
+              if (!n.isEtf) continue
+              const secW = new Map<string, number>()
+              for (const e of g.edges) {
+                const other = e.a === i ? g.nodes[e.b] : e.b === i ? g.nodes[e.a] : null
+                if (!other || other.isEtf) continue
+                if (!cents.has(other.sector)) continue
+                secW.set(other.sector, (secW.get(other.sector) ?? 0) + e.w)
+              }
+              let domSec = ''; let domW = 0
+              secW.forEach((w, s) => { if (w > domW) { domW = w; domSec = s } })
+              const c = domSec ? cents.get(domSec) : undefined
+              if (!c) continue
+              const cx = c.x / c.n, cy = c.y / c.n
+              const dx = cx - n.x, dy = cy - n.y
+              const d = Math.max(Math.sqrt(dx * dx + dy * dy), 1)
+              if (d < 8) continue
+              const f = 0.03 * a  // 섹터 인력보다 강하게 — 중심 점거
+              n.vx += (dx / d) * f * Math.min(d, 300)
+              n.vy += (dy / d) * f * Math.min(d, 300)
+            }
+
+            // ── 은하 회전: 느리게 표류하는 은하 중심 주위의 접선 흐름 ──
+            const gcx = Math.sin(t * 0.045) * bx * 0.22
+            const gcy = Math.cos(t * 0.032) * by * 0.22
+            for (const n of g.nodes) {
+              const dx = n.x - gcx, dy = n.y - gcy
+              const d = Math.max(Math.sqrt(dx * dx + dy * dy), 30)
+              // 접선 방향(반시계) — 거리에 비례하되 상한, 멀수록 느린 강체 아닌 나선 느낌
+              const tang = 0.018 * Math.min(d, 380) / 380
+              n.vx += (-dy / d) * tang
+              n.vy += (dx / d) * tang
             }
 
             // ── 경계 반발 + 지속 미세 진동 ──
@@ -288,15 +350,34 @@ export function PublicAiHistoryPage() {
           const hl = highlightRef.current
 
           // ── 엣지 ──
-          for (const e of g.edges) {
+          for (let ei = 0; ei < g.edges.length; ei++) {
+            const e = g.edges[ei]
             const na = g.nodes[e.a], nb = g.nodes[e.b]
             const dim = hl && !(hl.has(e.a) && hl.has(e.b))
-            ctx.strokeStyle = `rgba(148,163,184,${dim ? 0.03 : 0.12 + e.w * 0.25})`
-            ctx.lineWidth = dim ? 0.4 : 0.7 + e.w * 1.2
-            ctx.beginPath()
-            ctx.moveTo(toSX(na.x), toSY(na.y))
-            ctx.lineTo(toSX(nb.x), toSY(nb.y))
-            ctx.stroke()
+            const ax = toSX(na.x), ay = toSY(na.y)
+            const bx2 = toSX(nb.x), by2 = toSY(nb.y)
+            // 주도주 → 밴더 빛 전달: 주도주 쪽이 밝게 빛나는 그라데이션 + 흐르는 광점
+            const leaderEnd = !dim && (na.leader ? 'a' : nb.leader ? 'b' : null)
+            if (leaderEnd) {
+              const lx0 = leaderEnd === 'a' ? ax : bx2, ly0 = leaderEnd === 'a' ? ay : by2
+              const vx0 = leaderEnd === 'a' ? bx2 : ax, vy0 = leaderEnd === 'a' ? by2 : ay
+              const grad = ctx.createLinearGradient(lx0, ly0, vx0, vy0)
+              const breathe = 0.65 + Math.sin(t * 0.9 + ei * 1.3) * 0.2
+              grad.addColorStop(0, `rgba(134,239,172,${(0.5 * breathe + e.w * 0.25).toFixed(3)})`)
+              grad.addColorStop(1, `rgba(148,163,184,${(0.08 + e.w * 0.12).toFixed(3)})`)
+              ctx.strokeStyle = grad
+              ctx.lineWidth = 1.0 + e.w * 1.6
+              ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx2, by2); ctx.stroke()
+              // 광점: 주도주에서 밴더 방향으로 흘러감 (가중치 높을수록 빠르게)
+              const ph = ((t * (0.10 + e.w * 0.16) + ei * 0.37) % 1)
+              const px = lx0 + (vx0 - lx0) * ph, py = ly0 + (vy0 - ly0) * ph
+              ctx.fillStyle = `rgba(190,255,210,${(0.7 * (1 - ph * 0.6)).toFixed(3)})`
+              ctx.beginPath(); ctx.arc(px, py, 1.6 + e.w * 1.2, 0, Math.PI * 2); ctx.fill()
+            } else {
+              ctx.strokeStyle = `rgba(148,163,184,${dim ? 0.03 : 0.12 + e.w * 0.25})`
+              ctx.lineWidth = dim ? 0.4 : 0.7 + e.w * 1.2
+              ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx2, by2); ctx.stroke()
+            }
           }
 
           // ── 노드 (실시간) + 레이블 (lag) ──
@@ -311,12 +392,22 @@ export function PublicAiHistoryPage() {
             const rising = n.chg1d > 0
             const fallRatio = n.chg1d < 0 ? Math.min((-n.chg1d) / 8, 1) : 0  // 0~1 하락 강도
 
-            // ── 상승: 녹색 glow 일렁임 (상승 강할수록 진폭 더 크게) ──
-            if (rising && !dim) {
-              const glowBase = 5 + Math.min(n.chg1d / 5, 1) * 14   // 5~19
-              const glowAmp  = Math.min(n.chg1d / 3, 1) * 14        // 0~14
+            // ── 상승/정배열: glow 일렁임 ──
+            // 정배열(aligned)이면 기본 글로우 강화, 강할수록(alignStr)
+            // 녹색→청록→파랑으로 색이 일렁이는 오로라 느낌
+            const aStr = n.aligned ? (n.alignStr ?? 0) : 0
+            if ((rising || n.aligned) && !dim) {
+              const glowBase = (n.aligned ? 9 : 5) + Math.min(Math.max(n.chg1d, 0) / 5, 1) * 14 + aStr * 10
+              const glowAmp  = Math.min(Math.max(n.chg1d, 0) / 3, 1) * 14 + aStr * 8
               const glowPhase = i * 0.731  // 노드마다 다른 위상
-              ctx.shadowColor = '#4ade80'
+              if (aStr > 0.15) {
+                // 색 진동: hue 140(녹) ↔ 205(파랑) — 강도만큼 파랑 침투
+                const hueT = (Math.sin(t * 1.1 + i * 0.83) + 1) / 2
+                const hue = 140 + aStr * 65 * hueT
+                ctx.shadowColor = `hsl(${hue.toFixed(0)} 90% ${(58 + aStr * 12).toFixed(0)}%)`
+              } else {
+                ctx.shadowColor = '#4ade80'
+              }
               ctx.shadowBlur = Math.max(0, glowBase + Math.sin(t * 1.4 + glowPhase) * glowAmp)
             } else {
               ctx.shadowBlur = 0

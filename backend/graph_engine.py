@@ -46,6 +46,17 @@ SENSITIVITY: dict[str, dict[str, float]] = {
 THETA = 0.05  # 변수별 조정 계수 (5일 변화율 % 단위 입력 기준)
 
 
+def _ema_last(vals: list[float], n: int) -> float:
+    """마지막 EMA 값 (표본 부족 시 0)."""
+    if len(vals) < n:
+        return 0.0
+    k = 2 / (n + 1)
+    e = sum(vals[:n]) / n
+    for v in vals[n:]:
+        e = v * k + e * (1 - k)
+    return e
+
+
 def _corr(a: list[float], b: list[float]) -> float:
     """수익률 상관계수 (시계열 길이 불일치 시 뒤에서 맞춤)."""
     n = min(len(a), len(b))
@@ -87,9 +98,12 @@ def build_graph(force: bool = False) -> dict:
 
     nodes: list[dict] = []
     series: dict[str, list[float]] = {}
+    etf_holdings: dict[str, list[dict]] = {}  # ETF 코드 → 구성종목 [{code, weight}]
     for r in rows:
         pj = r.result_json if isinstance(r.result_json, dict) else {}
         st = pj.get("stock", {}) or {}
+        if pj.get("etfHoldings"):
+            etf_holdings[r.stock_code] = pj["etfHoldings"]
         ser = (pj.get("series") or {}).get("closes") or []
         sector = st.get("sector") or ("ETF" if str(r.stock_code)[0].isalpha() or (r.stock_name or "").startswith("KODEX") else "기타")
         price = float(st.get("currentPrice") or (ser[-1] if ser else 0) or 0)
@@ -98,6 +112,16 @@ def build_graph(force: bool = False) -> dict:
         chg1d = 0.0
         if len(ser) >= 2 and float(ser[-2] or 0) > 0:
             chg1d = round((float(ser[-1]) / float(ser[-2]) - 1) * 100, 2)
+        # 정배열 판정 (EMA5 > EMA20 > EMA60) + 강도 (20일 수익률 0~30% → 0~1)
+        fser = [float(x) for x in ser]
+        aligned = False
+        align_str = 0.0
+        if len(fser) >= 60:
+            e5, e20, e60 = _ema_last(fser, 5), _ema_last(fser, 20), _ema_last(fser, 60)
+            aligned = e5 > e20 > e60
+            if aligned and len(fser) >= 21 and fser[-21] > 0:
+                chg20 = (fser[-1] / fser[-21] - 1) * 100
+                align_str = round(max(0.0, min(1.0, chg20 / 30)), 3)
         nodes.append({
             "code": r.stock_code,
             "name": r.stock_name or r.stock_code,
@@ -107,6 +131,9 @@ def build_graph(force: bool = False) -> dict:
             "signal": r.signal,
             "hasReport": bool(pj.get("aiReport")) or bool(pj),
             "chg1d": chg1d,
+            "aligned": aligned,       # EMA 정배열 여부
+            "alignStr": align_str,    # 정배열 상승 강도 0~1
+            "isEtf": r.stock_code in etf_holdings or bool(pj.get("etfHoldings")),
         })
         if len(ser) >= 40:
             series[r.stock_code] = [float(x) for x in ser]
@@ -119,6 +146,18 @@ def build_graph(force: bool = False) -> dict:
         n["capNorm"] = (
             (math.log(n["cap"]) - cmin) / (cmax - cmin) if n["cap"] > 0 and cmax > cmin else 0.2
         )
+
+    # 섹터별 주도주: 정배열 상승 중인 종목 가운데 (강도+점수+시총) 최고 1개
+    best: dict[str, tuple[float, int]] = {}
+    for i, n in enumerate(nodes):
+        if not n["aligned"] or n["sector"] in ("기타", "ETF") or n["isEtf"]:
+            continue
+        rank = n["alignStr"] * 50 + n["score"] * 0.3 + n["capNorm"] * 20
+        if n["sector"] not in best or rank > best[n["sector"]][0]:
+            best[n["sector"]] = (rank, i)
+    leader_idx = {i for _, i in best.values()}
+    for i, n in enumerate(nodes):
+        n["leader"] = i in leader_idx
 
     # 엣지: W = α·corr + β·sameSector + γ·gravity, 노드당 상위 K개
     idx = {n["code"]: i for i, n in enumerate(nodes)}
@@ -147,6 +186,22 @@ def build_graph(force: bool = False) -> dict:
     for i, lst in cand.items():
         for w, j in lst:
             wmap[(min(i, j), max(i, j))] = w
+    # ETF ↔ 구성종목 엣지: 편입 비중 → 가중치 (TOP_K 제한과 무관하게 항상 연결)
+    for etf_code, holdings in etf_holdings.items():
+        ei = idx.get(etf_code)
+        if ei is None:
+            continue
+        for h in holdings:
+            hi = idx.get(str(h.get("code", "")))
+            if hi is None:
+                continue
+            # 비중 34% → w≈0.85, 비중 2% → w≈0.33 (스프링이 실제로 당기는 수준으로)
+            w_etf = min(0.95, 0.3 + float(h.get("weight", 0)) / 100 * 1.6)
+            key = (min(ei, hi), max(ei, hi))
+            if key not in wmap or wmap[key] < w_etf:
+                wmap[key] = w_etf
+            edge_set.add(key)
+
     for (i, j) in edge_set:
         edges.append({"a": i, "b": j, "w": round(wmap.get((i, j), 0.2), 3)})
 
