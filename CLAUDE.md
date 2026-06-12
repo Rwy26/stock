@@ -114,3 +114,22 @@ npm run preview  # preview production build
   automated commits; `logs/` is git-ignored.
 - Backend modules use top-level (not package-relative) imports, so always run with `--app-dir backend`
   / cwd at `backend` — running `python main.py` from the repo root will fail to import `settings`/`db`.
+
+## 2026-06 additions (12단계 분석 AI · 공개 서비스)
+
+**분석 엔진 체인** (모든 수치는 결정론 계산, LLM은 해석만 — Gemini→Groq→OpenAI 폴백):
+- `market_compass.py` — 시장 나침반 1~7단계 (장세 판정·거시 매핑·순환 사다리·뉴스), 장중 30분 캐시
+- `mtf_analysis.py` — 8단계 멀티 타임프레임 (월~15분, BOS/CHoCH/피보나치/매물대/ICT FVG/CDV)
+- `target_engine.py` — 9~11단계 (목표가 5종+이상치 가드, 손절 3종, 빈도 기반 확률, 분할매수/매집구간, 공매도 점수(KIS), 52주 신고가)
+- `stock_compass.py` — 12단계 통합 + ai_analysis_cache 자동 저장 (트레이딩 저널 스타일 프롬프트: 모멘텀=보유 이유, 소멸=매도 트리거)
+- `news_collector.py` — 네이버 뉴스 → news_articles (24h/7d/30d 버킷)
+- `graph_engine.py` — 관심종목 Force Directed Graph (상관·섹터·시총중력 엣지 + 거시 기후 boost)
+- VKOSPI: `vkospi_history` 테이블 (TradingView VKI1! 웹소켓, scripts/vkospi_crawl.py)
+
+**공개 페이지** (게스트, 이름+전화 게이트): 관심종목 트리맵 / 섹터 나침반 / AI 분석(그래프 뷰+대화형 검색, `PublicAiHistoryPage`). 관리자 외부 접속은 구글 OAuth(/login, GOOGLE_OAUTH_CLIENT_ID + ADMIN_GOOGLE_EMAIL in .env).
+
+**뉴스레터 리포트** (`components/CompassReport.tsx`): 핵심 차트에 추세선 3종(장기=전120봉 회귀 / 중기=맥선[피크前60봉 최저 바닥→첫 되돌림 바닥, 신고가 갱신 시 '신고가 상승 추세선'] / 단기=피크前 마지막 두 스윙 저점), 하락 추세선(고점 앵커), 라벨 충돌회피 엔진(선·텍스트 모두 장애물), 현재가 방향 점멸(상승=위 파랑/하락=아래 빨강). 캔들 저가가 아닌 종가 기준이라 앵커 날짜가 1~3일 차이 날 수 있음.
+
+**예약 작업**: 06:00 fundamentals_sync(이름 검증·VKOSPI·뉴스) → 06:30 morning_prep(전일 등락 스냅샷+캐시 워밍) → 06:50 morning-check → 21:00 batch_analyze(전 106종목, 90초 간격) → 20:10 저녁 sync. ngrok 워치독 5분(터널: cost-negligee-violate.ngrok-free.dev, 본체 C:\stock\tools\ngrok.exe — AppData 설치본은 샌드박스 격리 주의).
+
+**원칙**: 잘못된 정보는 없는 것보다 위험 — 외부 데이터는 네이버 교차검증, 무데이터 항목은 N/A 명시, 확률은 표본 수와 함께 빈도 기반. 추세선 보정은 저장된 시계열로 앵커 날짜 시뮬레이션 후 배포.

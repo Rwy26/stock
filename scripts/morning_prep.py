@@ -60,6 +60,7 @@ def main() -> int:
         ("관심종목", "/api/public/watchlist", 120),
         ("ETF 시세", "/api/public/etf-quotes", 60),
         ("섹터 나침반", "/api/public/sector-rotation", 600),
+        ("AI 그래프", "/api/public/stock-graph", 180),
     ]
     for name, path, to in warm:
         try:

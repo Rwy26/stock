@@ -5328,6 +5328,38 @@ def admin_stock_targets(code: str, user=Depends(require_admin)):
         raise HTTPException(status_code=502, detail=f"목표가 분석 실패: {exc}") from exc
 
 
+@app.get("/api/public/stock-graph")
+def public_stock_graph():
+    """관심종목 네트워크 그래프 (Force Directed Graph 데이터) — 30분 캐시, 외부 호출 0."""
+    try:
+        import graph_engine
+        return graph_engine.build_graph(force=False)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"그래프 생성 실패: {exc}") from exc
+
+
+@app.post("/api/public/upload")
+async def public_upload(file: UploadFile = FastAPIFile(...)):
+    """공개 첨부 업로드 (사진·보고서) — 5MB 제한, 허용 형식만, D드라이브 보관."""
+    allowed = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf", ".csv", ".xlsx", ".txt"}
+    import os as _os
+    from pipeline_paths import get_pipeline_paths
+
+    name = _os.path.basename(file.filename or "file")
+    ext = _os.path.splitext(name)[1].lower()
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail=f"허용되지 않는 형식: {ext}")
+    data = await file.read()
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="5MB 이하만 업로드 가능합니다")
+    updir = get_pipeline_paths().data_external / "uploads"
+    updir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = updir / f"{stamp}-{name}"
+    dest.write_bytes(data)
+    return {"ok": True, "saved": dest.name, "size": len(data)}
+
+
 @app.get("/api/public/ai-history")
 def public_ai_history():
     """공개 AI 분석 이력 목록 (읽기 전용 — 종목별 최신 분석 요약)."""

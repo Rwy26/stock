@@ -1,0 +1,183 @@
+"""관심종목 네트워크 그래프 엔진 — Force Directed Graph 데이터 공급.
+
+노드 = 종목 (시총·섹터·AI 시그널), 엣지 = 종목 간 관계 가중치.
+
+가중치 W_ij = α·Corr_ij + β·Sector_ij + γ·Gravity_ij   (Vendor 항은 데이터 확보 전 — δ=0)
+  - Corr_ij   : 일봉 수익률 상관계수 (ai_analysis_cache 의 120봉 시계열 활용 — 추가 호출 0)
+  - Sector_ij : 같은 섹터 = 1
+  - Gravity_ij: 시총 기반 중력 (log 정규화 곱)
+
+외부 환경 변수(환율·유가·금리·나스닥)는 섹터별 민감도 행렬로 군집 강화 계수(boost)를
+산출해 프론트 물리엔진의 같은 섹터 스프링 힘에 곱한다 — "시장 기후".
+
+캐시 30분. 외부 API 호출 없음 (모든 데이터 DB/캐시 재사용 — 비용 0).
+"""
+
+from __future__ import annotations
+
+import math
+import threading
+import time
+from datetime import datetime
+from typing import Optional
+
+_lock = threading.Lock()
+_cache: Optional[dict] = None
+_cache_ts: float = 0.0
+TTL = 1800
+
+# 가중치 계수
+ALPHA, BETA, GAMMA = 0.5, 0.3, 0.2
+TOP_K_EDGES = 4  # 노드당 최강 엣지 수
+
+# 섹터별 외부 변수 민감도 (환율↑ / 유가↑ / 금리↑ / 나스닥↑ 에 대한 군집 강화 방향)
+SENSITIVITY: dict[str, dict[str, float]] = {
+    "반도체":      {"krw": +0.5, "oil": 0.0, "rate": -0.6, "nasdaq": +1.0},
+    "AI 생태계":   {"krw": 0.0, "oil": 0.0, "rate": -0.8, "nasdaq": +1.0},
+    "로봇 AI":     {"krw": +0.3, "oil": 0.0, "rate": -0.6, "nasdaq": +0.6},
+    "2차전지":     {"krw": +0.3, "oil": 0.0, "rate": -0.5, "nasdaq": +0.3},
+    "바이오":      {"krw": 0.0, "oil": 0.0, "rate": -0.7, "nasdaq": +0.3},
+    "조선":        {"krw": +1.0, "oil": +0.5, "rate": 0.0, "nasdaq": 0.0},
+    "방산":        {"krw": +0.8, "oil": +0.2, "rate": +0.2, "nasdaq": 0.0},
+    "화학":        {"krw": +0.2, "oil": +0.8, "rate": 0.0, "nasdaq": 0.0},
+    "금융":        {"krw": -0.3, "oil": 0.0, "rate": +1.0, "nasdaq": 0.0},
+    "전력 인프라": {"krw": +0.3, "oil": +0.3, "rate": 0.0, "nasdaq": +0.3},
+}
+THETA = 0.05  # 변수별 조정 계수 (5일 변화율 % 단위 입력 기준)
+
+
+def _corr(a: list[float], b: list[float]) -> float:
+    """수익률 상관계수 (시계열 길이 불일치 시 뒤에서 맞춤)."""
+    n = min(len(a), len(b))
+    if n < 30:
+        return 0.0
+    ra = [(a[i] / a[i - 1] - 1) for i in range(len(a) - n + 1, len(a)) if a[i - 1] > 0]
+    rb = [(b[i] / b[i - 1] - 1) for i in range(len(b) - n + 1, len(b)) if b[i - 1] > 0]
+    m = min(len(ra), len(rb))
+    if m < 30:
+        return 0.0
+    ra, rb = ra[-m:], rb[-m:]
+    ma, mb = sum(ra) / m, sum(rb) / m
+    cov = sum((ra[i] - ma) * (rb[i] - mb) for i in range(m))
+    va = math.sqrt(sum((x - ma) ** 2 for x in ra))
+    vb = math.sqrt(sum((x - mb) ** 2 for x in rb))
+    if va * vb == 0:
+        return 0.0
+    return cov / (va * vb)
+
+
+def build_graph(force: bool = False) -> dict:
+    global _cache, _cache_ts
+    with _lock:
+        if not force and _cache is not None and (time.time() - _cache_ts) < TTL:
+            return _cache
+
+    import db
+    import models
+    import fundamentals_cache
+    from sqlalchemy import select
+
+    s = db.get_session_factory()()
+    try:
+        rows = s.execute(
+            select(models.AiAnalysisCache).order_by(models.AiAnalysisCache.analyzed_at.desc())
+        ).scalars().all()
+    finally:
+        s.close()
+
+    nodes: list[dict] = []
+    series: dict[str, list[float]] = {}
+    for r in rows:
+        pj = r.result_json if isinstance(r.result_json, dict) else {}
+        st = pj.get("stock", {}) or {}
+        ser = (pj.get("series") or {}).get("closes") or []
+        sector = st.get("sector") or ("ETF" if str(r.stock_code)[0].isalpha() or (r.stock_name or "").startswith("KODEX") else "기타")
+        price = float(st.get("currentPrice") or (ser[-1] if ser else 0) or 0)
+        shares = fundamentals_cache.get_shares(str(r.stock_code))
+        cap = price * shares if (price > 0 and shares > 0) else 0.0
+        chg1d = 0.0
+        if len(ser) >= 2 and float(ser[-2] or 0) > 0:
+            chg1d = round((float(ser[-1]) / float(ser[-2]) - 1) * 100, 2)
+        nodes.append({
+            "code": r.stock_code,
+            "name": r.stock_name or r.stock_code,
+            "sector": sector,
+            "cap": cap,
+            "score": float(r.confidence or 0),
+            "signal": r.signal,
+            "hasReport": bool(pj.get("aiReport")) or bool(pj),
+            "chg1d": chg1d,
+        })
+        if len(ser) >= 40:
+            series[r.stock_code] = [float(x) for x in ser]
+
+    # 시총 정규화 (log) — 0~1
+    caps = [n["cap"] for n in nodes if n["cap"] > 0]
+    cmin = math.log(min(caps)) if caps else 0.0
+    cmax = math.log(max(caps)) if caps else 1.0
+    for n in nodes:
+        n["capNorm"] = (
+            (math.log(n["cap"]) - cmin) / (cmax - cmin) if n["cap"] > 0 and cmax > cmin else 0.2
+        )
+
+    # 엣지: W = α·corr + β·sameSector + γ·gravity, 노드당 상위 K개
+    idx = {n["code"]: i for i, n in enumerate(nodes)}
+    cand: dict[int, list[tuple[float, int]]] = {i: [] for i in range(len(nodes))}
+    codes = [n["code"] for n in nodes]
+    for i in range(len(codes)):
+        for j in range(i + 1, len(codes)):
+            a, b = nodes[i], nodes[j]
+            corr = 0.0
+            if a["code"] in series and b["code"] in series:
+                corr = max(0.0, _corr(series[a["code"]], series[b["code"]]))
+            same = 1.0 if (a["sector"] == b["sector"] and a["sector"] not in ("기타", "ETF")) else 0.0
+            grav = a["capNorm"] * b["capNorm"]
+            w = ALPHA * corr + BETA * same + GAMMA * grav
+            if w > 0.18:
+                cand[i].append((w, j))
+                cand[j].append((w, i))
+
+    edge_set: set[tuple[int, int]] = set()
+    for i, lst in cand.items():
+        lst.sort(reverse=True)
+        for w, j in lst[:TOP_K_EDGES]:
+            edge_set.add((min(i, j), max(i, j)))
+    edges = []
+    wmap = {}
+    for i, lst in cand.items():
+        for w, j in lst:
+            wmap[(min(i, j), max(i, j))] = w
+    for (i, j) in edge_set:
+        edges.append({"a": i, "b": j, "w": round(wmap.get((i, j), 0.2), 3)})
+
+    # 외부 환경 → 섹터별 군집 강화 계수 (시장 기후)
+    boosts: dict[str, float] = {}
+    climate: dict[str, float] = {}
+    try:
+        import sector_rotation
+        rot = sector_rotation.compute_sector_rotation(force=False)
+        m = rot.get("macroDetail", {})
+        climate = {
+            "krw": float(m.get("usKrwChg5d") or 0),
+            "oil": float(m.get("oilChg5d") or 0),
+            "rate": float(m.get("tnxChg5d") or 0),
+            "nasdaq": float(m.get("nasdaqChg5d") or 0),
+        }
+        for sec, sens in SENSITIVITY.items():
+            f = sum(THETA * climate[k] * sens.get(k, 0.0) for k in climate)
+            boosts[sec] = round(max(0.6, min(1.6, 1.0 + f)), 3)
+    except Exception:
+        boosts = {}
+
+    result = {
+        "asOf": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "nodes": nodes,
+        "edges": edges,
+        "sectorBoost": boosts,   # 같은 섹터 스프링에 곱할 계수 (외부 바람)
+        "climate": climate,      # 환율/유가/금리/나스닥 5일 변화율 (%)
+        "cached": False,
+    }
+    with _lock:
+        _cache = {**result, "cached": True}
+        _cache_ts = time.time()
+    return result
