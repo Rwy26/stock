@@ -3440,10 +3440,10 @@ def stock_daily_prices(code: str, limit: int = 400, current_user=Depends(get_cur
             items.append(
                 {
                     "time": (trading_date.isoformat() if trading_date else None),
-                    "open": float(o),
-                    "high": float(h),
-                    "low": float(l),
-                    "close": float(c),
+                    "open": float(o or 0),
+                    "high": float(h or 0),
+                    "low": float(l or 0),
+                    "close": float(c or 0),
                     "volume": int(v or 0),
                 }
             )
@@ -5215,8 +5215,8 @@ class PublicAiRequestBody(_BaseModel):
     stock: str = _Field(..., max_length=120)
 
 
-def _clean_public_text(s: str | None, *, limit: int) -> str:
-    return (str(s or "").strip())[:limit]
+def _clean_public_text(s: str | None) -> str:
+    return str(s or "").strip()
 
 
 @app.post("/api/public/signup")
@@ -5224,8 +5224,8 @@ def public_signup(body: PublicSignupBody):
     """게스트 진입: 이름+전화번호 기록 (인증 아님, 방문자 수집용)."""
     if apollo_db is None or models is None:
         raise HTTPException(status_code=500, detail="DB module not available")
-    name = _clean_public_text(body.name, limit=120)
-    phone = _clean_public_text(body.phone, limit=40)
+    name = _clean_public_text(body.name)
+    phone = _clean_public_text(body.phone)
     if not name or not phone:
         raise HTTPException(status_code=400, detail="이름과 전화번호를 입력하세요.")
     with apollo_db.session_scope() as session:
@@ -5727,9 +5727,9 @@ def public_ai_request(body: PublicAiRequestBody):
     """게스트 'AI 차트 분석 요청' 기록 (분석 미실행, 유료 API 호출 없음)."""
     if apollo_db is None or models is None:
         raise HTTPException(status_code=500, detail="DB module not available")
-    name = _clean_public_text(body.name, limit=120)
-    phone = _clean_public_text(body.phone, limit=40)
-    stock = _clean_public_text(body.stock, limit=120)
+    name = _clean_public_text(body.name)
+    phone = _clean_public_text(body.phone)
+    stock = _clean_public_text(body.stock)
     if not name or not phone:
         raise HTTPException(status_code=400, detail="이름과 전화번호가 필요합니다.")
     if not stock:

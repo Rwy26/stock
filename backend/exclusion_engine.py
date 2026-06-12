@@ -366,13 +366,13 @@ def rejection_payload(code: str, name: str, tags: list[str], detail: str | None 
         "ok": False,
         "excluded": True,
         "opinion": "CAUTION",
-        "policy": "excluded-stock-no-opinion",
+        "policy": "excluded-stock-caution",
         "code": code,
         "name": name or None,
         "tags": tags,
         "reasons": [{"tag": t, "label": TAG_LABELS.get(t, t)} for t in tags],
         "detail": detail,
-        "message": f"[투자 주의] {disp} — 거래 제외 종목입니다. 분석/추천 의견을 제공하지 않습니다. 사유: {', '.join(labels)}",
+        "message": f"[투자 주의] {disp} — 거래 제외 종목으로 분류되어 분석 제공이 제한됩니다. 사유: {', '.join(labels)}",
     }
 
 

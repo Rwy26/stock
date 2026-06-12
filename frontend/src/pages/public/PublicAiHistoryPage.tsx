@@ -46,6 +46,7 @@ const DISPLAY_NAME: Record<string, string> = {
   'SK하이닉스': 'SK닉스',
   'KODEX 미국S&P500': 'S&P',
   'POSCO홀딩스': 'P홀',
+  '포스코홀딩스': 'P홀',
   'LS마린솔루션': '마솔',
 }
 function displayName(name: string): string {
@@ -158,6 +159,8 @@ export function PublicAiHistoryPage() {
       labelPosRef.current = g.nodes.map(n => ({ x: n.x, y: n.y }))
       graphRef.current = g
       alphaRef.current = 0.22   // 낮게 시작 → 조용한 안착
+      // 그래프 도착 즉시 전체 로고 병렬 선로딩 (렌더 루프 첫 호출 전에 CDN 요청 시작)
+      g.nodes.forEach(n => getOrLoadLogo(n.code))
     }).catch(() => { /* silent */ })
   }, [])
 
@@ -178,9 +181,9 @@ export function PublicAiHistoryPage() {
 
         // ── 우주 배경 그라데이션 ──
         const bg = ctx.createRadialGradient(W / 2, H * 0.45, 0, W / 2, H * 0.45, Math.max(W, H) * 0.78)
-        bg.addColorStop(0, '#0d1b2a')
-        bg.addColorStop(0.5, '#060e18')
-        bg.addColorStop(1, '#020508')
+        bg.addColorStop(0, '#070f1a')
+        bg.addColorStop(0.5, '#03080f')
+        bg.addColorStop(1, '#010306')
         ctx.fillStyle = bg
         ctx.fillRect(0, 0, W, H)
 
@@ -288,8 +291,8 @@ export function PublicAiHistoryPage() {
           for (const e of g.edges) {
             const na = g.nodes[e.a], nb = g.nodes[e.b]
             const dim = hl && !(hl.has(e.a) && hl.has(e.b))
-            ctx.strokeStyle = `rgba(148,163,184,${dim ? 0.02 : 0.035 + e.w * 0.1})`
-            ctx.lineWidth = dim ? 0.3 : 0.4 + e.w * 0.7
+            ctx.strokeStyle = `rgba(148,163,184,${dim ? 0.03 : 0.12 + e.w * 0.25})`
+            ctx.lineWidth = dim ? 0.4 : 0.7 + e.w * 1.2
             ctx.beginPath()
             ctx.moveTo(toSX(na.x), toSY(na.y))
             ctx.lineTo(toSX(nb.x), toSY(nb.y))
