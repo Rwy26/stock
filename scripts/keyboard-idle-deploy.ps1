@@ -1,12 +1,14 @@
-# 키보드/마우스 무입력 10분 감지 → 프런트 재빌드 + 8000 백엔드 재시작
+# 키보드/마우스 무입력 감지 → 프런트 재빌드 + 8000 백엔드 재시작
 #
-# 기준: 키보드 또는 마우스 — user32 GetLastInputInfo (시스템 마지막 입력 시각).
+# 기준: 1분 간격 점검 — 직전 1분간 입력(키보드/마우스, GetLastInputInfo)이 없으면
+#       '무반응' 1회. 연속 10회(=연속 무입력 ~10분) 도달 시 배포 실행.
+#       입력이 감지되면 카운터 0으로 리셋.
 # 트리거 후: ① frontend npm run build ② start-backend-8000.ps1 -ForceRestart
 #           ③ /health + /api/public/watchlist 확인 — 결과는 로그에 기록.
 # 로그: C:\stock\logs\keyboard-idle-deploy.log
 param(
-  [int]$IdleSec = 600,
-  [int]$PollMs = 5000
+  [int]$CheckIntervalSec = 60,
+  [int]$RequiredMisses = 10
 )
 $ErrorActionPreference = 'Continue'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -34,12 +36,21 @@ public static class InputIdle {
 }
 '@
 
-Log "감시 시작 — 키보드/마우스 무입력 $IdleSec 초 대기 (폴링 ${PollMs}ms)"
+Log "감시 시작 — ${CheckIntervalSec}초 간격, 연속 무반응 ${RequiredMisses}회 시 배포"
+$misses = 0
 while ($true) {
-  Start-Sleep -Milliseconds $PollMs
-  if ([InputIdle]::IdleSeconds() -ge $IdleSec) { break }
+  Start-Sleep -Seconds $CheckIntervalSec
+  $idle = [InputIdle]::IdleSeconds()
+  if ($idle -ge $CheckIntervalSec) {
+    $misses++
+    Log "무반응 $misses/$RequiredMisses (유휴 ${idle}초)"
+    if ($misses -ge $RequiredMisses) { break }
+  } elseif ($misses -gt 0) {
+    Log "입력 감지 (유휴 ${idle}초) — 카운터 리셋 ($misses → 0)"
+    $misses = 0
+  }
 }
-Log "키보드/마우스 무입력 $IdleSec 초 충족 — 배포 시작"
+Log "연속 무반응 ${RequiredMisses}회 충족 — 배포 시작"
 
 # ① 프런트 재빌드 (실패해도 백엔드 재시작은 진행)
 $buildOk = $false
