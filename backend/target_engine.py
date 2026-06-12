@@ -636,11 +636,14 @@ def analyze_targets(code: str) -> dict:
         "asOf": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "currentPrice": cur,
         "barsUsed": len(bars),
-        # 핵심 차트용 시계열 (최근 120봉 종가) — 뉴스레터 리포트의 가격 vs 목표/손절 차트
+        # 핵심 차트용 시계열 — 퀀트 추세선 엔진(고/저가 피벗)용으로 highs/lows/volumes 추가
         "series": {
-            "dates": [b["date"] for b in bars[-120:]],
-            "closes": [b["close"] for b in bars[-120:]],
-            # 52주(252거래일) 최고 종가 — '신고가 상승 추세선' 판정용
+            "dates":   [b["date"]   for b in bars[-120:]],
+            "closes":  [b["close"]  for b in bars[-120:]],
+            "highs":   [b["high"]   for b in bars[-120:]],
+            "lows":    [b["low"]    for b in bars[-120:]],
+            "volumes": [b["volume"] for b in bars[-120:]],
+            # 52주(252거래일) 최고 종가 — 신고가 판정용
             "high52w": max(b["close"] for b in bars[-252:]),
         },
         "targets": targets,
