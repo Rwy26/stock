@@ -375,6 +375,17 @@ function PriceChart({ p }: { p: Dict }) {
   const resLines = resRaw.map(lifecycle).filter((t): t is QuantLine => t != null)
   const allTrendLines = [...supLines, ...resLines]
 
+  // 접촉 물듦: 현재가가 "지금" 닿아있는 선(ATR 이내)에서, 가격 진행 방향 색과
+  // 선의 색이 다를 때만 접점이 살짝 물듦 (상승 압력=녹색 / 하락 압력=적색).
+  // 미래 교차점(apex)은 물들지 않음 — 펄스 원이 담당.
+  const atrNow = atrs[curIdx] || 1
+  const priceUp = cur >= closes[Math.max(0, closes.length - 4)]
+  const touchTint = allTrendLines.map(t => {
+    if (Math.abs(cur - t.valNow) > atrNow) return null
+    const tint = priceUp ? '#34d399' : '#f87171'
+    return (t.rising ? '#34d399' : '#f87171') === tint ? null : tint
+  })
+
   // ── 수렴 감지: 상승 지지선 ↔ 하락 저항선이 교차점을 향해 좁혀질 때 색 전이 ──
   // 교차점(apex)이 curIdx 기준 -20 ~ +80봉 범위 내에 있으면 활성화.
   // 지지선: 교차점 방향 끝이 붉게 물듦 (위협)
@@ -670,58 +681,47 @@ function PriceChart({ p }: { p: Dict }) {
           <stop offset="100%" stopColor="#60a5fa" stopOpacity="0.02" />
         </linearGradient>
 
-        {/* 이탈/돌파 잠식 gradient — 시작(추세 근거)은 자기 색 유지,
-            주가가 관통한 지점부터 반대색으로 잠식되며 끝으로 갈수록 희미해짐.
-            (상승선: 녹→적 잠식 / 하락선: 적→녹 잠식) — 추세 확정 시 lifecycle이 선 제거 */}
+        {/* 깨진 선 gradient —
+            상승선: 관통점부터 붉게 잠식 (하방 전환 위험)
+            하락선: 주가가 위로 돌아선 지지 확인 — 현재가 오른쪽으로 선이 점차 사라짐
+                    (녹색으로 바뀌는 게 아니라 투명 소멸 = "앞으로 하락은 없다") */}
         {[
           ...supLines.map((t, i) => ({ t, id: `bo-sup-${i}` })),
           ...resLines.map((t, i) => ({ t, id: `bo-res-${i}` })),
         ].map(({ t, id }) => {
-          // 색은 기울기 기준: 상승선은 반드시 녹색에서 시작 → 관통점부터 붉게 잠식
-          const own = t.rising ? '#34d399' : '#f87171'
-          const inv = t.rising ? '#f87171' : '#34d399'
           if (!t.broken || t.fadeBar == null) return null
-          const fadeX = toX(t.fadeBar)
-          const frac = Math.max(0.1, Math.min(0.92, (fadeX - t.x1) / Math.max(t.x2 - t.x1, 1)))
-          const mid = Math.min(0.98, frac + 0.08)
+          // 상승선은 깨져도 전 구간 녹색 유지 — gradient 없음.
+          // (접점 경고는 터치 물듦, 소멸은 lifecycle이 담당)
+          if (t.rising) return null
+          // 하락선: 현재가 x좌표부터 우측 투명 페이드
+          const fc = Math.max(0.06, Math.min(0.94, (curX - t.x1) / Math.max(t.x2 - t.x1, 1)))
           return (
             <linearGradient key={id} id={id} gradientUnits="userSpaceOnUse"
               x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2}>
-              <stop offset="0%" stopColor={own} stopOpacity="0.9" />
-              <stop offset={`${(frac * 100).toFixed(1)}%`} stopColor={own} stopOpacity="0.85" />
-              <stop offset={`${(mid * 100).toFixed(1)}%`} stopColor={inv} stopOpacity="0.75" />
-              <stop offset="100%" stopColor={inv} stopOpacity="0.25" />
+              <stop offset="0%" stopColor="#f87171" stopOpacity="0.85" />
+              <stop offset={`${(fc * 100).toFixed(1)}%`} stopColor="#f87171" stopOpacity="0.7" />
+              <stop offset="100%" stopColor="#f87171" stopOpacity="0.02" />
             </linearGradient>
           )
         })}
 
-        {/* 수렴 구간 색 전이 gradient — 지지선(녹→적) / 저항선(적→녹) */}
-        {convGrads.map(cg => {
-          const sup = supLines[cg.supIdx]
-          const res = resLines[cg.resIdx]
-          const p = cg.proximity
-          // 수렴 색 전이는 선 끝부분만 — 시작점(추세 근거 피벗)은 항상 본래 색.
-          // apex에 바짝 붙어도 최소 75%까지는 본래 색 유지 (이탈/돌파와 혼동 방지)
-          const tintStart = Math.max(0.75, 1 - p * 0.35).toFixed(3)
+        {/* 접촉 물듦 gradient — 현재가가 실제로 닿아있는 접점 부근만 반대 색으로 살짝.
+            우상향 선은 그 외 전 구간 녹색, 우하향 선은 전 구간 적색. */}
+        {allTrendLines.map((t, gi) => {
+          const tint = touchTint[gi]
+          if (!tint || t.broken) return null
+          const own = t.rising ? '#34d399' : '#f87171'
+          const fc = Math.max(0.06, Math.min(0.94, (curX - t.x1) / Math.max(t.x2 - t.x1, 1)))
+          const w = 0.06  // 접점 반경 (선 길이 대비)
           return (
-            <g key={`cg-defs-${cg.supIdx}-${cg.resIdx}`}>
-              {/* 지지선: 끝 부분이 붉게 — 선 방향(x1,y1→x2,y2) */}
-              <linearGradient id={cg.supGradId} gradientUnits="userSpaceOnUse"
-                x1={sup.x1} y1={sup.y1} x2={sup.x2} y2={sup.y2}>
-                <stop offset="0%"        stopColor="#34d399" stopOpacity="0.9" />
-                <stop offset={`${(+tintStart * 100).toFixed(1)}%`}
-                                         stopColor="#34d399" stopOpacity="0.9" />
-                <stop offset="100%"      stopColor="#f87171" stopOpacity={Math.min(0.85, p * 0.9).toFixed(2)} />
-              </linearGradient>
-              {/* 저항선: 끝 부분이 녹색으로 — 선 방향 */}
-              <linearGradient id={cg.resGradId} gradientUnits="userSpaceOnUse"
-                x1={res.x1} y1={res.y1} x2={res.x2} y2={res.y2}>
-                <stop offset="0%"        stopColor="#f87171" stopOpacity="0.85" />
-                <stop offset={`${(+tintStart * 100).toFixed(1)}%`}
-                                         stopColor="#f87171" stopOpacity="0.85" />
-                <stop offset="100%"      stopColor="#34d399" stopOpacity={Math.min(0.85, p * 0.9).toFixed(2)} />
-              </linearGradient>
-            </g>
+            <linearGradient key={`touch-${gi}`} id={`touch-${gi}`} gradientUnits="userSpaceOnUse"
+              x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2}>
+              <stop offset="0%" stopColor={own} stopOpacity="0.9" />
+              <stop offset={`${((fc - w) * 100).toFixed(1)}%`} stopColor={own} stopOpacity="0.9" />
+              <stop offset={`${(fc * 100).toFixed(1)}%`} stopColor={tint} stopOpacity="0.8" />
+              <stop offset={`${((fc + w) * 100).toFixed(1)}%`} stopColor={own} stopOpacity="0.9" />
+              <stop offset="100%" stopColor={own} stopOpacity="0.9" />
+            </linearGradient>
           )
         })}
       </defs>
@@ -741,17 +741,16 @@ function PriceChart({ p }: { p: Dict }) {
 
       {/* 퀀트 추세선 — 지지(녹) / 저항(적), 채널(점선), 강도별 굵기 */}
       {/* 수렴 구간에서는 gradient로 색 전이 (지지선 끝 붉게, 저항선 끝 녹색) */}
-      {allTrendLines.map(t => {
+      {allTrendLines.map((t, gi) => {
         const lineIdx = t.isSup
           ? supLines.findIndex(s => s === t)
           : resLines.findIndex(r => r === t)
         const cg = t.isSup ? supGradMap[lineIdx] : resGradMap[lineIdx]
-        const convGradId = cg ? (t.isSup ? cg.supGradId : cg.resGradId) : null
-        // 돌파/이탈 gradient가 수렴 gradient보다 우선:
-        //   하락 저항선 돌파 중 → 적→녹 (상방 돌파 진행 신호)
-        //   상승 지지선 이탈 중 → 녹→적 (하방 이탈 경고)
-        const breakGradId = t.broken ? `bo-${t.isSup ? 'sup' : 'res'}-${lineIdx}` : null
-        const gradId = breakGradId ?? convGradId
+        // 깨진 하락선만 gradient(현재가 우측 투명 소멸). 상승선은 깨져도 전 구간 녹색.
+        // 그 외에는 현재가 접촉 물듦만 — 미래 교차점은 물들지 않음 (펄스가 담당)
+        const breakGradId = t.broken && !t.rising ? `bo-${t.isSup ? 'sup' : 'res'}-${lineIdx}` : null
+        const touchGradId = touchTint[gi] ? `touch-${gi}` : null
+        const gradId = breakGradId ?? touchGradId
 
         const baseCol = t.rising ? '#34d399' : '#f87171'  // 기울기 기준: 상승=녹 / 하락=적
         const col = gradId ? `url(#${gradId})` : baseCol
