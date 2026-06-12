@@ -1,6 +1,6 @@
-/* AI 분석 — 관심종목 네트워크 그래프 (우주 배경 + 로고 노드 + 별 반짝임).
-   Force Directed Graph: spring + repulsion + 충돌회피 + 점수 기반 중심 인력
-   + 유기적 호흡 + 레이블 lag(텍스트 < 노드·선 이동속도). */
+/* AI 분석 — 관심종목 네트워크 그래프 (우주 배경 + 로고 + 별 반짝임).
+   Force Directed Graph: spring + repulsion + 충돌회피 + 경계 반발
+   + 유기적 호흡 + 레이블 lag. 중심 인력 없음 → 전체 공간 활용. */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { publicFetch } from '../../lib/publicApi'
@@ -25,7 +25,7 @@ const KNOWN_SECTORS = [
   '조선', '방산', '화학', '금융', '전력 인프라', '소비재', '기타',
 ]
 
-// 등락률(%) → 색상: 밝은녹 → 진한녹 → 무채색 → 탁한 붉은색
+// 등락률(%) → 틴트 색상 (로고 테두리 + glow용)
 function chgColor(chg: number): string {
   const c = Math.max(-10, Math.min(10, chg))
   if (c >= 0) {
@@ -36,17 +36,62 @@ function chgColor(chg: number): string {
   return `rgb(${Math.round(100 + t * 75)},${Math.round(116 - t * 36)},${Math.round(139 - t * 59)})`
 }
 
-// 로고 캐시: code → HTMLImageElement | null('failed') | undefined('not yet')
-type LogoState = HTMLImageElement | null
-const logoCache = new Map<string, LogoState | 'loading'>()
+// 시총 → 반지름 (비선형: 대형주 강조)
+function nodeRadius(capNorm: number): number {
+  return 3 + Math.pow(capNorm, 0.65) * 22  // 범위 3px(소형) ~ 25px(대형)
+}
 
-function getOrLoadLogo(code: string): LogoState {
+// 종목명 표시 오버라이드 (길거나 어색한 이름 → 짧은 커스텀 레이블)
+const DISPLAY_NAME: Record<string, string> = {
+  'SK하이닉스': 'SK닉스',
+  'KODEX 미국S&P500': 'S&P',
+  'POSCO홀딩스': 'P홀',
+  'LS마린솔루션': '마솔',
+}
+function displayName(name: string): string {
+  return DISPLAY_NAME[name] ?? name
+}
+
+// 로고 없을 때 원 안 텍스트 결정
+// - KODEX ETF: "KODEX 반도체" → "반도체", 공간 부족 시 첫 글자
+// - 영문 종목: 앞 2자 대문자
+// - 한글 종목: 첫 글자
+function fallbackLabel(name: string, r: number): { text: string; fs: number } {
+  const short = displayName(name)
+  const baseFs = Math.max(7, r * 0.72)
+  if (short.startsWith('KODEX ')) {
+    const word = short.slice(6).split(/\s+/)[0]
+    const fitFs = Math.min(baseFs, (r * 1.65) / (word.length * 0.62))
+    return fitFs >= 6
+      ? { text: word, fs: Math.max(6, fitFs) }
+      : { text: word[0], fs: baseFs }
+  }
+  if (/^[A-Za-z]/.test(short)) {
+    return { text: short.slice(0, 2).toUpperCase(), fs: Math.max(6, r * 0.62) }
+  }
+  // 오버라이드된 짧은 이름: 원에 들어가면 전체 표시
+  const fitFs = Math.min(baseFs, (r * 1.65) / (short.length * 0.62))
+  if (fitFs >= 6 && short.length > 1) return { text: short, fs: Math.max(6, fitFs) }
+  return { text: short[0], fs: baseFs }
+}
+
+// CDN 오매핑 확인된 코드 — 폴백(첫 글자 원) 사용
+const LOGO_SKIP = new Set([
+  '060370', // LS마린솔루션 → CDN이 KT 로고 반환
+])
+
+// 로고 캐시 (crossOrigin 없음 → 외부 CDN 로드 가능, canvas는 display-only라 taint 무관)
+type LogoEntry = HTMLImageElement | null | 'loading'
+const logoCache = new Map<string, LogoEntry>()
+
+function getOrLoadLogo(code: string): HTMLImageElement | null {
+  if (LOGO_SKIP.has(code)) return null
   const cached = logoCache.get(code)
   if (cached === 'loading') return null
-  if (cached !== undefined) return cached as LogoState
+  if (cached !== undefined) return cached as HTMLImageElement | null
   logoCache.set(code, 'loading')
   const img = new Image()
-  img.crossOrigin = 'anonymous'
+  // crossOrigin 제거: CORS 헤더 없는 CDN도 drawImage로 표시 가능
   img.onload = () => logoCache.set(code, img)
   img.onerror = () => logoCache.set(code, null)
   img.src = `https://file.alphasquare.co.kr/media/images/stock_logo/kr/${code}.png`
@@ -60,52 +105,60 @@ export function PublicAiHistoryPage() {
   const targetCamRef = useRef<{ scale: number; tx: number; ty: number } | null>(null)
   const hoverRef = useRef<number>(-1)
   const highlightRef = useRef<Set<number> | null>(null)
-  const alphaRef = useRef(0)           // 시작 0 → 첫 틱에서 0.28로 set
+  const alphaRef = useRef(0.0)
   const labelPosRef = useRef<Array<{ x: number; y: number }>>([])
   const timeRef = useRef(0)
   const starsRef = useRef<Star[]>([])
+  // 물리 경계로 쓸 캔버스 크기 (렌더 루프에서 매 프레임 갱신)
+  const cvSizeRef = useRef({ w: 900, h: 600 })
 
   const [q, setQ] = useState('')
+  const [reply, setReply] = useState<string | null>(null)
   const [files, setFiles] = useState<string[]>([])
   const [reportTarget, setReportTarget] = useState<{ code: string; name: string } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const dragRef = useRef<{ sx: number; sy: number; tx: number; ty: number } | null>(null)
 
-  // ── 별 생성 (최초 1회) ──
+  // ── 별 생성 ──
   useEffect(() => {
     const arr: Star[] = []
-    for (let i = 0; i < 220; i++) {
+    for (let i = 0; i < 260; i++) {
       arr.push({
-        x: Math.random(),
-        y: Math.random(),
-        r: 0.25 + Math.random() * 1.1,
-        base: 0.15 + Math.random() * 0.65,
+        x: Math.random(), y: Math.random(),
+        r: 0.2 + Math.random() * 1.3,
+        base: 0.12 + Math.random() * 0.6,
         phase: Math.random() * Math.PI * 2,
-        speed: 0.18 + Math.random() * 0.55,
+        speed: 0.15 + Math.random() * 0.5,
       })
     }
     starsRef.current = arr
   }, [])
 
-  // ── 그래프 로드 + 초기 배치 ──
+  // ── 그래프 로드 + 초기 배치: 캔버스 전체 면적으로 흩뿌림 ──
   useEffect(() => {
     publicFetch<Graph>('/api/public/stock-graph').then(g => {
       const sectors = Array.from(new Set(g.nodes.map(n => n.sector)))
       const secAngle: Record<string, number> = {}
       sectors.forEach((s, i) => { secAngle[s] = (i / sectors.length) * Math.PI * 2 })
+
+      // 캔버스 크기를 기준으로 world 좌표계 결정
+      const W = cvSizeRef.current.w, H = cvSizeRef.current.h
+      const maxRx = W * 0.46, maxRy = H * 0.44
+
       g.nodes.forEach(n => {
-        // 높은 점수 → 안쪽, 하락 종목 → 바깥
-        const decay = n.chg1d < 0 ? 1 + (-n.chg1d / 10) * 0.45 : 1
-        const base = (200 + Math.random() * 120) * (1.1 - n.score * 0.38) * decay
-        const a = (secAngle[n.sector] ?? 0) + (Math.random() - 0.5) * 0.85
-        n.x = Math.cos(a) * base
-        n.y = Math.sin(a) * base
+        // 섹터별 방위각 + 랜덤 오프셋으로 고르게 퍼뜨림
+        const a = (secAngle[n.sector] ?? 0) + (Math.random() - 0.5) * 1.1
+        // 거리: 캔버스 전체 반경의 20% ~ 90% 사이 랜덤 배치
+        const minR = 0.2, maxR = 0.88
+        const t = minR + Math.random() * (maxR - minR)
+        n.x = Math.cos(a) * maxRx * t
+        n.y = Math.sin(a) * maxRy * t
         n.vx = 0; n.vy = 0
       })
       labelPosRef.current = g.nodes.map(n => ({ x: n.x, y: n.y }))
       graphRef.current = g
-      alphaRef.current = 0.28   // 낮게 시작 → 드라마틱한 몰려드는 효과 없음
-    }).catch(() => { /* 조용히 */ })
+      alphaRef.current = 0.22   // 낮게 시작 → 조용한 안착
+    }).catch(() => { /* silent */ })
   }, [])
 
   // ── 물리 + 렌더 루프 ──
@@ -119,23 +172,24 @@ export function PublicAiHistoryPage() {
         const dpr = window.devicePixelRatio || 1
         const W = cv.clientWidth, H = cv.clientHeight
         if (cv.width !== W * dpr) { cv.width = W * dpr; cv.height = H * dpr }
+        cvSizeRef.current = { w: W, h: H }
         const ctx = cv.getContext('2d')!
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
-        // ── 우주 배경 ──
-        const bg = ctx.createRadialGradient(W / 2, H * 0.42, 0, W / 2, H * 0.42, Math.max(W, H) * 0.75)
-        bg.addColorStop(0, '#0c1828')
-        bg.addColorStop(0.55, '#060d18')
+        // ── 우주 배경 그라데이션 ──
+        const bg = ctx.createRadialGradient(W / 2, H * 0.45, 0, W / 2, H * 0.45, Math.max(W, H) * 0.78)
+        bg.addColorStop(0, '#0d1b2a')
+        bg.addColorStop(0.5, '#060e18')
         bg.addColorStop(1, '#020508')
         ctx.fillStyle = bg
         ctx.fillRect(0, 0, W, H)
 
-        // ── 별 (반짝임: 위치 고정, 밝기만 흔들림) ──
+        // ── 별 반짝임 (위치 고정, 밝기만 진동) ──
         const t = timeRef.current
         for (const s of starsRef.current) {
-          const alpha = Math.max(0.05, Math.min(1, s.base + Math.sin(t * s.speed + s.phase) * 0.18))
+          const alpha = Math.max(0.04, Math.min(1, s.base + Math.sin(t * s.speed + s.phase) * 0.2))
           ctx.globalAlpha = alpha
-          ctx.fillStyle = '#e8f0ff'
+          ctx.fillStyle = '#ddeeff'
           ctx.beginPath()
           ctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2)
           ctx.fill()
@@ -144,73 +198,79 @@ export function PublicAiHistoryPage() {
 
         if (g) {
           const a = alphaRef.current
+          const bx = W * 0.46, by = H * 0.44  // 소프트 경계
+
           if (a > 0.003) {
             const N = g.nodes.length
 
-            // 반발 + 충돌 회피
+            // ── 반발 + 충돌 회피 ──
             for (let i = 0; i < N; i++) {
               const ni = g.nodes[i]
-              const ri = 4 + ni.capNorm * 9
+              const ri = nodeRadius(ni.capNorm)
               for (let j = i + 1; j < N; j++) {
                 const nj = g.nodes[j]
-                const rj = 4 + nj.capNorm * 9
+                const rj = nodeRadius(nj.capNorm)
                 let dx = ni.x - nj.x, dy = ni.y - nj.y
                 let d2 = dx * dx + dy * dy
                 if (d2 < 0.1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d2 = 0.1 }
                 const d = Math.sqrt(d2)
-                // 충돌 회피
-                const minD = ri + rj + 18
+                // 충돌 회피 (반지름 합 + 여유)
+                const minD = ri + rj + 20
                 if (d < minD) {
-                  const push = ((minD - d) / minD) * 0.6
+                  const push = ((minD - d) / minD) * 0.65
                   ni.vx += (dx / d) * push; ni.vy += (dy / d) * push
                   nj.vx -= (dx / d) * push; nj.vy -= (dy / d) * push
                 }
-                if (d2 > 120000) continue
-                // 일반 반발 (더 강하게)
-                const capScale = Math.sqrt((1 - 0.38 * ni.capNorm) * (1 - 0.38 * nj.capNorm))
-                const f = (3200 * capScale / d2) * a * 0.7
+                // 일반 반발: 멀리까지 작용
+                if (d2 > 160000) continue
+                const capScale = Math.sqrt((1 - 0.35 * ni.capNorm) * (1 - 0.35 * nj.capNorm))
+                const f = (5500 * capScale / d2) * a * 0.7
                 ni.vx += (dx / d) * f; ni.vy += (dy / d) * f
                 nj.vx -= (dx / d) * f; nj.vy -= (dy / d) * f
               }
             }
 
-            // 스프링 (엣지) + 유기적 호흡
+            // ── 스프링 (유기적 호흡) ──
             for (const e of g.edges) {
               const na = g.nodes[e.a], nb = g.nodes[e.b]
               const dx = nb.x - na.x, dy = nb.y - na.y
               const d = Math.max(Math.sqrt(dx * dx + dy * dy), 1)
               const breathPhase = (e.a * 1.618 + e.b * 0.927) % (Math.PI * 2)
-              const L = 70 + (1 - e.w) * 180 + Math.sin(t * 0.35 + breathPhase) * 5
+              const L = 80 + (1 - e.w) * 200 + Math.sin(t * 0.35 + breathPhase) * 5
               const boost = na.sector === nb.sector ? (g.sectorBoost[na.sector] ?? 1) : 1
-              const f = 0.007 * e.w * boost * (d - L) * a
+              const f = 0.006 * e.w * boost * (d - L) * a
               na.vx += (dx / d) * f; na.vy += (dy / d) * f
               nb.vx -= (dx / d) * f; nb.vy -= (dy / d) * f
             }
 
-            // 중심 인력 (점수 높은 종목 강하게, 하락 종목 약하게)
-            for (const n of g.nodes) {
-              const scorePull = 0.0012 + n.score * 0.004
-              const chgFactor = n.chg1d < 0 ? Math.max(0.2, 1 + n.chg1d / 12) : 1.0
-              n.vx += -n.x * scorePull * chgFactor * a
-              n.vy += -n.y * scorePull * chgFactor * a
+            // ── 경계 반발 + 지속 미세 진동 ──
+            g.nodes.forEach((n, i) => {
+              const rx = Math.abs(n.x) / bx, ry = Math.abs(n.y) / by
+              if (rx > 0.75) n.vx -= Math.sign(n.x) * (rx - 0.75) * 1.2 * a
+              if (ry > 0.75) n.vy -= Math.sign(n.y) * (ry - 0.75) * 1.2 * a
+              // 노드마다 위상 다른 sin 힘 → 완전히 멈추지 않고 살짝 흔들림
+              const idlePhase = i * 2.399  // 황금각 간격
+              n.vx += Math.sin(t * 0.28 + idlePhase) * 0.06
+              n.vy += Math.cos(t * 0.21 + idlePhase * 1.4) * 0.06
               n.vx *= 0.82; n.vy *= 0.82
               n.x += n.vx; n.y += n.vy
-            }
-            alphaRef.current = Math.max(a * 0.9945, 0.003)
+            })
+            // alpha 최솟값 0.018: 힘이 항상 살아있음
+            alphaRef.current = Math.max(a * 0.9945, 0.018)
           }
 
-          // 레이블 lag
+          // ── 레이블 lag ──
           const lp = labelPosRef.current
           if (lp.length !== g.nodes.length) {
             labelPosRef.current = g.nodes.map(n => ({ x: n.x, y: n.y }))
           } else {
             for (let i = 0; i < g.nodes.length; i++) {
-              lp[i].x += (g.nodes[i].x - lp[i].x) * 0.1
-              lp[i].y += (g.nodes[i].y - lp[i].y) * 0.1
+              lp[i].x += (g.nodes[i].x - lp[i].x) * 0.09
+              lp[i].y += (g.nodes[i].y - lp[i].y) * 0.09
             }
           }
 
-          // 카메라 보간
+          // ── 카메라 보간 ──
           const cam = camRef.current
           const tgt = targetCamRef.current
           if (tgt) {
@@ -224,55 +284,74 @@ export function PublicAiHistoryPage() {
 
           const hl = highlightRef.current
 
-          // 엣지 (노드 실시간 위치)
+          // ── 엣지 ──
           for (const e of g.edges) {
             const na = g.nodes[e.a], nb = g.nodes[e.b]
             const dim = hl && !(hl.has(e.a) && hl.has(e.b))
-            ctx.strokeStyle = `rgba(148,163,184,${dim ? 0.025 : 0.04 + e.w * 0.12})`
-            ctx.lineWidth = dim ? 0.4 : 0.4 + e.w * 0.8
+            ctx.strokeStyle = `rgba(148,163,184,${dim ? 0.02 : 0.035 + e.w * 0.1})`
+            ctx.lineWidth = dim ? 0.3 : 0.4 + e.w * 0.7
             ctx.beginPath()
             ctx.moveTo(toSX(na.x), toSY(na.y))
             ctx.lineTo(toSX(nb.x), toSY(nb.y))
             ctx.stroke()
           }
 
-          // 노드 (실시간) + 레이블 (lag 위치)
+          // ── 노드 (실시간) + 레이블 (lag) ──
           const lp2 = labelPosRef.current
           g.nodes.forEach((n, i) => {
-            const r = (4 + n.capNorm * 9) * Math.min(cam.scale, 1.8)
+            const r = nodeRadius(n.capNorm) * Math.min(cam.scale, 2.0)
             const x = toSX(n.x), y = toSY(n.y)
-            const color = chgColor(n.chg1d)
             const dim = hl && !hl.has(i)
-            ctx.globalAlpha = dim ? 0.08 : 1
+            ctx.globalAlpha = dim ? 0.07 : 1
 
-            // ── 로고 또는 폴백 ──
             const logo = getOrLoadLogo(n.code)
+            const rising = n.chg1d > 0
+            const fallRatio = n.chg1d < 0 ? Math.min((-n.chg1d) / 8, 1) : 0  // 0~1 하락 강도
+
+            // ── 상승: 녹색 glow 일렁임 (상승 강할수록 진폭 더 크게) ──
+            if (rising && !dim) {
+              const glowBase = 5 + Math.min(n.chg1d / 5, 1) * 14   // 5~19
+              const glowAmp  = Math.min(n.chg1d / 3, 1) * 14        // 0~14
+              const glowPhase = i * 0.731  // 노드마다 다른 위상
+              ctx.shadowColor = '#4ade80'
+              ctx.shadowBlur = Math.max(0, glowBase + Math.sin(t * 1.4 + glowPhase) * glowAmp)
+            } else {
+              ctx.shadowBlur = 0
+            }
+
+            // ── 하락: grayscale 필터 ──
+            ctx.filter = fallRatio > 0 ? `grayscale(${Math.round(fallRatio * 90)}%)` : 'none'
+
             if (logo && r >= 5) {
+              // 로고 원형 클립
               ctx.save()
               ctx.beginPath()
               ctx.arc(x, y, r, 0, Math.PI * 2)
               ctx.clip()
               ctx.drawImage(logo, x - r, y - r, r * 2, r * 2)
               ctx.restore()
-              // 등락률 색상 테두리
-              ctx.strokeStyle = color
-              ctx.lineWidth = i === hoverRef.current ? 2 : 1.2
+              // 테두리: 상승=녹색, 하락=무채색
+              ctx.filter = fallRatio > 0 ? `grayscale(${Math.round(fallRatio * 90)}%)` : 'none'
+              ctx.strokeStyle = rising ? chgColor(n.chg1d) : `rgba(120,130,145,${0.6 - fallRatio * 0.3})`
+              ctx.lineWidth = i === hoverRef.current ? 2.2 : 1.3
               ctx.beginPath()
               ctx.arc(x, y, r, 0, Math.PI * 2)
               ctx.stroke()
             } else {
               // 폴백: 색상 원 + 첫 글자
-              ctx.fillStyle = color
+              ctx.fillStyle = chgColor(n.chg1d)
               ctx.beginPath()
               ctx.arc(x, y, r, 0, Math.PI * 2)
               ctx.fill()
               if (r >= 6) {
+                ctx.shadowBlur = 0
+                ctx.filter = 'none'
+                const { text: fl, fs: ffs } = fallbackLabel(n.name, r)
                 ctx.fillStyle = 'rgba(5,8,15,0.82)'
-                const fs = Math.max(7, r * 0.72)
-                ctx.font = `bold ${fs}px sans-serif`
+                ctx.font = `bold ${ffs}px sans-serif`
                 ctx.textAlign = 'center'
                 ctx.textBaseline = 'middle'
-                ctx.fillText(n.name[0], x, y)
+                ctx.fillText(fl, x, y)
                 ctx.textBaseline = 'alphabetic'
               }
               if (i === hoverRef.current) {
@@ -284,17 +363,33 @@ export function PublicAiHistoryPage() {
               }
             }
 
-            // 레이블: lag 위치, 폰트 크기 ∝ 원 크기
+            // 필터·그림자 리셋
+            ctx.shadowBlur = 0
+            ctx.filter = 'none'
+
+            // ── 레이블 (lag 위치, 폰트 ∝ 원) ──
             const lx = toSX(lp2[i]?.x ?? n.x)
             const ly = toSY(lp2[i]?.y ?? n.y)
-            const labelR = (4 + n.capNorm * 9) * Math.min(cam.scale, 1.8)
-            if ((labelR > 6 || i === hoverRef.current || (hl && hl.has(i))) && cam.scale > 0.45) {
-              const fs = Math.max(8, Math.min(14, labelR * 0.78))
-              ctx.fillStyle = dim ? 'rgba(241,245,249,0.15)' : 'rgba(241,245,249,0.82)'
+            if ((r > 6 || i === hoverRef.current || (hl && hl.has(i))) && cam.scale > 0.35) {
+              const fs = Math.max(8, Math.min(16, r * 0.62))
               ctx.font = `${fs}px sans-serif`
               ctx.textAlign = 'center'
               ctx.textBaseline = 'alphabetic'
-              ctx.fillText(n.name, lx, ly + labelR + 10)
+              const ty = ly + r + 10
+              if (!dim) {
+                // 검은 배경 박스 (시인성)
+                const label = displayName(n.name)
+                const tw = ctx.measureText(label).width
+                const pad = 3
+                ctx.fillStyle = 'rgba(2,5,14,0.72)'
+                ctx.fillRect(lx - tw / 2 - pad, ty - fs - 1, tw + pad * 2, fs + 4)
+                // 상승 강할수록 더 하얗게
+                const brightness = dim ? 0.12 : Math.min(0.72 + Math.max(n.chg1d, 0) / 10 * 0.28, 1)
+                ctx.fillStyle = `rgba(241,245,249,${brightness.toFixed(2)})`
+              } else {
+                ctx.fillStyle = 'rgba(241,245,249,0.12)'
+              }
+              ctx.fillText(displayName(n.name), lx, ty)
             }
             ctx.globalAlpha = 1
           })
@@ -320,7 +415,7 @@ export function PublicAiHistoryPage() {
     const p = screenToWorld(sx, sy)
     let best = -1, bd = 1e9
     g.nodes.forEach((n, i) => {
-      const r = (5 + n.capNorm * 9) / Math.min(camRef.current.scale, 1.8) + 6
+      const r = nodeRadius(n.capNorm) / Math.min(camRef.current.scale, 2.0) + 7
       const d = Math.hypot(n.x - p.x, n.y - p.y)
       if (d < r && d < bd) { best = i; bd = d }
     })
@@ -340,7 +435,6 @@ export function PublicAiHistoryPage() {
     setTimeout(() => setReportTarget({ code: n.code, name: n.name }), 700)
   }, [zoomToNode])
 
-  // ── 타이핑 실시간 줌 (가장 높은 score 매칭 종목으로) ──
   const handleLiveSearch = useCallback((text: string) => {
     const g = graphRef.current
     const t = text.trim()
@@ -361,11 +455,23 @@ export function PublicAiHistoryPage() {
     }
   }, [])
 
-  // ── 검색 제출 ──
+  // 리포트 없음 → 메시지 체인 + 백그라운드 분석 큐
+  const queueAnalysis = useCallback((stockName: string, query: string) => {
+    setReply(`${stockName}의 리포트를 찾고 있습니다`)
+    setTimeout(() => setReply('곧 준비해 드리겠습니다'), 2200)
+    setTimeout(() => setReply('준비된 뒤 말씀드리겠습니다'), 4600)
+    setTimeout(() => setReply(null), 7500)
+    fetch('/api/public/queue-analysis', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+    }).catch(() => { /* silent */ })
+  }, [])
+
   const handleQuery = useCallback((raw: string) => {
     const g = graphRef.current
     const text = raw.trim(); if (!text || !g) return
-    setQ(''); highlightRef.current = null
+    setQ(''); highlightRef.current = null; setReply(null)
     const lower = text.toLowerCase()
     const nameHits = g.nodes
       .map((n, i) => ({ n, i }))
@@ -376,25 +482,29 @@ export function PublicAiHistoryPage() {
     if (nameHits.length > 0) {
       nameHits.sort((a, b) => b.n.score - a.n.score)
       const top = nameHits[0]
-      if (top.n.hasReport) openReport(top.i)
-      else zoomToNode(top.i)
+      if (top.n.hasReport) {
+        openReport(top.i)
+      } else {
+        zoomToNode(top.i)
+        queueAnalysis(top.n.name, top.n.code)
+      }
       return
     }
     if (sectorHit) {
-      const ids = new Set(
-        g.nodes.map((n, i) => (n.sector === sectorHit ? i : -1)).filter(i => i >= 0))
+      const ids = new Set(g.nodes.map((n, i) => (n.sector === sectorHit ? i : -1)).filter(i => i >= 0))
       highlightRef.current = ids
-      const xs = [...ids].map(i => g.nodes[i].x)
-      const ys = [...ids].map(i => g.nodes[i].y)
+      const xs = [...ids].map(i => g.nodes[i].x), ys = [...ids].map(i => g.nodes[i].y)
       targetCamRef.current = {
         scale: 1.6,
         tx: -(xs.reduce((s, v) => s + v, 0) / xs.length),
         ty: -(ys.reduce((s, v) => s + v, 0) / ys.length),
       }
+      return
     }
-  }, [openReport, zoomToNode])
+    // 그래프에 없는 종목 → 이름으로 분석 요청
+    queueAnalysis(text, text)
+  }, [openReport, zoomToNode, queueAnalysis])
 
-  // ── 첨부 ──
   const onFiles = useCallback(async (list: FileList | null) => {
     if (!list?.length) return
     const names: string[] = []
@@ -418,7 +528,7 @@ export function PublicAiHistoryPage() {
         style={{ width: '100%', height: '100%', display: 'block', cursor: 'grab' }}
         onWheel={e => {
           const cam = camRef.current
-          cam.scale = Math.min(Math.max(cam.scale * (e.deltaY < 0 ? 1.12 : 0.9), 0.3), 4.5)
+          cam.scale = Math.min(Math.max(cam.scale * (e.deltaY < 0 ? 1.12 : 0.9), 0.28), 5)
           targetCamRef.current = null
         }}
         onMouseDown={e => {
@@ -453,44 +563,51 @@ export function PublicAiHistoryPage() {
         pointerEvents: 'none',
       }}>
         <p style={{
-          margin: 0, fontSize: 12, color: 'rgba(226,232,240,0.38)',
+          margin: 0, fontSize: 12, color: 'rgba(226,232,240,0.35)',
           fontWeight: 500, letterSpacing: '0.07em', pointerEvents: 'none',
-        }}>
-          준비되셨나요?
-        </p>
+        }}>준비되셨나요?</p>
         <div style={{
           pointerEvents: 'all', width: '100%',
           display: 'flex', alignItems: 'center', gap: 8,
           padding: '6px 8px 6px 14px', borderRadius: 999,
-          background: 'rgba(10,16,32,0.85)', border: '1px solid rgba(255,255,255,0.1)',
-          boxShadow: '0 4px 28px rgba(0,0,0,0.6)', backdropFilter: 'blur(14px)',
+          background: 'rgba(8,14,28,0.82)', border: '1px solid rgba(255,255,255,0.09)',
+          boxShadow: '0 4px 28px rgba(0,0,0,0.65)', backdropFilter: 'blur(16px)',
         }}>
-          <button
-            type="button" onClick={() => fileInputRef.current?.click()}
+          <button type="button" onClick={() => fileInputRef.current?.click()}
             title="사진·보고서 첨부 (5MB 이하)"
-            style={{ background: 'none', border: 'none', color: '#4b5e7a', fontSize: 22, cursor: 'pointer', lineHeight: 1, padding: '0 2px' }}
-          >+</button>
+            style={{ background: 'none', border: 'none', color: '#3d5068', fontSize: 22, cursor: 'pointer', lineHeight: 1, padding: '0 2px' }}>+</button>
           <input ref={fileInputRef} type="file" multiple
             accept=".png,.jpg,.jpeg,.webp,.gif,.pdf,.csv,.xlsx,.txt"
             style={{ display: 'none' }}
-            onChange={e => { void onFiles(e.target.files); e.target.value = '' }}
-          />
-          <input
-            value={q}
+            onChange={e => { void onFiles(e.target.files); e.target.value = '' }} />
+          <input value={q}
             onChange={e => { setQ(e.target.value); handleLiveSearch(e.target.value) }}
             onKeyDown={e => { if (e.key === 'Enter') handleQuery(q) }}
             placeholder="종목명 · 섹터 · 코드"
-            style={{ flex: 1, background: 'none', border: 'none', outline: 'none', color: '#e2e8f0', fontSize: 15, padding: '10px 0' }}
-          />
+            style={{ flex: 1, background: 'none', border: 'none', outline: 'none', color: '#dde6f0', fontSize: 15, padding: '10px 0' }} />
           {files.length > 0 && (
-            <span style={{ fontSize: 11, color: '#3d4e63', flexShrink: 0 }}>📎{files.length}</span>
+            <span style={{ fontSize: 11, color: '#2d3e52', flexShrink: 0 }}>📎{files.length}</span>
           )}
-          <button
-            type="button" onClick={() => handleQuery(q)}
-            style={{ width: 36, height: 36, borderRadius: 999, border: 'none', cursor: 'pointer', background: '#d1dae8', color: '#0a1020', fontSize: 16, fontWeight: 800, flexShrink: 0 }}
-          >↑</button>
+          <button type="button" onClick={() => handleQuery(q)}
+            style={{ width: 36, height: 36, borderRadius: 999, border: 'none', cursor: 'pointer', background: '#c8d4e4', color: '#08101e', fontSize: 16, fontWeight: 800, flexShrink: 0 }}>↑</button>
         </div>
       </div>
+
+      {/* 응답 말풍선 */}
+      {reply && (
+        <div style={{
+          position: 'absolute', top: 100, left: '50%', transform: 'translateX(-50%)',
+          maxWidth: 420, padding: '10px 18px', borderRadius: 12,
+          background: 'rgba(8,14,28,0.88)', border: '1px solid rgba(255,255,255,0.1)',
+          color: 'rgba(226,232,240,0.9)', fontSize: 14, lineHeight: 1.6,
+          textAlign: 'center', backdropFilter: 'blur(12px)',
+          boxShadow: '0 4px 20px rgba(0,0,0,0.5)',
+          pointerEvents: 'none',
+          animation: 'fadeIn 0.35s ease',
+        }}>
+          {reply}
+        </div>
+      )}
 
       {reportTarget && (
         <StockReportModal

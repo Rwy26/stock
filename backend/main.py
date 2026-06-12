@@ -5632,6 +5632,96 @@ def public_watchlist():
     return {"items": items, "cached": False, "quoteBasis": basis}
 
 
+def _fdr_lookup(query: str) -> tuple[str, str] | None:
+    """FinanceDataReader로 종목명 부분 매칭 → (code, name). 없으면 None."""
+    try:
+        import FinanceDataReader as fdr
+        df = fdr.StockListing("KRX")
+        hits = df[df["Name"].str.contains(query, na=False, regex=False)]
+        if hits.empty:
+            return None
+        row = hits.iloc[0]
+        return str(row["Code"]).zfill(6), str(row["Name"])
+    except Exception:
+        return None
+
+
+@app.post("/api/public/queue-analysis")
+def public_queue_analysis(body: dict = Body(default={})):
+    """공개 페이지 분석 요청 → DB/FDR 종목 검색 → admin 워치리스트 편입 → 백그라운드 AI 분석."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    query = str(body.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query required")
+
+    code: str | None = None
+    name: str = query
+
+    with apollo_db.session_scope() as session:
+        # 1) DB 정확 매칭 (코드 또는 이름)
+        row = session.execute(
+            select(models.Stock).where(
+                (models.Stock.code == query) | (models.Stock.name == query)
+            )
+        ).scalar_one_or_none()
+        # 2) DB 부분 매칭
+        if row is None:
+            row = session.execute(
+                select(models.Stock).where(models.Stock.name.contains(query))
+            ).scalars().first()
+
+        if row is not None:
+            code = str(row.code)
+            name = str(row.name)
+        else:
+            # 3) DB에 없으면 FDR(KRX 전종목)로 이름 검색
+            fdr_result = _fdr_lookup(query)
+            if fdr_result is None:
+                return {"ok": True, "status": "unknown", "name": query}
+            code, name = fdr_result
+            # Stock 테이블에 없으면 추가
+            existing = session.execute(
+                select(models.Stock).where(models.Stock.code == code)
+            ).scalar_one_or_none()
+            if existing is None:
+                session.add(models.Stock(code=code, name=name))
+
+        # exclusion_engine 차단 종목 스킵
+        try:
+            import exclusion_engine
+            exclusion_engine.gate(session, code, name)
+        except Exception:
+            return {"ok": True, "status": "excluded", "name": name}
+
+        # admin(user_id=1) 워치리스트 편입
+        exists = session.execute(
+            select(models.Watchlist.id).where(
+                models.Watchlist.user_id == 1,
+                models.Watchlist.stock_code == code,
+            )
+        ).first()
+        if not exists:
+            session.add(models.Watchlist(user_id=1, stock_code=code))
+
+    # 백그라운드 AI 분석
+    def _run(c: str):
+        try:
+            import stock_compass
+            stock_compass.analyze_stock(c, with_ai=True)
+            try:
+                import graph_engine
+                graph_engine.build_graph(force=True)
+            except Exception:
+                pass
+        except Exception as exc:
+            import logging
+            logging.getLogger("public_queue").warning("queue-analysis failed %s: %s", c, exc)
+
+    threading.Thread(target=_run, args=(code,), daemon=True).start()
+    return {"ok": True, "status": "queued", "name": name, "code": code}
+
+
 @app.post("/api/public/ai-request")
 def public_ai_request(body: PublicAiRequestBody):
     """게스트 'AI 차트 분석 요청' 기록 (분석 미실행, 유료 API 호출 없음)."""
