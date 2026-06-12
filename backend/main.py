@@ -5710,12 +5710,88 @@ def admin_system_status(_admin=Depends(require_admin)):
             info["error"] = str(e)
         scheduled_tasks.append(info)
 
+    # Hourly activity: last 12 hours (login + engine events grouped by hour)
+    hourly_activity: list[dict] = []
+    data_freshness: list[dict] = []
+    if apollo_db is not None and models is not None:
+        try:
+            db_sys: Session = apollo_db.get_session_factory()()
+            try:
+                now_dt = datetime.now()
+                cutoff = now_dt - timedelta(hours=12)
+
+                # Build hour buckets
+                hour_counts: dict[str, int] = {}
+                for h in range(11, -1, -1):
+                    hr_dt = (now_dt - timedelta(hours=h)).replace(minute=0, second=0, microsecond=0)
+                    hour_counts[hr_dt.strftime('%H:00')] = 0
+
+                for at_val in db_sys.execute(
+                    select(models.LoginHistory.at).where(models.LoginHistory.at >= cutoff)
+                ).scalars():
+                    if at_val:
+                        key = at_val.replace(minute=0, second=0, microsecond=0).strftime('%H:00')
+                        if key in hour_counts:
+                            hour_counts[key] += 1
+
+                for at_val in db_sys.execute(
+                    select(models.AutomationEngineLog.at).where(models.AutomationEngineLog.at >= cutoff)
+                ).scalars():
+                    if at_val:
+                        key = at_val.replace(minute=0, second=0, microsecond=0).strftime('%H:00')
+                        if key in hour_counts:
+                            hour_counts[key] += 1
+
+                hourly_activity = [{"hour": k, "count": v} for k, v in hour_counts.items()]
+
+                # Data freshness
+                today = date.today()
+                threshold_3d = today - timedelta(days=3)
+
+                last_price = db_sys.execute(select(func.max(models.DailyPrice.trading_date))).scalar()
+                data_freshness.append({
+                    "label": "일별 주가",
+                    "lastDate": last_price.isoformat() if last_price else None,
+                    "status": "ok" if last_price and last_price >= threshold_3d else "stale",
+                })
+
+                last_short = db_sys.execute(select(func.max(models.ShortSellingDaily.trade_date))).scalar()
+                data_freshness.append({
+                    "label": "공매도 거래량",
+                    "lastDate": last_short.isoformat() if last_short else None,
+                    "status": "ok" if last_short and last_short >= threshold_3d else "stale",
+                })
+
+                has_balance = db_sys.execute(
+                    select(func.count()).select_from(models.ShortSellingDaily)
+                    .where(models.ShortSellingDaily.balance_qty.isnot(None))
+                    .where(models.ShortSellingDaily.balance_qty > 0)
+                ).scalar()
+                data_freshness.append({
+                    "label": "공매도 잔고 (KRX)",
+                    "lastDate": None,
+                    "status": "ok" if has_balance else "stale",
+                })
+
+                last_rec = db_sys.execute(select(func.max(models.Recommendation.rec_date))).scalar()
+                data_freshness.append({
+                    "label": "추천 종목",
+                    "lastDate": last_rec.isoformat() if last_rec else None,
+                    "status": "ok" if last_rec and last_rec >= today - timedelta(days=1) else "stale",
+                })
+            finally:
+                db_sys.close()
+        except Exception:
+            pass
+
     return {
         "uptimeSec": uptime_sec,
         "startTime": datetime.fromtimestamp(_app_start_time).isoformat(),
         "killSwitchOn": _is_kill_switch_on(),
         "gitLastCommit": git_info,
         "scheduledTasks": scheduled_tasks,
+        "hourlyActivity": hourly_activity,
+        "dataFreshness": data_freshness,
     }
 
 
@@ -5730,7 +5806,7 @@ def admin_pending_items(_admin=Depends(require_admin)):
             try:
                 from sqlalchemy import text as _text
                 count = db.execute(
-                    _text("SELECT COUNT(*) FROM short_selling_daily WHERE balance_shares > 0 LIMIT 1")
+                    _text("SELECT COUNT(*) FROM short_selling_daily WHERE balance_qty > 0 LIMIT 1")
                 ).scalar()
                 if not count:
                     items.append({

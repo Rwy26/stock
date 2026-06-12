@@ -3,6 +3,7 @@ import { fetchJson } from '../lib/api'
 import { formatKRW, formatNumber, formatPercent } from '../lib/format'
 import { UsBondsChart } from '../components/UsBondsChart'
 import { DxyChart } from '../components/DxyChart'
+import { DevMonitor } from '../components/DevMonitor'
 
 type DashboardResponse = {
   kpis: {
@@ -286,6 +287,7 @@ export function DashboardPage() {
             </div>
           )}
         </article>
+        <DevMonitor />
       </section>
     </>
   )
