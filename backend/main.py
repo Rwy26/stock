@@ -1065,6 +1065,15 @@ def _parse_positive_int_like(value: object | None) -> int | None:
 def _run_sa_engine_tick(db: Session, *, user_id: int, profile, now: datetime) -> None:
     assert models is not None
 
+    # Skip silently if KIS profile is not configured (rate-limited log: once per 10 min).
+    if not str(getattr(profile, "app_key", "") or "").strip() or not str(getattr(profile, "app_secret", "") or "").strip():
+        _log_engine_skip_rate_limited(
+            db, user_id=int(user_id), engine="sa", reason="no_profile",
+            message="SA 엔진 스킵: KIS 프로필(appKey/appSecret) 미설정",
+            now_ts=time.time(),
+        )
+        return
+
     # Apply per-user config (maxPositions + budget-based sizing).
     max_positions = 5
     cfg_obj: dict | None = None
@@ -1181,6 +1190,15 @@ def _run_sa_engine_tick(db: Session, *, user_id: int, profile, now: datetime) ->
 
 def _run_plus_engine_tick(db: Session, *, user_id: int, profile, now: datetime) -> None:
     assert models is not None
+
+    # Skip silently if KIS profile is not configured (rate-limited log: once per 10 min).
+    if not str(getattr(profile, "app_key", "") or "").strip() or not str(getattr(profile, "app_secret", "") or "").strip():
+        _log_engine_skip_rate_limited(
+            db, user_id=int(user_id), engine="plus", reason="no_profile",
+            message="Plus 엔진 스킵: KIS 프로필(appKey/appSecret) 미설정",
+            now_ts=time.time(),
+        )
+        return
 
     # Apply per-user config (maxPositions + budget-based sizing).
     max_positions = 5

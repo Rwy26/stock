@@ -1195,6 +1195,20 @@ export function CompassReport({ data }: { data: Dict }) {
         ))}
       </div>
 
+      {/* 손익비 쉬운 설명 — 잃을 1 대비 벌 수 있는 배수 */}
+      {comp.riskReward != null && data.targets?.avgTargetUpside != null && stopPrice && cur && (
+        <p style={{
+          fontSize: 12, color: 'rgba(241,245,249,0.6)', lineHeight: 1.6,
+          margin: '-4px 2px 12px', padding: '0 4px',
+        }}>
+          <b style={{ color: '#60a5fa' }}>손익비 {comp.riskReward}</b>이란?
+          예측이 맞으면 <b style={{ color: '#34d399' }}>+{data.targets.avgTargetUpside}%</b> 벌고,
+          틀리면 <b style={{ color: '#f87171' }}>{((stopPrice / cur - 1) * 100).toFixed(1)}%</b>에서 멈춥니다.
+          잃을 수 있는 돈 1 대비 벌 수 있는 돈이 {comp.riskReward}배라는 뜻 —
+          1보다 크면 틀릴 때보다 맞힐 때 더 크게 가져가는 유리한 구조입니다.
+        </p>
+      )}
+
       {/* ── 핵심 차트 ── */}
       {data.series?.closes?.length > 10 && (
         <div style={card}>

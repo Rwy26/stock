@@ -273,8 +273,9 @@ def _call_llm(context_json: str) -> tuple[Optional[str], str]:
         for attempt in (1, 2):
             try:
                 r = httpx.post(url, json=body, timeout=120.0)
-                if r.status_code == 429 and attempt == 1:
-                    time.sleep(20)
+                # 429(rate-limit): 20s 후 재시도, 503(일시적 불가): 15s 후 재시도
+                if r.status_code in (429, 503) and attempt == 1:
+                    time.sleep(20 if r.status_code == 429 else 15)
                     continue
                 r.raise_for_status()
                 cand = r.json().get("candidates", [{}])[0]
@@ -291,36 +292,44 @@ def _call_llm(context_json: str) -> tuple[Optional[str], str]:
                 errors.append(f"gemini {type(exc).__name__}")
                 break
 
-    # Groq / OpenAI (OpenAI 호환)
+    # Groq / OpenAI (OpenAI 호환) — 429 rate-limit 시 30s 후 1회 재시도
     for name, key, model, base in (
         ("groq", settings.groq_api_key, settings.groq_model, "https://api.groq.com/openai/v1"),
         ("openai", settings.openai_api_key, settings.openai_model, "https://api.openai.com/v1"),
     ):
         if not key:
             continue
-        try:
-            r = httpx.post(
-                f"{base}/chat/completions",
-                headers={"Authorization": f"Bearer {key}"},
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": user_msg},
-                    ],
-                    "temperature": 0.3,
-                },
-                timeout=120.0,
-            )
-            r.raise_for_status()
-            text = (r.json()["choices"][0]["message"]["content"] or "").strip()
-            if text:
-                return text, f"{name}:{model}"
-            errors.append(f"{name} empty")
-        except httpx.HTTPStatusError as exc:
-            errors.append(f"{name} HTTP {exc.response.status_code}")
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{name} {type(exc).__name__}")
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 0.3,
+        }
+        for attempt in (1, 2):
+            try:
+                r = httpx.post(
+                    f"{base}/chat/completions",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json=payload,
+                    timeout=120.0,
+                )
+                if r.status_code == 429 and attempt == 1:
+                    time.sleep(30)
+                    continue
+                r.raise_for_status()
+                text = (r.json()["choices"][0]["message"]["content"] or "").strip()
+                if text:
+                    return text, f"{name}:{model}"
+                errors.append(f"{name} empty")
+                break
+            except httpx.HTTPStatusError as exc:
+                errors.append(f"{name} HTTP {exc.response.status_code}")
+                break
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{name} {type(exc).__name__}")
+                break
     return None, f"none ({'; '.join(errors)})" if errors else "none"
 
 
