@@ -13,9 +13,10 @@
   3. 구조 손절   : 주 스윙 저점 (이탈 시 상승 구조 무효)
 
 [11단계] 확률 — 최근 ~500거래일 표본의 "빈도 기반 추정" (만들어낸 수치 아님):
-  - 유사 국면 판정: 6차원(추세·모멘텀·변동성·거래량·가격위치·단기수익률) 특징을
+  - 유사 국면 판정: 6차원(추세·모멘텀·변동성·거래량·가격위치·단기수익률)
+    + 7차원(P/E 자기 이력 252일 백분위 — KRX 일별 PER, 가용 시) 특징을
     z-정규화한 뒤 현재와 유클리드 거리가 가장 가까운 과거 시점 k-NN 표본
-    (표본 부족 시 기존 단일 차원 EMA20/60 추세 상태 방식으로 폴백)
+    (PER 무데이터·ETF·적자 시 6차원, 표본 부족 시 단일 차원 추세 상태로 폴백)
   - 상승 지속 확률  : 유사 국면 시점들의 20일 후 양(+)수익 비율
   - 목표가 도달 확률 : 같은 국면에서 손절폭 이탈 전에 목표폭 도달한 비율 (선도달 검사)
   - 손절 이탈 확률   : 같은 국면에서 목표 도달 전 손절폭 이탈 비율
@@ -207,6 +208,42 @@ _REGIME_DIMS = [
     ("가격위치", "60일 범위 내 백분위 %"),
     ("단기수익률", "20일 수익률 %"),
 ]
+_VALUATION_DIM = ("밸류에이션", "P/E 자기 이력 252일 백분위 % (KRX 일별 PER)")
+
+
+def _fetch_per_series(code: str, start: str, end: str) -> dict[str, float]:
+    """KRX 일별 PER (pykrx — 직전 사업연도 EPS 기준). 실패·무데이터 시 빈 dict.
+
+    ETF·적자 종목은 PER 0/결측 → 자동으로 7차원 미사용 (6차원 폴백).
+    """
+    try:
+        from pykrx import stock as _krx
+        df = _krx.get_market_fundamental(start, end, code)
+        if df is None or df.empty or "PER" not in df.columns:
+            return {}
+        return {d.strftime("%Y%m%d"): float(v)
+                for d, v in df["PER"].items()
+                if v is not None and float(v) > 0}
+    except Exception:
+        return {}
+
+
+def _per_pctile_list(bars: list[dict], per_map: dict[str, float]) -> list[Optional[float]]:
+    """봉별 P/E 백분위: 시점 기준 과거 252봉 내 순위 (미래 참조 없음, 최소 120관측)."""
+    per = [per_map.get(b["date"]) for b in bars]
+    out: list[Optional[float]] = []
+    for i in range(len(bars)):
+        v = per[i]
+        if v is None or v <= 0:
+            out.append(None)
+            continue
+        win = [x for x in per[max(0, i - 251): i + 1] if x and x > 0]
+        if len(win) < 120:
+            out.append(None)
+            continue
+        rank = sum(1 for x in win if x <= v)
+        out.append(round(rank / len(win) * 100, 1))
+    return out
 
 
 def _regime_features(closes: list[float], vols: list[float], i: int) -> Optional[list[float]]:
@@ -241,7 +278,8 @@ def _regime_features(closes: list[float], vols: list[float], i: int) -> Optional
 
 
 def _similar_regime_prob(bars: list[dict], up_pct: float, dn_pct: float,
-                         horizon: int = 60) -> dict:
+                         horizon: int = 60,
+                         per_map: Optional[dict[str, float]] = None) -> dict:
     """현재와 가장 유사한 과거 국면(k-NN)들의 실제 결과 빈도.
 
     출력 키는 _first_passage_prob 와 호환(sample/continueUpPct/reachTargetPct/
@@ -266,6 +304,22 @@ def _similar_regime_prob(bars: list[dict], up_pct: float, dn_pct: float,
             cands.append((i, f))
     if len(cands) < 60:
         return {"error": f"유사 국면 후보 부족 ({len(cands)}건)"}
+
+    # 7번째 차원: P/E 자기 이력 백분위 — 현재값이 있고 후보 70% 이상이 보유할 때만.
+    # (ETF·적자·데이터 부재 시 6차원 폴백 — 차원 수는 method/dimensions 에 명시)
+    pctiles = _per_pctile_list(bars, per_map) if per_map else None
+    cur_valp = pctiles[n - 1] if pctiles else None
+    use_val = False
+    val_note = "미사용 (PER 데이터 없음)" if not per_map else "미사용 (백분위 산출 불가 — 관측 부족/적자)"
+    if cur_valp is not None:
+        cov = sum(1 for i, _ in cands if pctiles[i] is not None) / len(cands)
+        if cov >= 0.7:
+            use_val = True
+            cands = [(i, f + [pctiles[i]]) for i, f in cands if pctiles[i] is not None]
+            cur_f = cur_f + [cur_valp]
+            val_note = f"사용 (현재 백분위 {cur_valp}, 후보 커버리지 {cov*100:.0f}%)"
+        else:
+            val_note = f"미사용 (후보 커버리지 {cov*100:.0f}% < 70%)"
 
     dims = len(cur_f)
     means, stds = [], []
@@ -322,10 +376,11 @@ def _similar_regime_prob(bars: list[dict], up_pct: float, dn_pct: float,
     e60 = _ema(closes[-120:], 60) or 0
 
     # 닷컴(1995~2002 미국) 보조 표본 — 한국 ~500봉에 없는 과열·붕괴 국면 대조.
-    # 실패해도 본 확률 계산에는 영향 없음 (데이터 폴더 부재 등 → error 블록).
+    # zc 앞 6개가 기본 차원의 z-값, 밸류에이션은 백분위 원값으로 별도 전달
+    # (양쪽 모두 자기 분포 내 백분위라 시장중립). 실패해도 본 확률엔 무영향.
     try:
         import regime_analogs
-        dotcom = regime_analogs.find_analogs(zc)
+        dotcom = regime_analogs.find_analogs(zc[:6], val_pctile=cur_valp)
     except Exception as exc:  # noqa: BLE001
         dotcom = {"error": f"닷컴 표본 조회 실패: {type(exc).__name__}"}
 
@@ -336,7 +391,8 @@ def _similar_regime_prob(bars: list[dict], up_pct: float, dn_pct: float,
     return {
         "sample": total,
         "totalCandidates": len(cands),
-        "method": "6차원 유사 국면 k-NN (z-정규화 유클리드 거리, 5봉 간격 디커플링)",
+        "method": f"{dims}차원 유사 국면 k-NN (z-정규화 유클리드 거리, 5봉 간격 디커플링)",
+        "valuationDim": {"used": use_val, "currentPctile": cur_valp, "note": val_note},
         "trendState": "상승(EMA20>60)" if e20 > e60 else "하락(EMA20<60)",
         "continueUpPct": round(cont_up / total * 100, 1),
         "reachTargetPct": round(hit_t / total * 100, 1),
@@ -351,7 +407,8 @@ def _similar_regime_prob(bars: list[dict], up_pct: float, dn_pct: float,
                 "current": round(cur_f[d], 2),
                 "analogMean": round(sum(f[d] for _, _, f in picked) / total, 2),
             }
-            for d, (name, desc) in enumerate(_REGIME_DIMS)
+            for d, (name, desc) in enumerate(
+                list(_REGIME_DIMS) + ([_VALUATION_DIM] if use_val else []))
         ],
         "matchedDates": [_date(i) for _, i, _ in picked[:5]],
         "dotcomAnalogs": dotcom,
@@ -548,7 +605,9 @@ def analyze_targets(code: str) -> dict:
     if avg_target and stop_for_prob and cur > 0:
         up_pct = avg_target / cur - 1
         dn_pct = 1 - stop_for_prob / cur
-        prob = _similar_regime_prob(bars, up_pct, dn_pct)
+        # 7차원용 KRX 일별 PER (1회 조회, 실패 시 빈 dict → 6차원 폴백)
+        per_map = _fetch_per_series(code, bars[0]["date"], bars[-1]["date"])
+        prob = _similar_regime_prob(bars, up_pct, dn_pct, per_map=per_map)
         if "error" in prob:
             fallback_reason = prob["error"]
             prob = _first_passage_prob(bars, up_pct, dn_pct)
@@ -558,7 +617,7 @@ def analyze_targets(code: str) -> dict:
                 )
         if "error" not in prob:
             sample_desc = (
-                f"6차원 유사 국면 최근접 {prob['sample']}건"
+                f"{len(prob['dimensions'])}차원 유사 국면 최근접 {prob['sample']}건"
                 if prob.get("dimensions")
                 else "현재와 같은 추세 상태 표본"
             )
