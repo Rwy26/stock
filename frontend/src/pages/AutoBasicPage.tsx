@@ -1,3 +1,5 @@
+import { StatusChip } from '../components/StatusChip'
+
 export function AutoBasicPage() {
   return (
     <>
@@ -60,7 +62,7 @@ export function AutoBasicPage() {
           <ul className="engine-list">
             <li>
               <span>엔진</span>
-              <span className="chip off">OFF</span>
+              <StatusChip on={false}>OFF</StatusChip>
             </li>
             <li>
               <span>오늘 거래 건수</span>

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchJson } from '../lib/api'
+import { StatusChip } from '../components/StatusChip'
 
 type AdminUser = {
   id: number
@@ -241,16 +242,16 @@ export function AdminPage() {
 
   const renderEvent = (event: string) => {
     const normalized = (event || '').toLowerCase()
-    if (normalized === 'login') return { label: '로그인', cls: 'chip on' }
-    if (normalized === 'logout') return { label: '로그아웃', cls: 'chip off' }
-    return { label: event || '-', cls: 'chip' }
+    if (normalized === 'login') return <StatusChip on>로그인</StatusChip>
+    if (normalized === 'logout') return <StatusChip on={false}>로그아웃</StatusChip>
+    return <StatusChip>{event || '-'}</StatusChip>
   }
 
   const renderEngineEvent = (event: string) => {
     const normalized = (event || '').toLowerCase()
-    if (normalized === 'tick') return { label: 'tick', cls: 'chip on' }
-    if (normalized === 'error') return { label: 'error', cls: 'chip off' }
-    return { label: event || '-', cls: 'chip' }
+    if (normalized === 'tick') return <StatusChip on>tick</StatusChip>
+    if (normalized === 'error') return <StatusChip on={false}>error</StatusChip>
+    return <StatusChip>{event || '-'}</StatusChip>
   }
 
   const runStockValidation = async (autoFix: boolean) => {
@@ -361,9 +362,9 @@ export function AdminPage() {
               </div>
               <div>
                 <p className="top-label">킬스위치</p>
-                <span className={`chip ${systemStatus.killSwitchOn ? 'off' : 'on'}`}>
+                <StatusChip on={!systemStatus.killSwitchOn}>
                   {systemStatus.killSwitchOn ? 'ON (정지)' : 'OFF (정상)'}
-                </span>
+                </StatusChip>
               </div>
               {systemStatus.gitLastCommit?.hash ? (
                 <div>
@@ -391,18 +392,18 @@ export function AdminPage() {
                     <tr key={t.name}>
                       <td>{t.name}</td>
                       <td>
-                        <span className={`chip ${t.found ? 'on' : 'off'}`}>
+                        <StatusChip on={t.found}>
                           {t.found ? (t.taskStatus ?? '등록됨') : '미등록'}
-                        </span>
+                        </StatusChip>
                       </td>
                       <td className="hint">{t.lastRun ?? '-'}</td>
                       <td>
                         {t.lastResult === '0' ? (
-                          <span className="chip on">성공</span>
+                          <StatusChip on>성공</StatusChip>
                         ) : t.lastResult === '267011' ? (
-                          <span className="chip">미실행</span>
+                          <StatusChip>미실행</StatusChip>
                         ) : t.lastResult ? (
-                          <span className="chip off">{t.lastResult}</span>
+                          <StatusChip on={false}>{t.lastResult}</StatusChip>
                         ) : (
                           <span className="hint">-</span>
                         )}
@@ -441,16 +442,16 @@ export function AdminPage() {
                 {(pendingItems ?? []).map((item) => (
                   <tr key={item.id}>
                     <td>
-                      <span className={`chip ${item.status === 'error' ? 'off' : item.status === 'ok' ? 'on' : ''}`}>
+                      <StatusChip on={item.status === 'ok' ? true : item.status === 'error' ? false : undefined}>
                         {item.status === 'error' ? '오류' : item.status === 'ok' ? '완료' : '대기'}
-                      </span>
+                      </StatusChip>
                     </td>
                     <td>{item.title}</td>
                     <td className="hint">{item.description}</td>
                     <td>
-                      <span className={`chip ${item.priority === 'high' ? 'off' : ''}`}>
+                      <StatusChip on={item.priority === 'high' ? false : undefined}>
                         {item.priority === 'high' ? '높음' : item.priority === 'medium' ? '중간' : '낮음'}
-                      </span>
+                      </StatusChip>
                     </td>
                   </tr>
                 ))}
@@ -491,10 +492,10 @@ export function AdminPage() {
                   </td>
                   <td>{formatDate(u.createdAt)}</td>
                   <td>
-                    <span className={`chip ${u.isActive ? 'on' : ''}`}>{u.isActive ? 'ON' : 'OFF'}</span>
+                    <StatusChip on={u.isActive || undefined}>{u.isActive ? 'ON' : 'OFF'}</StatusChip>
                   </td>
                   <td>
-                    <span className={`chip ${u.kisConfigured ? 'on' : ''}`}>{u.kisConfigured ? 'ON' : 'OFF'}</span>
+                    <StatusChip on={u.kisConfigured || undefined}>{u.kisConfigured ? 'ON' : 'OFF'}</StatusChip>
                   </td>
                   <td>
                     <button
@@ -934,7 +935,7 @@ export function AdminPage() {
                   <td>{formatDate(r.at)}</td>
                   <td>{r.email ?? (r.userId != null ? `user#${r.userId}` : '-')}</td>
                   <td>
-                    <span className={renderEvent(r.event).cls}>{renderEvent(r.event).label}</span>
+                    {renderEvent(r.event)}
                   </td>
                   <td>{r.ip ?? '-'}</td>
                   <td>{r.userAgent ?? '-'}</td>
@@ -1090,7 +1091,7 @@ export function AdminPage() {
                   <td>{r.email ?? (r.userId != null ? `user#${r.userId}` : '-')}</td>
                   <td>{r.engine || '-'}</td>
                   <td>
-                    <span className={renderEngineEvent(r.event).cls}>{renderEngineEvent(r.event).label}</span>
+                    {renderEngineEvent(r.event)}
                   </td>
                   <td>{r.message ?? '-'}</td>
                 </tr>

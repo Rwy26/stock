@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchJson } from '../lib/api'
 import { formatNumber, formatPercent } from '../lib/format'
+import { StatusChip } from '../components/StatusChip'
 
 type SaTab = 'status' | 'logs' | 'alerts' | 'signals' | 'daily' | 'snapshots'
 
@@ -408,7 +409,7 @@ export function AutoSaPage() {
                 <ul className="engine-list">
                   <li>
                     <span>엔진</span>
-                    <span className={`chip ${enabled ? 'on' : 'off'}`}>{enabled ? 'ON' : 'OFF'}</span>
+                    <StatusChip on={enabled}>{enabled ? 'ON' : 'OFF'}</StatusChip>
                   </li>
                   <li>
                     <span>오늘 거래</span>

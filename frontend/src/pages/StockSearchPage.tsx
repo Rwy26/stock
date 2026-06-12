@@ -2,24 +2,7 @@ import { useEffect, useState } from 'react'
 import { fetchJson } from '../lib/api'
 import { CAUTION_BANNER_STYLE, type ExclusionInfo, type OkOrCaution } from '../lib/exclusion'
 import { formatNumber, formatPercent } from '../lib/format'
-
-type StockRow = {
-  name: string
-  code: string
-  price: number
-  changeRate: number
-  score: number
-}
-
-type SearchResponse = {
-  items: StockRow[]
-  cautions?: ExclusionInfo[]
-  cautionMessage?: string
-}
-
-type WatchlistResponse = {
-  items: Array<{ code: string }>
-}
+import type { StockRow, SearchResponse, WatchlistCodesResponse } from '../lib/types'
 
 type StockDetail = StockRow & {
   indicators: {
@@ -144,7 +127,7 @@ export function StockSearchPage() {
     let cancelled = false
 
     const refreshWatchlist = () => {
-      fetchJson<WatchlistResponse>('/api/watchlist')
+      fetchJson<WatchlistCodesResponse>('/api/watchlist')
         .then((payload) => {
           if (!cancelled) {
             setWatchCodes(new Set(payload.items.map((item) => item.code)))

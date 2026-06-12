@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchJson } from '../lib/api'
 import { formatNumber, formatPercent } from '../lib/format'
+import { StatusChip } from '../components/StatusChip'
 
 type AutomationConfigResponse = {
   enabled: boolean
@@ -109,7 +110,7 @@ export function StrategyPage() {
           <ul className="engine-list">
             <li>
               <span>상태</span>
-              <span className={saEnabled ? 'chip on' : 'chip off'}>{!hasSa ? '—' : saEnabled ? 'ON' : 'OFF'}</span>
+              <StatusChip on={saEnabled}>{!hasSa ? '—' : saEnabled ? 'ON' : 'OFF'}</StatusChip>
             </li>
             <li>
               <span>최소 SA 점수</span>
@@ -142,7 +143,7 @@ export function StrategyPage() {
           <ul className="engine-list">
             <li>
               <span>상태</span>
-              <span className={plusEnabled ? 'chip on' : 'chip off'}>{!hasPlus ? '—' : plusEnabled ? 'ON' : 'OFF'}</span>
+              <StatusChip on={plusEnabled}>{!hasPlus ? '—' : plusEnabled ? 'ON' : 'OFF'}</StatusChip>
             </li>
             <li>
               <span>스캔 범위</span>

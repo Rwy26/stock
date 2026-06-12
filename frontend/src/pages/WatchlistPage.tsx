@@ -4,6 +4,7 @@ import { publicFetch } from '../lib/publicApi'
 import { StockReportModal } from '../components/StockReportModal'
 import { CAUTION_BANNER_STYLE, type ExclusionInfo, type OkOrCaution } from '../lib/exclusion'
 import { formatNumber, formatPercent } from '../lib/format'
+import type { StockRow, SearchResponse } from '../lib/types'
 
 // ── Types ────────────────────────────────────────────────────────────
 type WatchItem = {
@@ -13,8 +14,6 @@ type WatchItem = {
   exclusion?: ExclusionInfo   // 거래 제외 종목이면 '투자 주의' 정보 동봉
 }
 type WatchlistResponse = { items: WatchItem[]; quoteBasis?: string }
-type StockRow = { name: string; code: string; price: number; changeRate: number; score: number }
-type SearchResponse = { items: StockRow[]; cautions?: ExclusionInfo[]; cautionMessage?: string }
 type TRect = { id: string; x: number; y: number; w: number; h: number }
 
 const WATCHLIST_CACHE_KEY = 'moon-watchlist-cache-v1'

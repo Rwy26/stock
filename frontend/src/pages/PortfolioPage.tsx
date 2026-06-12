@@ -1,21 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchJson } from '../lib/api'
 import { formatNumber, formatKRW, formatPercent } from '../lib/format'
-
-type PortfolioPosition = {
-  name: string
-  code: string
-  qty: number
-  avgBuy: number
-  current: number
-  buyDate: string
-}
-
-type PortfolioResponse = {
-  asOf: string
-  positions: PortfolioPosition[]
-  cash?: number | null
-}
+import type { PortfolioPosition, PortfolioResponse } from '../lib/types'
 
 export function PortfolioPage() {
   const [data, setData] = useState<PortfolioResponse | null>(null)

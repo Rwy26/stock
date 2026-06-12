@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { fetchJson } from '../lib/api'
 import type { OkOrCaution } from '../lib/exclusion'
 import { formatNumber, formatPercent } from '../lib/format'
+import type { WatchlistCodesResponse } from '../lib/types'
 
 type RecommendationItem = {
   rank: number
@@ -18,9 +19,6 @@ type RecommendationsResponse = {
   priceError?: string | null
 }
 
-type WatchlistResponse = {
-  items: Array<{ code: string }>
-}
 
 // ─── KING types ───────────────────────────────────────────────────────────────
 
@@ -161,7 +159,7 @@ export function RecommendationsPage() {
     let cancelled = false
 
     const refreshWatchlist = () => {
-      fetchJson<WatchlistResponse>('/api/watchlist')
+      fetchJson<WatchlistCodesResponse>('/api/watchlist')
         .then((payload) => {
           if (!cancelled) {
             setWatchCodes(new Set(payload.items.map((item) => item.code)))

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { fetchJson } from '../lib/api'
 import { formatKRW, formatNumber, formatPercent } from '../lib/format'
+import type { PortfolioResponse } from '../lib/types'
+import { StatusChip } from '../components/StatusChip'
 import { UsBondsChart } from '../components/UsBondsChart'
 import { DxyChart } from '../components/DxyChart'
 import { DevMonitor } from '../components/DevMonitor'
@@ -31,18 +33,6 @@ type KisTokenStatusResponse = {
   error?: string
 }
 
-type PortfolioResponse = {
-  asOf: string
-  cash: number | null
-  positions: Array<{
-    name: string
-    code: string
-    qty: number
-    avgBuy: number
-    current: number
-    buyDate: string
-  }>
-}
 
 export function DashboardPage() {
   const [data, setData] = useState<DashboardResponse | null>(null)
@@ -168,21 +158,19 @@ export function DashboardPage() {
           <ul className="engine-list">
             <li>
               <span>일반 자동매매</span>
-              <span className={automation?.basic?.on ? 'chip on' : 'chip off'}>{automation?.basic?.label ?? '—'}</span>
+              <StatusChip on={!!automation?.basic?.on}>{automation?.basic?.label ?? '—'}</StatusChip>
             </li>
             <li>
               <span>SA 자동매매</span>
-              <span className={automation?.sa?.on ? 'chip on' : 'chip off'}>{automation?.sa?.label ?? '—'}</span>
+              <StatusChip on={!!automation?.sa?.on}>{automation?.sa?.label ?? '—'}</StatusChip>
             </li>
             <li>
               <span>Plus 자동매매</span>
-              <span className={automation?.plus?.on ? 'chip on' : 'chip off'}>{automation?.plus?.label ?? '—'}</span>
+              <StatusChip on={!!automation?.plus?.on}>{automation?.plus?.label ?? '—'}</StatusChip>
             </li>
             <li>
               <span>SV Agent</span>
-              <span className={automation?.svAgent?.on ? 'chip on' : 'chip off'}>
-                {automation?.svAgent?.label ?? '—'}
-              </span>
+              <StatusChip on={!!automation?.svAgent?.on}>{automation?.svAgent?.label ?? '—'}</StatusChip>
             </li>
           </ul>
         </article>

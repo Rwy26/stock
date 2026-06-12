@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { StatusChip } from '../components/StatusChip'
 
 type SvTab = 'positions' | 'ai' | 'approvals' | 'realized' | 'settings'
 
@@ -98,7 +99,7 @@ export function SvAgentPage() {
             </li>
             <li>
               <span>상태</span>
-              <span className="chip on">대기</span>
+              <StatusChip on>대기</StatusChip>
             </li>
           </ul>
           <div className="divider"></div>
