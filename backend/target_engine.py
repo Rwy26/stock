@@ -37,7 +37,7 @@ from typing import Optional
 
 import httpx
 
-from mtf_analysis import _swings, _ema, _rsi, _volume_profile  # noqa: F401
+from mtf_analysis import _swings, _ema, _rsi, _volume_profile, _volume_profile_full  # noqa: F401
 
 NAVER_H = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
@@ -494,8 +494,10 @@ def analyze_targets(code: str) -> dict:
         {"price": None, "note": "확장 레벨이 현재가 아래 — 이미 도달"}
     )
 
-    # 2) 거래량 프로파일 (250봉) — 현재가 위 최근접 HVN 상단
-    vp = _volume_profile(closes[-250:], vols[-250:], bins=16)
+    # 2) 거래량 프로파일 (250봉) — H/L/V 기반 full VP (POC/VAH/VAL + HVN)
+    vp_full = _volume_profile_full(bars[-250:], bins=80)
+    vp = vp_full.get("zones", []) if vp_full else []
+    vp_20 = _volume_profile_full(bars[-20:], bins=40) if len(bars) >= 20 else {}
     above_zones = [z for z in vp if z["priceFrom"] > cur]
     targets["거래량 프로파일 저항"] = (
         {"price": round(min(above_zones, key=lambda z: z["priceFrom"])["priceTo"])}
@@ -653,6 +655,11 @@ def analyze_targets(code: str) -> dict:
             "accumulationZones": accumulation, # 매집 추정 구간 (거래량 집중 가격대 — 추정)
         },
         "shortSelling": short_data,            # 공매도 비중·추세 (KIS) — 대차잔고는 미제공
+        "volumeProfile": {
+            # zones 필드는 메모리 절약을 위해 제외 (poc/vah/val/hvn으로 충분)
+            "mid": {k: v for k, v in vp_full.items() if k != "zones"} if vp_full else {},
+            "short": {k: v for k, v in vp_20.items() if k != "zones"} if vp_20 else {},
+        },
         "notes": [
             "확률은 과거 빈도 기반 추정 — 미래 보장 아님",
             "목표가 5종은 독립 계산 — 편차가 크면 불확실성이 큰 것",

@@ -107,6 +107,72 @@ def _liquidity(swings: list[dict], cur: float) -> dict:
     }
 
 
+def _volume_profile_full(bars: list[dict], bins: int = 100, va_pct: float = 0.70) -> dict:
+    """H/L/V 기반 Volume Profile — POC, VAH(70% 가치구간 상단), VAL(하단), HVN 상위5.
+
+    bars: [{"high": float, "low": float, "volume": int}, ...]  (일봉 OHLCV 호환)
+    각 캔들 거래량을 고가~저가 범위에 균등 분배해 가격대별 누적 거래량 히스토그램 산출.
+    """
+    valid = [b for b in bars if b.get("high") and b.get("low") and b.get("volume")]
+    if len(valid) < 10:
+        return {}
+    lo = min(b["low"] for b in valid)
+    hi = max(b["high"] for b in valid)
+    if hi <= lo:
+        return {}
+
+    step = (hi - lo) / bins
+    buckets = [0.0] * bins
+
+    for b in valid:
+        b0 = max(0, int((b["low"] - lo) / step))
+        b1 = min(bins - 1, int((b["high"] - lo) / step))
+        span = b1 - b0 + 1
+        vpb = b["volume"] / span
+        for i in range(b0, b1 + 1):
+            buckets[i] += vpb
+
+    poc_idx = max(range(bins), key=lambda i: buckets[i])
+    poc = lo + (poc_idx + 0.5) * step
+
+    total = sum(buckets) or 1.0
+    target_vol = total * va_pct
+    lo_i, hi_i = poc_idx, poc_idx
+    acc = buckets[poc_idx]
+    while acc < target_vol:
+        add_lo = buckets[lo_i - 1] if lo_i > 0 else 0.0
+        add_hi = buckets[hi_i + 1] if hi_i < bins - 1 else 0.0
+        if add_lo >= add_hi and lo_i > 0:
+            lo_i -= 1
+            acc += buckets[lo_i]
+        elif hi_i < bins - 1:
+            hi_i += 1
+            acc += buckets[hi_i]
+        else:
+            break
+
+    zones = [
+        {
+            "priceFrom": round(lo + i * step),
+            "priceTo": round(lo + (i + 1) * step),
+            "midPrice": round(lo + (i + 0.5) * step),
+            "volumePct": round(buckets[i] / total * 100, 1),
+        }
+        for i in range(bins)
+    ]
+    ranked_idx = sorted(range(bins), key=lambda i: -buckets[i])[:5]
+    hvn = [zones[i] for i in sorted(ranked_idx)]
+
+    return {
+        "poc": round(poc),
+        "vah": round(lo + (hi_i + 1) * step),
+        "val": round(lo + lo_i * step),
+        "hvn": hvn,
+        "zones": zones,   # 전 구간 — 필터링용, JSON 직렬화 시 제외 권장
+        "lookback": len(valid),
+    }
+
+
 def _volume_profile(closes: list[float], volumes: list[float], bins: int = 12) -> list[dict]:
     """매물대: 가격 구간별 거래량 상위 3개 (HVN)."""
     if not closes or max(closes) <= min(closes):
