@@ -67,6 +67,31 @@ type StockValidationIssue = {
   issue?: string
 }
 
+type ScheduledTask = {
+  name: string
+  found: boolean
+  lastRun?: string
+  lastResult?: string
+  taskStatus?: string
+  error?: string
+}
+
+type SystemStatus = {
+  uptimeSec: number
+  startTime: string
+  killSwitchOn: boolean
+  gitLastCommit: { hash: string; subject: string; time: string }
+  scheduledTasks: ScheduledTask[]
+}
+
+type PendingItem = {
+  id: string
+  title: string
+  description: string
+  status: 'pending' | 'error' | 'ok'
+  priority: 'high' | 'medium' | 'low'
+}
+
 type StockValidationResult = {
   ok: boolean
   kisLinked: boolean
@@ -89,6 +114,15 @@ type StockValidationResult = {
   inputPairConflicts: Array<{ code: string; nameA: string; nameB: string }>
   inputNameMismatches: Array<{ code: string; inputName: string; kisName: string }>
   unnamedFromKis: Array<{ code: string; dbName: string }>
+}
+
+function formatUptime(sec: number): string {
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const s = sec % 60
+  if (h > 0) return `${h}시간 ${m}분`
+  if (m > 0) return `${m}분 ${s}초`
+  return `${s}초`
 }
 
 function formatDate(value: string | null | undefined): string {
@@ -135,10 +169,30 @@ export function AdminPage() {
   const [stockValidationLoading, setStockValidationLoading] = useState(false)
   const [stockValidationResult, setStockValidationResult] = useState<StockValidationResult | null>(null)
 
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null)
+  const [pendingItems, setPendingItems] = useState<PendingItem[] | null>(null)
+  const [sysLoading, setSysLoading] = useState(true)
+
   const isAdminOnlyMessage = useMemo(() => {
     if (!error) return false
     return /403/.test(error) || /Admin only/i.test(error)
   }, [error])
+
+  const loadSystemInfo = async () => {
+    setSysLoading(true)
+    try {
+      const [statusRes, pendingRes] = await Promise.all([
+        fetchJson<SystemStatus>('/api/admin/system-status'),
+        fetchJson<{ items: PendingItem[] }>('/api/admin/pending-items'),
+      ])
+      setSystemStatus(statusRes)
+      setPendingItems(pendingRes.items)
+    } catch {
+      // main error state handles auth failures
+    } finally {
+      setSysLoading(false)
+    }
+  }
 
   const load = async (opts?: { startDate?: string; endDate?: string }) => {
     setLoading(true)
@@ -171,7 +225,7 @@ export function AdminPage() {
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      await load()
+      await Promise.all([load(), loadSystemInfo()])
       if (cancelled) return
     })()
     return () => {
@@ -281,6 +335,130 @@ export function AdminPage() {
           </p>
         </section>
       ) : null}
+
+      <section className="panel glass reveal">
+        <div className="panel-head">
+          <h3>시스템 상태</h3>
+          {sysLoading ? (
+            <div className="hint">불러오는 중…</div>
+          ) : (
+            <button className="btn secondary" type="button" onClick={() => void loadSystemInfo()}>
+              새로고침
+            </button>
+          )}
+        </div>
+
+        {systemStatus ? (
+          <>
+            <div className="form-row" style={{ gap: 16, flexWrap: 'wrap' }}>
+              <div>
+                <p className="top-label">가동 시간</p>
+                <p>{formatUptime(systemStatus.uptimeSec)}</p>
+              </div>
+              <div>
+                <p className="top-label">시작 시각</p>
+                <p className="hint">{formatDate(systemStatus.startTime)}</p>
+              </div>
+              <div>
+                <p className="top-label">킬스위치</p>
+                <span className={`chip ${systemStatus.killSwitchOn ? 'off' : 'on'}`}>
+                  {systemStatus.killSwitchOn ? 'ON (정지)' : 'OFF (정상)'}
+                </span>
+              </div>
+              {systemStatus.gitLastCommit?.hash ? (
+                <div>
+                  <p className="top-label">최근 커밋</p>
+                  <p className="hint">
+                    {systemStatus.gitLastCommit.hash} — {systemStatus.gitLastCommit.subject}
+                  </p>
+                  <p className="hint">{systemStatus.gitLastCommit.time}</p>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="table-wrap" style={{ marginTop: 12 }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>스케줄 작업</th>
+                    <th>등록</th>
+                    <th>마지막 실행</th>
+                    <th>결과</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {systemStatus.scheduledTasks.map((t) => (
+                    <tr key={t.name}>
+                      <td>{t.name}</td>
+                      <td>
+                        <span className={`chip ${t.found ? 'on' : 'off'}`}>
+                          {t.found ? (t.taskStatus ?? '등록됨') : '미등록'}
+                        </span>
+                      </td>
+                      <td className="hint">{t.lastRun ?? '-'}</td>
+                      <td>
+                        {t.lastResult === '0' ? (
+                          <span className="chip on">성공</span>
+                        ) : t.lastResult === '267011' ? (
+                          <span className="chip">미실행</span>
+                        ) : t.lastResult ? (
+                          <span className="chip off">{t.lastResult}</span>
+                        ) : (
+                          <span className="hint">-</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : (
+          !sysLoading && <p className="hint">데이터를 불러올 수 없습니다.</p>
+        )}
+      </section>
+
+      <section className="panel glass reveal">
+        <div className="panel-head">
+          <h3>미완료 항목</h3>
+          {sysLoading ? <div className="hint">불러오는 중…</div> : null}
+        </div>
+
+        {!sysLoading && (pendingItems ?? []).length === 0 ? (
+          <p className="hint">미완료 항목이 없습니다.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>상태</th>
+                  <th>항목</th>
+                  <th>설명</th>
+                  <th>우선순위</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(pendingItems ?? []).map((item) => (
+                  <tr key={item.id}>
+                    <td>
+                      <span className={`chip ${item.status === 'error' ? 'off' : item.status === 'ok' ? 'on' : ''}`}>
+                        {item.status === 'error' ? '오류' : item.status === 'ok' ? '완료' : '대기'}
+                      </span>
+                    </td>
+                    <td>{item.title}</td>
+                    <td className="hint">{item.description}</td>
+                    <td>
+                      <span className={`chip ${item.priority === 'high' ? 'off' : ''}`}>
+                        {item.priority === 'high' ? '높음' : item.priority === 'medium' ? '중간' : '낮음'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
       <section className="panel glass reveal">
         <div className="panel-head">

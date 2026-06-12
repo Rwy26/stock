@@ -72,7 +72,7 @@ export function StockReportModal({
           <div style={{ textAlign: 'center', padding: '26px 8px' }}>
             <h3 style={{ marginBottom: 8 }}>{name ?? detail?.name ?? code}</h3>
             <p style={{ color: '#94a3b8', fontSize: 13.5, lineHeight: 1.7 }}>
-              아직 이 종목의 AI 분석 리포트가 없습니다.
+              아직 이 종목의 AI 분석이 없습니다.
               <br />
               <span style={{ color: '#64748b', fontSize: 12.5 }}>
                 매일 밤 9시 전 종목 자동 분석이 돌고 나면 여기서 바로 볼 수 있습니다.

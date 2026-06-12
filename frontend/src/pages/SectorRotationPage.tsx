@@ -963,7 +963,7 @@ function SectorGrid({ sectors, macro, onStockClick }: {
                       }}>
                         <span
                           onClick={() => onStockClick?.(stock.code, stock.name)}
-                          title="클릭: AI 분석 리포트"
+                          title="클릭: AI 분석"
                           style={{
                             fontSize: 11, color: 'rgba(241,245,249,0.78)',
                             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',

@@ -699,7 +699,7 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
                   onMouseEnter={() => setHovered(id)}
                   onMouseLeave={() => setHovered(null)}
                   onClick={() => setReportTarget({ code: item.code, name: item.name })}
-                  title={`${item.name} (${item.code})  ${item.price > 0 ? formatNumber(item.price) + '원  ' : ''}${formatPercent(item.changeRate)}  점수 ${item.score} — 클릭: AI 분석 리포트`}
+                  title={`${item.name} (${item.code})  ${item.price > 0 ? formatNumber(item.price) + '원  ' : ''}${formatPercent(item.changeRate)}  점수 ${item.score} — 클릭: AI 분석`}
                   style={{
                     position: 'absolute', left: x, top: y, width: w, height: h,
                     boxSizing: 'border-box',

@@ -22,7 +22,6 @@ import { AiCachePage } from './pages/AiCachePage'
 import { SectorRotationPage } from './pages/SectorRotationPage'
 import { MarketCompassPage } from './pages/MarketCompassPage'
 import { PublicShell } from './layout/PublicShell'
-import { PublicAiRequestPage } from './pages/public/PublicAiRequestPage'
 import { PublicAiHistoryPage } from './pages/public/PublicAiHistoryPage'
 import { PublicRequestsPage } from './pages/PublicRequestsPage'
 
@@ -67,7 +66,6 @@ export default function App() {
           <Route path="sector" element={<SectorRotationPage publicMode />} />
           <Route path="watchlist" element={<WatchlistPage publicMode />} />
           <Route path="ai-history" element={<PublicAiHistoryPage />} />
-          <Route path="ai-request" element={<PublicAiRequestPage />} />
         </Route>
 
         <Route path="login" element={<LoginPage />} />

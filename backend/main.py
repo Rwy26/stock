@@ -20,6 +20,8 @@ from fastapi.security import HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
+import subprocess
+
 import httpx
 
 import kis_client
@@ -138,6 +140,7 @@ _plus_last_rotation_check_ts: dict[int, float] = {}
 # - None: use env-based settings.autotrading_kill_switch
 # - True/False: override at runtime (no restart)
 _runtime_kill_switch: bool | None = None
+_app_start_time: float = time.time()
 
 
 def _is_kill_switch_on() -> bool:
@@ -5346,6 +5349,10 @@ def public_ai_history():
                     "confidence": r.confidence,
                     "upside": r.upside_probability,
                     "analyzedAt": r.analyzed_at.isoformat() if r.analyzed_at else None,
+                    "sector": (
+                        r.result_json.get("stock", {}).get("sector")
+                        if isinstance(r.result_json, dict) else None
+                    ),
                     "isCompass": bool(
                         isinstance(r.result_json, dict)
                         and r.result_json.get("source") == "market-compass-12stage"
@@ -5646,6 +5653,140 @@ def admin_public_ai_requests(_current_user=Depends(require_admin), limit: int = 
         ]}
     finally:
         db.close()
+
+
+@app.get("/api/admin/system-status")
+def admin_system_status(_admin=Depends(require_admin)):
+    """시스템 상태 요약 — 백엔드 가동 시간, git 커밋, 스케줄 작업 실행 결과."""
+    uptime_sec = int(time.time() - _app_start_time)
+
+    git_info: dict = {}
+    try:
+        repo_root = Path(__file__).parent.parent
+        r = subprocess.run(
+            ["git", "-C", str(repo_root), "log", "-1", "--format=%H|%s|%ai"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            parts = r.stdout.strip().split("|", 2)
+            git_info = {
+                "hash": parts[0][:8] if parts else "",
+                "subject": parts[1] if len(parts) > 1 else "",
+                "time": parts[2].strip() if len(parts) > 2 else "",
+            }
+    except Exception:
+        pass
+
+    task_names = [
+        "MOON-STOCK-Daily-Prices",
+        "MOON-STOCK-MorningCheck",
+        "MOON-STOCK-Short-Selling-Sync",
+        "idle-git-save",
+    ]
+    scheduled_tasks = []
+    for task_name in task_names:
+        info: dict = {"name": task_name, "found": False}
+        try:
+            r = subprocess.run(
+                ["schtasks", "/query", "/tn", task_name, "/fo", "LIST", "/v"],
+                capture_output=True, timeout=10, encoding="cp949", errors="replace",
+            )
+            info["found"] = r.returncode == 0
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    stripped = line.strip()
+                    if ":" not in stripped:
+                        continue
+                    key, _, val = stripped.partition(":")
+                    key = key.strip()
+                    val = val.strip()
+                    if key in ("마지막 실행 시간", "Last Run Time"):
+                        info["lastRun"] = val
+                    elif key in ("마지막 결과", "Last Result"):
+                        info["lastResult"] = val
+                    elif key in ("상태", "Status"):
+                        info["taskStatus"] = val
+        except Exception as e:
+            info["error"] = str(e)
+        scheduled_tasks.append(info)
+
+    return {
+        "uptimeSec": uptime_sec,
+        "startTime": datetime.fromtimestamp(_app_start_time).isoformat(),
+        "killSwitchOn": _is_kill_switch_on(),
+        "gitLastCommit": git_info,
+        "scheduledTasks": scheduled_tasks,
+    }
+
+
+@app.get("/api/admin/pending-items")
+def admin_pending_items(_admin=Depends(require_admin)):
+    """미완료 항목 목록 — 스케줄 작업 미실행, KRX 잔고 미수집 등."""
+    items = []
+
+    if apollo_db is not None and models is not None:
+        try:
+            db: Session = apollo_db.get_session_factory()()
+            try:
+                from sqlalchemy import text as _text
+                count = db.execute(
+                    _text("SELECT COUNT(*) FROM short_selling_daily WHERE balance_shares > 0 LIMIT 1")
+                ).scalar()
+                if not count:
+                    items.append({
+                        "id": "krx_balance",
+                        "title": "KRX 공매도 잔고 미수집",
+                        "description": "KRX 계정 등록 후 잔고 파이프라인 활성화 필요",
+                        "status": "pending",
+                        "priority": "medium",
+                    })
+            finally:
+                db.close()
+        except Exception:
+            pass
+
+    task_checks = [
+        ("MOON-STOCK-Daily-Prices", "일별 주가 파이프라인"),
+        ("MOON-STOCK-MorningCheck", "모닝 체크"),
+        ("MOON-STOCK-Short-Selling-Sync", "공매도 동기화"),
+    ]
+    for task_name, label in task_checks:
+        try:
+            r = subprocess.run(
+                ["schtasks", "/query", "/tn", task_name, "/fo", "LIST", "/v"],
+                capture_output=True, timeout=10, encoding="cp949", errors="replace",
+            )
+            if r.returncode != 0:
+                continue
+            last_result = ""
+            for line in r.stdout.splitlines():
+                stripped = line.strip()
+                if ":" not in stripped:
+                    continue
+                key, _, val = stripped.partition(":")
+                if key.strip() in ("마지막 결과", "Last Result"):
+                    last_result = val.strip()
+                    break
+            if "267011" in last_result:
+                items.append({
+                    "id": f"task_{task_name}",
+                    "title": f"{label} 미실행",
+                    "description": f"'{task_name}' 아직 한 번도 실행되지 않음",
+                    "status": "pending",
+                    "priority": "low",
+                })
+            elif last_result and last_result not in ("0", ""):
+                items.append({
+                    "id": f"task_{task_name}",
+                    "title": f"{label} 오류",
+                    "description": f"마지막 결과 코드: {last_result}",
+                    "status": "error",
+                    "priority": "high",
+                })
+        except Exception:
+            pass
+
+    return {"items": items}
 
 
 @app.get("/{full_path:path}")
