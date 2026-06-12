@@ -163,9 +163,10 @@ interface QuantLine {
   p1: number; p2: number                             // 앵커 가격 (교차점 계산용)
   touches: number; dur: number; score: number
   isSup: boolean; rank: number
+  rising: boolean            // 기울기 방향 — 색은 역할(지지/저항)이 아니라 이걸로 결정
   valNow: number; broken: boolean
   strength: '강' | '보통' | '약'
-  fadeBar?: number | null   // 이탈/돌파 시작 봉 — 이 지점부터 우측 페이드 아웃
+  fadeBar?: number | null   // 이탈/돌파 시작 봉 — 이 지점부터 우측 잠식
 }
 
 // Top-N 추세선 탐색 + 차트 좌표 변환
@@ -254,6 +255,7 @@ function qtFindLines(
       p1: c.p1, p2: c.p2,
       touches: c.touches, dur: c.dur, score: bsc,
       isSup, rank,
+      rising: m > 0,
       valNow, broken,
       strength,
     })
@@ -353,16 +355,20 @@ function PriceChart({ p }: { p: Dict }) {
   const lifecycle = (t: QuantLine): QuantLine | null => {
     const m = (t.p2 - t.p1) / Math.max(t.i2 - t.i1, 1)
     const b0 = t.p1 - m * t.i1
+    const atr = atrs[curIdx] || 1
+    const dist = Math.abs(closes[curIdx] - (m * curIdx + b0)) / atr
+    // 영향력 컷: 선의 현재 연장값이 현재가에서 ATR×6 초과 — 주가 판단에 영향 없음
+    if (dist > 6) return null
+    // 깨짐은 선의 방향과 반대 관통만: 상승선=아래로 이탈 / 하락선=위로 돌파.
+    // 신고가로 상승선을 위로 뚫는 것은 가속이지 깨짐이 아님 — 녹색 유지.
     const beyond = (i: number) => {
       const lv = m * i + b0
-      return t.isSup ? closes[i] < lv * 0.995 : closes[i] > lv * 1.005
+      return t.rising ? closes[i] < lv * 0.995 : closes[i] > lv * 1.005
     }
     if (!beyond(curIdx)) return { ...t, broken: false, fadeBar: null }
     let bb = curIdx
     while (bb - 1 > t.i2 && beyond(bb - 1)) bb--
-    const atr = atrs[curIdx] || 1
-    const dist = Math.abs(closes[curIdx] - (m * curIdx + b0)) / atr
-    if (curIdx - bb + 1 >= 3 && dist > 4) return null  // 소멸
+    if (curIdx - bb + 1 >= 3 && dist > 4) return null  // 추세 동력 상실 — 소멸
     return { ...t, broken: true, fadeBar: bb }
   }
   const supLines = supRaw.map(lifecycle).filter((t): t is QuantLine => t != null)
@@ -664,21 +670,27 @@ function PriceChart({ p }: { p: Dict }) {
           <stop offset="100%" stopColor="#60a5fa" stopOpacity="0.02" />
         </linearGradient>
 
-        {/* 이탈/돌파 페이드 gradient — 자기 색(상승=녹/하락=적) 유지,
-            이탈 시작 봉부터 오른쪽으로 페이드 아웃 (선의 효력 상실 구간) */}
+        {/* 이탈/돌파 잠식 gradient — 시작(추세 근거)은 자기 색 유지,
+            주가가 관통한 지점부터 반대색으로 잠식되며 끝으로 갈수록 희미해짐.
+            (상승선: 녹→적 잠식 / 하락선: 적→녹 잠식) — 추세 확정 시 lifecycle이 선 제거 */}
         {[
-          ...supLines.map((t, i) => ({ t, id: `bo-sup-${i}`, col: '#34d399' })),
-          ...resLines.map((t, i) => ({ t, id: `bo-res-${i}`, col: '#f87171' })),
-        ].map(({ t, id, col }) => {
+          ...supLines.map((t, i) => ({ t, id: `bo-sup-${i}` })),
+          ...resLines.map((t, i) => ({ t, id: `bo-res-${i}` })),
+        ].map(({ t, id }) => {
+          // 색은 기울기 기준: 상승선은 반드시 녹색에서 시작 → 관통점부터 붉게 잠식
+          const own = t.rising ? '#34d399' : '#f87171'
+          const inv = t.rising ? '#f87171' : '#34d399'
           if (!t.broken || t.fadeBar == null) return null
           const fadeX = toX(t.fadeBar)
-          const frac = Math.max(0.1, Math.min(0.95, (fadeX - t.x1) / Math.max(t.x2 - t.x1, 1)))
+          const frac = Math.max(0.1, Math.min(0.92, (fadeX - t.x1) / Math.max(t.x2 - t.x1, 1)))
+          const mid = Math.min(0.98, frac + 0.08)
           return (
             <linearGradient key={id} id={id} gradientUnits="userSpaceOnUse"
               x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2}>
-              <stop offset="0%" stopColor={col} stopOpacity="0.9" />
-              <stop offset={`${(frac * 100).toFixed(1)}%`} stopColor={col} stopOpacity="0.85" />
-              <stop offset="100%" stopColor={col} stopOpacity="0.04" />
+              <stop offset="0%" stopColor={own} stopOpacity="0.9" />
+              <stop offset={`${(frac * 100).toFixed(1)}%`} stopColor={own} stopOpacity="0.85" />
+              <stop offset={`${(mid * 100).toFixed(1)}%`} stopColor={inv} stopOpacity="0.75" />
+              <stop offset="100%" stopColor={inv} stopOpacity="0.25" />
             </linearGradient>
           )
         })}
@@ -741,7 +753,7 @@ function PriceChart({ p }: { p: Dict }) {
         const breakGradId = t.broken ? `bo-${t.isSup ? 'sup' : 'res'}-${lineIdx}` : null
         const gradId = breakGradId ?? convGradId
 
-        const baseCol = t.isSup ? '#34d399' : '#f87171'  // 상승=녹 / 하락=적 고정
+        const baseCol = t.rising ? '#34d399' : '#f87171'  // 기울기 기준: 상승=녹 / 하락=적
         const col = gradId ? `url(#${gradId})` : baseCol
         const chanCol = baseCol
         const opacity = Math.max(0.35, 0.85 - t.rank * 0.2)
@@ -1184,8 +1196,8 @@ export function CompassReport({ data }: { data: Dict }) {
       <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
         {[
           { l: '평균 목표가', v: fmt(data.targets?.avgTarget), s: data.targets?.avgTargetUpside != null ? `+${data.targets.avgTargetUpside}%` : '', c: '#34d399' },
-          { l: '손절가', v: fmt(stopPrice), s: stopPrice && cur ? `${((stopPrice / cur - 1) * 100).toFixed(1)}%` : '', c: '#f87171' },
           { l: '손익비', v: comp.riskReward ?? 'N/A', s: `상승지속 ${data.probability?.continueUpPct ?? '-'}%`, c: '#60a5fa' },
+          { l: '손절가', v: fmt(stopPrice), s: stopPrice && cur ? `${((stopPrice / cur - 1) * 100).toFixed(1)}%` : '', c: '#f87171' },
         ].map(x => (
           <div key={x.l} style={{ ...card, flex: 1, textAlign: 'center', marginBottom: 0, padding: '12px 8px' }}>
             <div style={{ fontSize: 10.5, color: '#64748b', letterSpacing: 1 }}>{x.l}</div>
