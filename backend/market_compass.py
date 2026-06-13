@@ -86,10 +86,54 @@ def _vkospi_context() -> dict:
     return out
 
 
-def _stage1_market_regime(macro: dict, vkospi: dict, sectors: list[dict]) -> dict:
-    """[1단계] 시장 구조: 유동성/실적/정책/테마/위기 장세 판정 (규칙 기반 + 근거)."""
+def _stage0_global_sentiment() -> dict:
+    """[0단계] 글로벌 투자심리 (스펙 §4.2) — 국내 regime 판정에 선행.
+
+    global_macro.compute_global_macro() 의 8점수·composite·flow·확률·한국섹터를 그대로 싣는다.
+    엔진 실패 시 {available: False} 로 fail-soft — market_compass 본체는 정상 동작(회귀 없음).
+    """
+    try:
+        import global_macro
+
+        g = global_macro.compute_global_macro()
+        return {
+            "available": True,
+            "scores": g.get("scores", {}),
+            "composite": g.get("composite"),
+            "flow": g.get("flow"),
+            "probabilities": g.get("probabilities"),
+            "krSectors": g.get("kr_sectors"),
+            "evidence": g.get("evidence"),
+            "asof": g.get("asof"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "error": f"global_macro 실패: {type(exc).__name__}"}
+
+
+def _stage1_market_regime(macro: dict, vkospi: dict, sectors: list[dict],
+                          global_sent: Optional[dict] = None) -> dict:
+    """[1단계] 시장 구조: 유동성/실적/정책/테마/위기 장세 판정 (규칙 기반 + 근거).
+
+    global_sent(0단계)가 가용하면 글로벌 Risk-On/Off 를 보조 신호로 반영한다(과긍정/과부정 보정).
+    None 이면 기존 5개 국내 신호만으로 판정 — 회귀 없음.
+    """
     evidence: list[str] = []
     scores = {"유동성 장세": 0.0, "실적 장세": 0.0, "정책 장세": 0.0, "테마 장세": 0.0, "위기 장세": 0.0}
+
+    if global_sent and global_sent.get("available"):
+        gs = global_sent.get("scores", {})
+        ra = gs.get("risk_appetite")
+        gliq = gs.get("liquidity")
+        if ra is not None:
+            if ra >= 65:
+                scores["테마 장세"] += 0.5
+                evidence.append(f"글로벌 위험선호 {ra}/100 — Risk-On(성장·테마 우호)")
+            elif ra <= 35:
+                scores["위기 장세"] += 1
+                evidence.append(f"글로벌 위험선호 {ra}/100 — Risk-Off(위험회피)")
+        if gliq is not None and gliq >= 60:
+            scores["유동성 장세"] += 0.5
+            evidence.append(f"글로벌 유동성 {gliq}/100 — 유동성 우호")
 
     vk = vkospi.get("value")
     if vk is not None:
@@ -139,8 +183,12 @@ def _stage1_market_regime(macro: dict, vkospi: dict, sectors: list[dict]) -> dic
     return {"label": regime, "scores": scores, "evidence": evidence}
 
 
-def _stage2_macro_map(macro: dict) -> list[dict]:
-    """[2단계] 거시 요소별 → 유리한 섹터 매핑 (현재값 기준)."""
+def _stage2_macro_map(macro: dict, global_scores: Optional[dict] = None) -> list[dict]:
+    """[2단계] 거시 요소별 → 유리한 섹터 매핑 (현재값 기준).
+
+    기존 5개 국내 거시 행(US10Y·원달러·WTI·나스닥·VIX) 뒤에 글로벌 매크로 4행을 덧붙인다
+    (스펙 §4.1). global_scores 가 없으면(엔진 실패) 기존 5행만 반환 — 회귀 없음.
+    """
     rows = []
 
     def add(factor, value, favors, why):
@@ -171,6 +219,29 @@ def _stage2_macro_map(macro: dict) -> list[dict]:
         add("VIX(미국)", str(vix),
             ["금융", "소비재"] if float(vix) > 25 else ["반도체", "AI 생태계"],
             "VIX 상승 국면은 방어주, 안정 국면은 성장주 우위")
+
+    # --- 글로벌 매크로 4행 (스펙 §4.1) — 점수 임계로 favors 선택, 기존 패턴 준수 ---
+    g = global_scores or {}
+    ra = g.get("risk_appetite")
+    if ra is not None:
+        add("글로벌 위험선호", f"{ra}/100",
+            ["반도체", "AI 생태계", "로봇 AI"] if ra >= 50 else ["금융", "소비재"],
+            "VIX·신용·BTC·S&P 종합 — 위험선호 高=성장주, 低=방어주")
+    liq = g.get("liquidity")
+    if liq is not None:
+        add("글로벌 유동성", f"{liq}/100",
+            ["반도체", "AI 생태계", "바이오"] if liq >= 50 else ["금융"],
+            "Fed경로·US10Y·DXY 종합 — 유동성 우호=성장주 할인율 완화")
+    ai = g.get("ai_cycle")
+    if ai is not None:
+        add("AI 투자사이클", f"{ai}/100", ["반도체", "AI 생태계"],
+            "빅테크 Capex·SOX·나스닥 모멘텀 — AI 밸류체인 구조 주도")
+    geo = g.get("geopolitics")
+    if geo is not None:
+        # 점수↑=리스크완화. 리스크 高(점수 低)면 방산·조선 수혜
+        add("지정학 리스크", f"{geo}/100",
+            ["반도체", "AI 생태계"] if geo >= 50 else ["방산", "조선"],
+            "예측시장·뉴스·Gold 종합 — 점수↑=리스크완화(성장주), 低=방산·조선")
     return rows
 
 
@@ -349,8 +420,11 @@ def compute_market_compass(force: bool = False, with_ai: bool = True) -> dict:
     macro = rotation.get("macroDetail", {})
     vkospi = _vkospi_context()
 
-    regime = _stage1_market_regime(macro, vkospi, sectors)
-    macro_map = _stage2_macro_map(macro)
+    global_sent = _stage0_global_sentiment()
+    regime = _stage1_market_regime(macro, vkospi, sectors, global_sent)
+    macro_map = _stage2_macro_map(
+        macro, global_sent.get("scores") if global_sent.get("available") else None
+    )
     ladder = _stage3_rotation_ladder(sectors)
 
     # [6단계] 뉴스 수집 (30분 TTL) + 컨텍스트
@@ -376,6 +450,7 @@ def compute_market_compass(force: bool = False, with_ai: bool = True) -> dict:
     context = {
         "asOf": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "vkospi": vkospi,
+        "globalSentiment": global_sent,
         "regime": regime,
         "macroMap": macro_map,
         "rotationLadder": ladder,

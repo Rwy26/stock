@@ -151,6 +151,8 @@ if ($LASTEXITCODE -ne 0) {
 Write-Output "Installing backend deps..."
 Invoke-NativeOrThrow $pythonExe @('-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel') "Failed to upgrade pip tooling"
 Invoke-NativeOrThrow $pythonExe @('-m', 'pip', 'install', 'fastapi', 'uvicorn[standard]', 'sqlalchemy', 'pymysql', 'python-dotenv', 'cryptography', 'passlib', 'PyJWT', 'httpx', 'websocket-client', 'pandas', 'pyarrow') "Failed to install backend dependencies"
+# 글로벌 매크로 투자심리 파이프라인(global_macro_feeds): yfinance 16심볼 시장데이터. httpx 는 위에서 설치됨.
+Invoke-NativeOrThrow $pythonExe @('-m', 'pip', 'install', 'yfinance') "Failed to install global-macro dependencies"
 
 # 4) Minimal backend app file (idempotent)
 $mainPath = Join-Path $PWD "backend\main.py"

@@ -501,3 +501,56 @@ class NewsArticle(Base):
     url: Mapped[str | None] = mapped_column(String(400), nullable=True)
     published_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class MacroSentimentDaily(Base):
+    """글로벌 매크로 투자심리 일별 스냅샷 — global_macro.compute_global_macro() 결과 저장.
+
+    8대 점수(0~100, 50=중립) + composite(가중평균) + flow(구간 라벨) + 확률(1w/1m/3m) +
+    원천값 inputs(JSON). 모든 수치는 결정론 레이어가 산출하고 LLM은 해석만 한다.
+    누적 표본이 ≥60거래일이면 확률 산출이 결정론 로지스틱→빈도 기반으로 자동 전환된다(스펙 §7.2).
+    적재: scripts/fundamentals_sync.py (06:00 체인) — trade_date upsert.
+    """
+
+    __tablename__ = "macro_sentiment_daily"
+
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    liquidity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    growth: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    inflation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ai_cycle: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    geopolitics: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    risk_appetite: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    us_equity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    kr_equity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    composite: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    flow: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    prob_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)      # {"1w":{up,down},...,"method","n"}
+    inputs_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)    # 원천값 + evidence + kr_sectors
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class PredictionMarketDaily(Base):
+    """예측시장(Polymarket/Kalshi/Metaculus) 이벤트별 확률 시계열.
+
+    target_key = global_macro.PREDICTION_TARGETS 의 key (recession_2026 등).
+    각 소스 확률은 0~100(Yes%), 무데이터는 NULL. consensus = 가용 소스 가중평균(스펙 §2.2),
+    n_sources = 합산에 참여한 소스 수(표본 수 없는 확률 금지 원칙).
+    적재: scripts/fundamentals_sync.py (06:00 체인) — (trade_date, target_key) upsert.
+    """
+
+    __tablename__ = "prediction_market_daily"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    target_key: Mapped[str] = mapped_column(String(40), index=True)
+    polymarket: Mapped[float | None] = mapped_column(Float, nullable=True)
+    kalshi: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metaculus: Mapped[float | None] = mapped_column(Float, nullable=True)
+    consensus: Mapped[float | None] = mapped_column(Float, nullable=True)
+    n_sources: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("uq_prediction_market_date_key", "trade_date", "target_key", unique=True),
+    )

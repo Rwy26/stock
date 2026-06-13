@@ -135,6 +135,68 @@ def _admin_profile():
         s.close()
 
 
+def _sync_global_macro(now: datetime) -> str:
+    """글로벌 매크로 점수 산출 → MacroSentimentDaily / PredictionMarketDaily upsert (스펙 §5).
+
+    결정론 점수 엔진만 호출(LLM 없음). 두 테이블은 create_all 로 보장하고 trade_date upsert.
+    반환: 로그용 요약 문자열.
+    """
+    import global_macro
+
+    g = global_macro.compute_global_macro(force=True)
+    scores = g.get("scores", {})
+    pred = (g.get("inputs", {}) or {}).get("prediction", {}) or {}
+    trade_date = now.date()
+
+    models.Base.metadata.create_all(
+        apollo_db.get_engine(),
+        tables=[models.MacroSentimentDaily.__table__, models.PredictionMarketDaily.__table__],
+    )
+
+    session = apollo_db.get_session_factory()()
+    try:
+        row = session.get(models.MacroSentimentDaily, trade_date)
+        if row is None:
+            row = models.MacroSentimentDaily(trade_date=trade_date)
+            session.add(row)
+        for k in ("liquidity", "growth", "inflation", "ai_cycle", "geopolitics",
+                  "risk_appetite", "us_equity", "kr_equity"):
+            setattr(row, k, scores.get(k))
+        row.composite = g.get("composite")
+        row.flow = g.get("flow")
+        row.prob_json = g.get("probabilities")
+        row.inputs_json = {
+            "evidence": g.get("evidence"),
+            "kr_sectors": g.get("kr_sectors"),
+            "market": (g.get("inputs", {}) or {}).get("market"),
+            "econ": (g.get("inputs", {}) or {}).get("econ"),
+            "news": (g.get("inputs", {}) or {}).get("news"),
+        }
+
+        n_pred = 0
+        for key, p in pred.items():
+            existing = session.execute(
+                select(models.PredictionMarketDaily).where(
+                    models.PredictionMarketDaily.trade_date == trade_date,
+                    models.PredictionMarketDaily.target_key == key,
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                existing = models.PredictionMarketDaily(trade_date=trade_date, target_key=key)
+                session.add(existing)
+            existing.polymarket = p.get("polymarket")
+            existing.kalshi = p.get("kalshi")
+            existing.metaculus = p.get("metaculus")
+            existing.consensus = p.get("consensus")
+            existing.n_sources = p.get("n_sources", 0)
+            n_pred += 1
+        session.commit()
+    finally:
+        session.close()
+
+    return f"macro(composite={g.get('composite')} {g.get('flow')} pred={n_pred} method={g.get('probabilities', {}).get('method')})"
+
+
 def main() -> int:
     now = datetime.now()
     codes = _target_codes()
@@ -163,6 +225,12 @@ def main() -> int:
         vkospi_note += f" news(+{nres.get('inserted', 0)})"
     except Exception as exc:  # noqa: BLE001
         vkospi_note += f" news(FAIL {type(exc).__name__})"
+
+    # 글로벌 매크로 투자심리 지수 (스펙 §5 — 06:00 체인 합류, 실패해도 본 동기화는 계속)
+    try:
+        vkospi_note += " " + _sync_global_macro(now)
+    except Exception as exc:  # noqa: BLE001
+        vkospi_note += f" macro(FAIL {type(exc).__name__})"
 
     mismatches: list[dict] = []
 

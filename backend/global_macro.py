@@ -1,0 +1,418 @@
+"""global_macro.py — 글로벌 매크로 투자심리 점수 엔진 (스펙 §2 · §7).
+
+8대 점수(0~100, 50=중립) → composite(가중평균) → flow(구간 라벨) → 확률(1w/1m/3m) →
+한국 7섹터 매핑을 **결정론적으로** 산출한다. LLM은 호출하지 않는다(해석은 market_compass LLM 단계).
+
+원칙(스펙 §0): 모든 출력 수치에 원천값 evidence 동반, 무데이터는 중립(50) 폴백 + evidence 'N/A'.
+캐시 TTL 은 market_compass 와 동일(장중 30분 / 장외 8시간).
+"""
+
+from __future__ import annotations
+
+import math
+import threading
+import time
+from datetime import datetime
+from typing import Optional
+
+import global_macro_feeds as feeds
+
+# ---------------------------------------------------------------------------
+# 상수 (스펙 §7.1 · §7.2)
+# ---------------------------------------------------------------------------
+SCORE_KEYS = ["liquidity", "growth", "inflation", "ai_cycle",
+              "geopolitics", "risk_appetite", "us_equity", "kr_equity"]
+
+# 종합 가중치 — 위험선호·유동성 선행 가중 (합 1.00, 스펙 §7.1)
+COMPOSITE_WEIGHTS = {
+    "risk_appetite": 0.22,
+    "liquidity":     0.20,
+    "ai_cycle":      0.16,
+    "growth":        0.12,
+    "inflation":     0.10,
+    "geopolitics":   0.10,
+    "us_equity":     0.06,
+    "kr_equity":     0.04,
+}
+
+FLOW_BANDS = [(20, "매우약세"), (40, "약세"), (60, "중립"), (80, "강세"), (101, "매우강세")]
+
+PROB_DECAY = {"1w": 1.0, "1m": 0.7, "3m": 0.5}   # 기간감쇠 (장기일수록 50%로 수렴)
+PHASE2_MIN_SAMPLES = 60                            # 빈도 기반 자동 전환 임계 (거래일)
+ANALOG_BAND = 8.0                                  # composite ±8pt 유사국면
+
+# ---------------------------------------------------------------------------
+# 캐시 (market_compass 규칙과 동일)
+# ---------------------------------------------------------------------------
+_lock = threading.Lock()
+_cache: Optional[dict] = None
+_cache_ts: float = 0.0
+
+
+def _ttl() -> int:
+    now = datetime.now()
+    if now.weekday() < 5 and (9 * 60 <= now.hour * 60 + now.minute <= 15 * 60 + 30):
+        return 1800
+    return 28800
+
+
+# ---------------------------------------------------------------------------
+# 헬퍼
+# ---------------------------------------------------------------------------
+def _clamp_score(raw: float) -> int:
+    return int(max(0, min(100, round(raw))))
+
+
+def _g(mkt: dict, name: str, field: str) -> Optional[float]:
+    """market internals 안전 게터."""
+    d = mkt.get(name)
+    return d.get(field) if isinstance(d, dict) else None
+
+
+def _pred(pred: dict, key: str) -> Optional[float]:
+    row = pred.get(key) or {}
+    return row.get("consensus")
+
+
+# ---------------------------------------------------------------------------
+# 점수 산출 — 각 함수: (score:int, evidence:list[str])
+#   score = clamp(50 + Σ기여, 0, 100). 결측 입력은 기여 0 + evidence 'N/A'.
+# ---------------------------------------------------------------------------
+def _liquidity(pred, mkt, econ) -> tuple[int, list[str]]:
+    c, ev = 0.0, []
+    cut = _pred(pred, "fed_cut_next")
+    if cut is not None:
+        c += (cut - 50) * 0.40
+        ev.append(f"Fed 인하확률 {cut}% (예측시장)")
+    else:
+        ev.append("Fed 인하확률 N/A(pred:N/A)")
+    path = _pred(pred, "fed_path_eoy")
+    if path is not None:
+        ev.append(f"연말 금리경로 내재확률 {path}%")
+    t10c = _g(mkt, "US10Y", "chg20d_pct")
+    if t10c is not None:
+        c += -t10c * 1.0
+        ev.append(f"US10Y 20일 {t10c:+}% (상승=긴축)")
+    dxyc = _g(mkt, "DXY", "chg20d_pct")
+    if dxyc is not None:
+        c += -dxyc * 1.5
+        ev.append(f"DXY 20일 {dxyc:+}% (달러강세=긴축)")
+    return _clamp_score(50 + c), ev
+
+
+def _growth(pred, mkt, econ) -> tuple[int, list[str]]:
+    c, ev = 0.0, []
+    gdp = econ.get("gdp_qoq", {})
+    if gdp.get("surprise"):
+        c += gdp["surprise"] * 8
+        ev.append(f"GDP {gdp.get('actual')}% surprise={gdp['surprise']:+d} (예상 {gdp.get('consensus')})")
+    elif gdp.get("actual") is not None:
+        ev.append(f"GDP {gdp.get('actual')}% (consensus N/A)")
+    une = econ.get("unemployment", {})
+    if une.get("actual") is not None:
+        c += -une.get("surprise", 0) * 6
+        ev.append(f"실업률 {une['actual']}% surprise={une.get('surprise', 0):+d}")
+    ism = econ.get("ism_mfg", {})
+    if ism.get("actual") is not None:
+        c += (ism["actual"] - 50) * 0.5
+        ev.append(f"ISM 제조업 {ism['actual']} ({'확장' if ism['actual'] >= 50 else '위축'})")
+    rec = _pred(pred, "recession_2026")
+    if rec is not None:
+        c += -(rec - 50) * 0.40
+        ev.append(f"경기침체 확률 {rec}% (예측시장)")
+    else:
+        ev.append("경기침체 확률 N/A(pred:N/A)")
+    if not ev:
+        ev.append("경기지표 N/A")
+    return _clamp_score(50 + c), ev
+
+
+def _inflation(pred, mkt, econ) -> tuple[int, list[str]]:
+    """점수↑ = 물가안정."""
+    c, ev = 0.0, []
+    cpi = econ.get("cpi_yoy", {})
+    if cpi.get("actual") is not None:
+        c += -cpi.get("surprise", 0) * 8
+        ev.append(f"CPI {cpi['actual']}% YoY surprise={cpi.get('surprise', 0):+d} (상회=물가압박)")
+    core = econ.get("core_cpi", {})
+    if core.get("actual") is not None:
+        c += -core.get("surprise", 0) * 6
+        ev.append(f"근원 CPI {core['actual']}% surprise={core.get('surprise', 0):+d}")
+    cpithr = _pred(pred, "cpi_threshold")
+    if cpithr is not None:
+        c += -(cpithr - 50) * 0.30
+        ev.append(f"CPI>3% 확률 {cpithr}% (예측시장)")
+    wti = _g(mkt, "WTI", "chg5d_pct")
+    if wti is not None:
+        c += -wti * 0.60
+        ev.append(f"WTI 5일 {wti:+}% (상승=물가압박)")
+    if not ev:
+        ev.append("물가지표 N/A")
+    return _clamp_score(50 + c), ev
+
+
+def _ai_cycle(pred, mkt, econ, news) -> tuple[int, list[str]]:
+    c, ev = 0.0, []
+    nas = _g(mkt, "NASDAQ", "chg20d_pct")
+    if nas is not None:
+        c += nas * 1.2
+        ev.append(f"나스닥 20일 {nas:+}%")
+    sp = _g(mkt, "SP500", "chg20d_pct")
+    if sp is not None:
+        c += sp * 0.4
+        ev.append(f"S&P500 20일 {sp:+}%")
+    ai_t = (news.get("by_topic") or {}).get("ai")
+    if ai_t:
+        c += ai_t["score_avg"] * 6
+        ev.append(f"AI 뉴스감성 {ai_t['score_avg']:+} (n={ai_t['n']})")
+    if not ev:
+        ev.append("AI 사이클 데이터 N/A")
+    return _clamp_score(50 + c), ev
+
+
+def _geopolitics(pred, mkt, econ, news) -> tuple[int, list[str]]:
+    """점수↑ = 지정학 리스크 완화."""
+    c, ev = 0.0, []
+    geo = _pred(pred, "geopol_mideast")
+    if geo is not None:
+        c += (geo - 50) * 0.40
+        ev.append(f"중동 분쟁완화 확률 {geo}% (예측시장)")
+    else:
+        ev.append("중동 분쟁 예측시장 N/A(pred:N/A)")
+    shut = _pred(pred, "us_gov_shutdown")
+    if shut is not None:
+        c += -(shut - 50) * 0.30
+        ev.append(f"셧다운/부채한도 확률 {shut}%")
+    gold = _g(mkt, "Gold", "chg5d_pct")
+    if gold is not None:
+        c += -gold * 0.80
+        ev.append(f"금 5일 {gold:+}% (급등=리스크회피)")
+    geo_t = (news.get("by_topic") or {}).get("지정학")
+    if geo_t:
+        c += geo_t["score_avg"] * 5
+        ev.append(f"지정학 뉴스감성 {geo_t['score_avg']:+} (n={geo_t['n']})")
+    return _clamp_score(50 + c), ev
+
+
+def _risk_appetite(pred, mkt, econ) -> tuple[int, list[str]]:
+    c, ev = 0.0, []
+    vix = _g(mkt, "VIX", "last")
+    if vix is not None:
+        if vix < 20:
+            c += (20 - vix) * 1.5
+        elif vix > 25:
+            c += -(vix - 25) * 1.5
+        ev.append(f"VIX {vix} ({'안정' if vix < 20 else '경계' if vix > 25 else '중립'})")
+    btc = _g(mkt, "BTC", "chg5d_pct")
+    if btc is not None:
+        c += btc * 0.30
+        ev.append(f"BTC 5일 {btc:+}%")
+    sp = _g(mkt, "SP500", "chg20d_pct")
+    if sp is not None:
+        c += sp * 1.0
+        ev.append(f"S&P500 20일 {sp:+}%")
+    rec = _pred(pred, "recession_2026")
+    if rec is not None:
+        c += -(rec - 50) * 0.20
+    shut = _pred(pred, "us_gov_shutdown")
+    if shut is not None:
+        c += -(shut - 50) * 0.20
+    if not ev:
+        ev.append("위험선호 데이터 N/A")
+    return _clamp_score(50 + c), ev
+
+
+def _us_equity(mkt, risk, liq) -> tuple[int, list[str]]:
+    c, ev = 0.0, []
+    moms = []
+    for nm in ("SP500", "NASDAQ", "Russell"):
+        m = _g(mkt, nm, "chg20d_pct")
+        if m is not None:
+            moms.append(m)
+    if moms:
+        mom = sum(moms) / len(moms)
+        c += mom * 1.0
+        ev.append(f"미 지수 20일 모멘텀 평균 {mom:+.2f}%")
+    c += (risk - 50) * 0.20 + (liq - 50) * 0.15
+    ev.append(f"위험선호 {risk}·유동성 {liq} 가중 반영")
+    return _clamp_score(50 + c), ev
+
+
+def _kr_equity(mkt, us_eq, ai) -> tuple[int, list[str]]:
+    c, ev = 0.0, []
+    moms = []
+    for nm in ("KOSPI", "KOSDAQ"):
+        m = _g(mkt, nm, "chg20d_pct")
+        if m is not None:
+            moms.append(m)
+    if moms:
+        mom = sum(moms) / len(moms)
+        c += mom * 1.0
+        ev.append(f"코스피/코스닥 20일 모멘텀 평균 {mom:+.2f}%")
+    c += (us_eq - 50) * 0.40
+    ev.append(f"미국증시 {us_eq} ×0.4 동조")
+    c += (ai - 50) * 0.20
+    ev.append(f"반도체(AI사이클 {ai}) 반영")
+    dxyc = _g(mkt, "DXY", "chg5d_pct")
+    if dxyc is not None:
+        c += dxyc * 0.20   # 달러강세=원화약세=수출주 환차익(소폭 +)
+        ev.append(f"DXY 5일 {dxyc:+}% (원화약세 환효과)")
+    return _clamp_score(50 + c), ev
+
+
+# ---------------------------------------------------------------------------
+# 한국 7섹터 매핑 (스펙 §2.4)
+# ---------------------------------------------------------------------------
+def _kr_sectors(s: dict) -> dict[str, int]:
+    inv_geo = 100 - s["geopolitics"]            # 지정학 역수 (리스크↑ = 방산·조선 수혜)
+    return {
+        "반도체":   _clamp_score(s["ai_cycle"] * 0.5 + s["risk_appetite"] * 0.5),
+        "AI":       _clamp_score(s["ai_cycle"] * 0.6 + s["risk_appetite"] * 0.4),
+        "방산":     _clamp_score(inv_geo * 0.5 + s["growth"] * 0.5),
+        "조선":     _clamp_score(inv_geo * 0.4 + s["growth"] * 0.6),
+        "2차전지":  _clamp_score(s["liquidity"] * 0.5 + s["growth"] * 0.5),  # 금리역수=유동성
+        "금융":     _clamp_score(s["liquidity"] * 0.5 + s["growth"] * 0.5),
+        "바이오":   _clamp_score(50 * 0.5 + s["risk_appetite"] * 0.5),       # 중립 기준
+    }
+
+
+# ---------------------------------------------------------------------------
+# 종합 · 자금흐름 · 확률 (스펙 §2.3 · §7.2)
+# ---------------------------------------------------------------------------
+def _composite(scores: dict) -> int:
+    return _clamp_score(sum(scores[k] * w for k, w in COMPOSITE_WEIGHTS.items()))
+
+
+def _flow_label(composite: int) -> str:
+    for hi, label in FLOW_BANDS:
+        if composite < hi:
+            return label
+    return "매우강세"
+
+
+def _prob_deterministic(scores: dict) -> dict:
+    """Phase 1: 결정론 로지스틱 (스펙 §7.2). method=deterministic, n=null."""
+    mom = (scores["us_equity"] + scores["kr_equity"]) / 2.0
+    z = 0.45 * (scores["risk_appetite"] - 50) + 0.30 * (scores["liquidity"] - 50) + 0.25 * (mom - 50)
+    out: dict = {"method": "deterministic", "n": None}
+    for period, decay in PROB_DECAY.items():
+        zp = z * decay
+        up = int(round(100 / (1 + math.exp(-zp / 18))))
+        up = max(0, min(100, up))
+        out[period] = {"up": up, "down": 100 - up}
+    return out
+
+
+def _prob_frequency(composite: int) -> Optional[dict]:
+    """Phase 2: 표본≥60이면 유사국면(composite ±8) 전방 상승빈도로 교체. 미달 시 None.
+
+    상승빈도 = 과거 동일국면 대비 N거래일 후 composite 상승 비율(가용 시계열 기준).
+    """
+    try:
+        import db
+        import models
+        from sqlalchemy import select
+
+        s = db.get_session_factory()()
+        try:
+            rows = s.execute(
+                select(models.MacroSentimentDaily.trade_date, models.MacroSentimentDaily.composite)
+                .order_by(models.MacroSentimentDaily.trade_date.asc())
+            ).all()
+        finally:
+            s.close()
+    except Exception:
+        return None
+
+    series = [int(c) for _, c in rows if c is not None]
+    if len(series) < PHASE2_MIN_SAMPLES:
+        return None
+
+    horizons = {"1w": 1, "1m": 20, "3m": 60}
+    out: dict = {"method": "frequency"}
+    n_used = 0
+    for period, h in horizons.items():
+        ups = total = 0
+        for i in range(len(series) - h):
+            if abs(series[i] - composite) <= ANALOG_BAND:
+                total += 1
+                if series[i + h] > series[i]:
+                    ups += 1
+        if total > 0:
+            up = int(round(ups / total * 100))
+            out[period] = {"up": up, "down": 100 - up}
+            n_used = max(n_used, total)
+        else:
+            # 해당 기간 유사표본 없음 → 중립 명시
+            out[period] = {"up": 50, "down": 50}
+    out["n"] = n_used
+    if n_used == 0:
+        return None
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 진입점
+# ---------------------------------------------------------------------------
+def compute_global_macro(force: bool = False) -> dict:
+    global _cache, _cache_ts
+    with _lock:
+        if not force and _cache is not None and (time.time() - _cache_ts) < _ttl():
+            return _cache
+
+    pred = feeds.fetch_prediction_consensus()
+    mkt = feeds.fetch_market_internals()
+    econ = feeds.fetch_econ_surprises()
+    news = feeds.fetch_news_sentiment()
+
+    evidence: dict[str, list[str]] = {}
+    scores: dict[str, int] = {}
+
+    scores["liquidity"], evidence["liquidity"] = _liquidity(pred, mkt, econ)
+    scores["growth"], evidence["growth"] = _growth(pred, mkt, econ)
+    scores["inflation"], evidence["inflation"] = _inflation(pred, mkt, econ)
+    scores["ai_cycle"], evidence["ai_cycle"] = _ai_cycle(pred, mkt, econ, news)
+    scores["geopolitics"], evidence["geopolitics"] = _geopolitics(pred, mkt, econ, news)
+    scores["risk_appetite"], evidence["risk_appetite"] = _risk_appetite(pred, mkt, econ)
+    scores["us_equity"], evidence["us_equity"] = _us_equity(mkt, scores["risk_appetite"], scores["liquidity"])
+    scores["kr_equity"], evidence["kr_equity"] = _kr_equity(mkt, scores["us_equity"], scores["ai_cycle"])
+
+    composite = _composite(scores)
+    flow = _flow_label(composite)
+
+    prob = _prob_frequency(composite) or _prob_deterministic(scores)
+    kr_sectors = _kr_sectors(scores)
+
+    result = {
+        "asof": datetime.now().isoformat(timespec="seconds"),
+        "scores": scores,
+        "composite": composite,
+        "flow": flow,
+        "probabilities": prob,
+        "kr_sectors": kr_sectors,
+        "inputs": {
+            "prediction": pred,
+            "market": mkt,
+            "econ": econ,
+            "news": news,
+        },
+        "evidence": evidence,
+        "weights": COMPOSITE_WEIGHTS,
+        "cached": False,
+    }
+    with _lock:
+        _cache = {**result, "cached": True}
+        _cache_ts = time.time()
+    return result
+
+
+if __name__ == "__main__":
+    import json
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    r = compute_global_macro(force=True)
+    print(json.dumps({k: r[k] for k in ("asof", "scores", "composite", "flow",
+                                        "probabilities", "kr_sectors", "evidence")},
+                     ensure_ascii=False, indent=2))

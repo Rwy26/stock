@@ -109,6 +109,12 @@ class Settings:
     # 발급: https://opendart.fss.or.kr/uss/umt/EgovMberInfoEdit.do
     dart_api_key: str = os.getenv("DART_API_KEY", "").strip()
 
+    # FRED API (선택) — 글로벌 매크로 경제지표(CPI/PPI/실업률/GDP) 조회용.
+    # 발급: https://fredaccount.stlouisfed.org/apikeys
+    # 키 없으면 global_macro_feeds 가 actual=None + surprise=0(부합)으로 fail-soft 폴백.
+    # consensus(예상치)는 FRED 미제공 → backend/macro_consensus.json 에서 로드(스펙 §7.3).
+    fred_api_key: str = os.getenv("FRED_API_KEY", "").strip()
+
     def database_url(self) -> str:
         if self.mysql_url:
             return self.mysql_url

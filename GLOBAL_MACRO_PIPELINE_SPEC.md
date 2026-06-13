@@ -33,9 +33,14 @@
 
 | 소스 | 엔드포인트 | 추출 |
 |------|-----------|------|
-| Polymarket | `https://gamma-api.polymarket.com/markets?closed=false&...` | 대상 이벤트의 `outcomePrices` (Yes 확률) |
-| Kalshi | `https://external-api.kalshi.com/trade-api/v2/markets?limit=...` | `yes_bid`/`yes_ask` 중간값 |
+| Polymarket | `https://gamma-api.polymarket.com/markets?closed=false&active=true` | 대상 이벤트의 `outcomePrices` (Yes 확률) |
+| Kalshi | `https://api.elections.kalshi.com/trade-api/v2/markets?status=active&series_ticker=...` | `(yes_bid+yes_ask)/2`, 결측 시 `last_price`, 둘 다 None이면 N/A |
 | Metaculus | `https://www.metaculus.com/api2/questions/{id}/` | `community_prediction.full.q2` (중앙값) |
+
+> **2026-06-13 실검증 정정 (추정 → 실측):**
+> - **Kalshi**: 작동 host는 `external-api`가 아니라 **`api.elections.kalshi.com`**, 상태 필터는 `open`이 아니라 **`active`**. 실데이터 확인 — `KXFED-27APR-T4.25`(Fed 상단금리 이벤트), 시리즈 `KXFED` 존재. 유동성 없는 마켓은 `yes_bid/ask/last_price` 모두 `None` → **N/A 처리(중립 폴백)**.
+> - **Metaculus**: 기존 가정(무인증)은 **틀림** — `api2/questions` 및 `api/posts` 모두 **인증 필수(403)**. → **§7.4 결정대로 Metaculus는 토큰 제공 시에만 사용, 미제공 시 가중치 재정규화로 자동 제외**(Polymarket 0.5 / Kalshi 0.5). 토큰은 `METACULUS_API_TOKEN`(.env, 선택).
+> - **Polymarket**: 이 분석 샌드박스에서 HTTP 000(연결 불가). KRX 사례 교훈(DNS불가는 오판)대로 **단정 금지** — 실제 백엔드 호스트(C:\stock 운영 env)에서 `curl`로 재검증한 뒤 확정할 것. 불가 시 Kalshi 단독(가중치 1.0)으로 폴백.
 
 **추적 이벤트 매핑** (`PREDICTION_TARGETS` 상수로 고정 — slug/ticker/id는 구현 시 실제 조회로 확정):
 - 미국 경기침체 (2026년 내) → 경기·위험선호 점수 입력
@@ -252,4 +257,10 @@ COMPOSITE_WEIGHTS = {
 
 6개로 확정한 이유: 8점수 중 유동성·경기·인플레·지정학·위험선호 5개에 최소 1개 예측시장 신호를 매핑
 (AI사이클·증시는 시장데이터로 충분). 셧다운/부채한도는 2026 매크로 핵심 캘린더 리스크라 추가.
-타깃이 3소스 모두 결측이면 해당 점수는 시장데이터·뉴스만으로 산출하고 evidence에 'pred:N/A' 기록.
+타깃이 가용 소스 모두 결측이면 해당 점수는 시장데이터·뉴스만으로 산출하고 evidence에 'pred:N/A' 기록.
+
+**소스 가용성 확정 (2026-06-13 실검증 반영):** 기본 운용은 **Kalshi(검증 완료) + Polymarket(백엔드
+호스트 재검증 후)**. Metaculus는 인증 필수로 확인되어 **선택 소스**로 강등 — `METACULUS_API_TOKEN`
+제공 시에만 0.2 가중 합류, 미제공이 기본이며 이때 Polymarket 0.5 / Kalshi 0.5로 재정규화(§2.2 규칙).
+Polymarket마저 호스트에서 불가하면 Kalshi 단독 1.0. 가중치 재정규화 로직은 어떤 조합에서도
+동일하게 작동해야 한다(구현 시 단위검증 대상).
