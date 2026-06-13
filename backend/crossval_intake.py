@@ -564,8 +564,27 @@ def _smartmoney_zone(symbol: str, tf: str) -> str | None:
     return f"가격 밴드 ZONE(참고): 현재가 {c:,.0f} — {pos} (상단 {u:,.0f}/하단 {l:,.0f})"
 
 
+def _anchored_vwap_note(df, infl: list[dict], cur: float) -> str | None:
+    """앵커드 VWAP — 최근 변곡점 기준 거래량가중 평단 (OHLCV 재계산·신뢰)."""
+    import pandas as pd
+    if not infl:
+        return None
+    anchor = infl[-1]                                   # 가장 최근 변곡점에 앵커
+    seg = df[df["ts"] >= pd.Timestamp(anchor["date"], tz="Asia/Seoul")]
+    if len(seg) < 2:
+        return None
+    tp = (seg["high"] + seg["low"] + seg["close"]) / 3
+    denom = float(seg["volume"].sum())
+    avwap = float((tp * seg["volume"]).sum() / denom) if denom > 0 else float(tp.mean())
+    pos = "위" if cur >= avwap else "아래"
+    return (f"## 앵커드 VWAP (재계산·신뢰)\n"
+            f"최근 변곡점 {anchor['date']} {anchor['type']} {anchor['price']:,} 기준 앵커드 VWAP "
+            f"= {avwap:,.0f} (이후 {len(seg)}봉). 현재가 {cur:,.0f}는 그 **{pos}** "
+            f"→ 변곡 이후 세력 평단 대비 위치로 우위를 판단하라.")
+
+
 def focus_input(symbol: str) -> dict | None:
-    """분석 입력 빌드: 가장 큰 TF 시계열 + 변곡점 + MTF합류 + (참고)CVD·ZONE."""
+    """분석 입력 빌드: 가장 큰 TF 시계열 + 변곡점 + 앵커드VWAP + MTF합류 + (참고)CVD·ZONE."""
     import pandas as pd
     tf, path = largest_timeframe(symbol)
     if not tf:
@@ -580,6 +599,9 @@ def focus_input(symbol: str) -> dict | None:
     cur = float(df["close"].iloc[-1])
 
     parts = [_focus_note(tf, len(df), cur, infl)]
+    avwap = _anchored_vwap_note(df, infl, cur)
+    if avwap:
+        parts.append(avwap)
     mtf = _mtf_confluence(symbol, tf, infl)
     if mtf:
         parts.append(mtf)

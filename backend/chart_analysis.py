@@ -218,6 +218,28 @@ def _rsi_divergence(close: pd.Series, rsi: pd.Series, lookback: int = 60, window
     return {"type": "none"}
 
 
+def _obv(df: pd.DataFrame) -> pd.Series:
+    """On-Balance Volume — 종가 방향으로 부호화한 거래량 누적 (수급 추적)."""
+    sign = np.sign(df["close"].diff().fillna(0.0))
+    return (sign * df["volume"]).cumsum()
+
+
+def _adx(df: pd.DataFrame, n: int = 14):
+    """Wilder ADX/DMI — 추세 강도(ADX) + 방향성(+DI/-DI)."""
+    high, low, close = df["high"], df["low"], df["close"]
+    up, dn = high.diff(), -low.diff()
+    plus_dm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=df.index)
+    minus_dm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=df.index)
+    tr = pd.concat([(high - low), (high - close.shift()).abs(), (low - close.shift()).abs()],
+                   axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1 / n, adjust=False).mean().replace(0, np.nan)
+    plus_di = 100 * plus_dm.ewm(alpha=1 / n, adjust=False).mean() / atr
+    minus_di = 100 * minus_dm.ewm(alpha=1 / n, adjust=False).mean() / atr
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(alpha=1 / n, adjust=False).mean()
+    return adx, plus_di, minus_di
+
+
 def compute_indicators(df: pd.DataFrame) -> dict[str, Any]:
     """Compute key technical indicators and return a summary dict.
 
@@ -230,6 +252,8 @@ def compute_indicators(df: pd.DataFrame) -> dict[str, Any]:
     sma5 = _sma(close, 5)
     sma20 = _sma(close, 20)
     sma60 = _sma(close, 60)
+    sma120 = _sma(close, 120)
+    sma200 = _sma(close, 200)
     ema12 = _ema(close, 12)
     ema26 = _ema(close, 26)
     rsi14 = _rsi(close, 14)
@@ -241,6 +265,8 @@ def compute_indicators(df: pd.DataFrame) -> dict[str, Any]:
     vwap20 = _vwap(df, 20)
     ichi = _ichimoku(df)
     rsi_div = _rsi_divergence(close, rsi14)
+    obv = _obv(df)
+    adx, plus_di, minus_di = _adx(df)
 
     def _last(s: pd.Series, n: int = 1) -> float | list[float]:
         vals = s.dropna().tail(n).round(4).tolist()
@@ -263,7 +289,8 @@ def compute_indicators(df: pd.DataFrame) -> dict[str, Any]:
             "start": str(df["time"].iloc[0]),
             "end": str(df["time"].iloc[-1]),
         },
-        "sma": {"5": _last(sma5), "20": _last(sma20), "60": _last(sma60)},
+        "sma": {"5": _last(sma5), "20": _last(sma20), "60": _last(sma60),
+                "120": _last(sma120), "200": _last(sma200)},
         "ema": {"12": _last(ema12), "26": _last(ema26)},
         "rsi_14": _last(rsi14),
         "macd": {
@@ -290,6 +317,18 @@ def compute_indicators(df: pd.DataFrame) -> dict[str, Any]:
                       else "구름 안"),
         },
         "rsi_divergence": rsi_div,
+        "obv": {
+            "direction_20bar": ("상승" if obv.iloc[-1] > obv.iloc[-min(20, len(obv))] else "하락"),
+            "confirms_price": bool((obv.iloc[-1] > obv.iloc[-min(20, len(obv))]) ==
+                                   (current_price > float(close.iloc[-min(20, len(close))]))),
+        },
+        "adx_14": {
+            "adx": _last(adx),
+            "plus_di": _last(plus_di),
+            "minus_di": _last(minus_di),
+            "regime": ("추세" if (_last(adx) or 0) >= 25 else "약한추세" if (_last(adx) or 0) >= 20 else "횡보"),
+            "direction": ("상승우위" if (_last(plus_di) or 0) >= (_last(minus_di) or 0) else "하락우위"),
+        },
         "volume": {
             "last": float(volume.iloc[-1]),
             "ma20": round(float(vol_ma20.iloc[-1]), 2) if not pd.isna(vol_ma20.iloc[-1]) else None,
@@ -320,7 +359,10 @@ _SYSTEM_PROMPT = """\
 [2] 수급 분석
   - 거래량 급증 구간 및 세력 개입 흔적
   - 이동평균선 배열 (20/60/120/200일선)
-  - 볼린저밴드 / RSI / MACD 수급 시그널
+  - 볼린저밴드 / RSI / MACD / MFI(거래량가중) / VWAP / 일목균형표 수급 시그널
+  - RSI 다이버전스(rsi_divergence)는 추세 약화/반전의 강한 단서로 해석
+  - 제공된 '멀티 타임프레임 합류'·'참고 신호(CVD·ZONE)'가 있으면 함께 고려하되,
+    참고 신호는 외부 미검증값이므로 보조 근거로만 쓰고 핵심 수치로 단정하지 말 것
 
 [3] 기업가치 기반 현재가 평가
   - 현재가가 저평가 / 적정 / 고평가인지 판단
