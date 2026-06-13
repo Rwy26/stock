@@ -47,6 +47,11 @@ import exclusion_engine
 from pipeline_paths import get_pipeline_paths
 from settings import settings
 
+try:
+    import gap_signal_intake as _gap_intake
+except Exception:  # pragma: no cover
+    _gap_intake = None
+
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -2451,6 +2456,76 @@ def admin_generate_recommendations_today(_admin=Depends(require_admin)):
         count, score_date = _generate_recommendations_for_date(db, rec_date=today, limit=200)
         db.commit()
         return {"ok": True, "date": today.isoformat(), "scoreDate": score_date, "upserted": int(count)}
+    finally:
+        db.close()
+
+
+# ─── 시초가 갭 신호 (스크리닝) ────────────────────────────────────────────────
+# premarket-scanner(kr_gap_scanner.sh) 결과를 적재/재확인/조회한다.
+# 라벨: '시초가 갭 신호' — 매수추천 아님. 촉매는 LLM 요약(catalyst_verified=False).
+# 제외 종목은 exclusion_engine 경유로 저장 스킵(완전제외)+인덱스만.
+
+def _parse_session_date(value: str | None) -> date:
+    if not value:
+        return date.today()
+    try:
+        return datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="session_date 형식은 YYYY-MM-DD") from exc
+
+
+@app.get("/api/recommendations/gap-signal")
+def get_gap_signals(on: str | None = None, _current_user=Depends(get_current_user)):
+    """시초가 갭 신호 목록 (on=YYYY-MM-DD, 없으면 최신 일자). 갭% 내림차순."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    if _gap_intake is None:
+        raise HTTPException(status_code=503, detail="gap_signal_intake module not available")
+    sess_date = _parse_session_date(on) if on else None
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        return _gap_intake.list_signals(db, session_date=sess_date)
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/gap-signals/ingest")
+def admin_ingest_gap_signals(payload: dict = Body(...), _admin=Depends(require_admin)):
+    """스캐너 gappers 적재(09:05). body: {"gappers":[...], "session_date":"YYYY-MM-DD"?}.
+
+    session_date 생략 시 오늘. gappers 는 스캐너 JSON의 'gappers' 배열 형식.
+    """
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    if _gap_intake is None:
+        raise HTTPException(status_code=503, detail="gap_signal_intake module not available")
+    gappers = payload.get("gappers")
+    if not isinstance(gappers, list):
+        raise HTTPException(status_code=400, detail="gappers 배열이 필요합니다")
+    sess_date = _parse_session_date(payload.get("session_date"))
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        result = _gap_intake.ingest_gappers(db, gappers, sess_date)
+        return {"ok": True, **result}
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/gap-signals/reconcile")
+def admin_reconcile_gap_signals(payload: dict = Body(default={}), _admin=Depends(require_admin)):
+    """저장된 갭 신호를 확정 daily_prices(siseJson) 기준으로 재확인(16:10).
+
+    body: {"session_date":"YYYY-MM-DD"?} — 생략 시 오늘.
+    """
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    if _gap_intake is None:
+        raise HTTPException(status_code=503, detail="gap_signal_intake module not available")
+    sess_date = _parse_session_date((payload or {}).get("session_date"))
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        result = _gap_intake.reconcile_signals(db, sess_date)
+        return {"ok": True, **result}
     finally:
         db.close()
 

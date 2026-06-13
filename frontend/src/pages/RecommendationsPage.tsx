@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchJson } from '../lib/api'
+import { CAUTION_BANNER_STYLE } from '../lib/exclusion'
 import type { OkOrCaution } from '../lib/exclusion'
 import { formatNumber, formatPercent } from '../lib/format'
 import type { WatchlistCodesResponse } from '../lib/types'
@@ -43,6 +44,33 @@ type KingResponse = {
   king_sectors: KingSector[]
   top_stocks: KingTopStock[]
   scored_date: string
+  note: string
+}
+
+// ─── 시초가 갭 신호 types ───────────────────────────────────────────────────────
+
+type GapSignalItem = {
+  code: string
+  name: string
+  tier: string | null
+  gapPct: number
+  price: number | null
+  open: number | null
+  prevClose: number | null
+  volume: number | null
+  tradeValueKrw: number | null
+  catalyst: string | null
+  catalystType: string | null
+  catalystVerified: boolean
+  catalystSource: string
+  headlines: string[]
+  priceVerified: boolean
+  disclaimer: string
+}
+
+type GapSignalResponse = {
+  date: string | null
+  items: GapSignalItem[]
   note: string
 }
 
@@ -147,13 +175,138 @@ function KingPanel() {
   )
 }
 
+// ─── 시초가 갭 신호 Panel ──────────────────────────────────────────────────────
+
+const TIER_STYLE: Record<string, { bg: string; fg: string }> = {
+  A: { bg: 'rgba(34,197,94,0.16)', fg: '#22c55e' },
+  B: { bg: 'rgba(251,191,36,0.16)', fg: '#fbbf24' },
+  C: { bg: 'rgba(148,163,184,0.16)', fg: '#94a3b8' },
+}
+
+function GapSignalPanel() {
+  const [data, setData] = useState<GapSignalResponse | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = () => {
+    setLoading(true)
+    setError(null)
+    fetchJson<GapSignalResponse>('/api/recommendations/gap-signal')
+      .then((r) => setData(r))
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    load()
+  }, [])
+
+  const items = data?.items ?? []
+  const fmtValue = (v: number | null) =>
+    v == null ? 'N/A' : `${formatNumber(Math.round(v / 1e8))}억`
+
+  return (
+    <section className="panel glass reveal">
+      <div className="panel-head" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h3>📈 시초가 갭 신호 {data?.date ? `(${data.date})` : ''}</h3>
+        <button className="btn secondary" onClick={load} disabled={loading}>
+          {loading ? '불러오는 중…' : '새로고침'}
+        </button>
+      </div>
+
+      {/* 프레이밍: 스크리닝 신호이며 매수추천이 아님 */}
+      <div style={CAUTION_BANNER_STYLE}>
+        <span>⚠️</span>
+        <span>
+          <b>시초가 갭 신호(스크리닝)</b> — 매수추천이 아닙니다. 촉매는 네이버 뉴스 LLM 요약으로
+          <b> 검증되지 않은 참고치</b>이며, 근거 헤드라인과 함께 표시됩니다. 갭·가격은 네이버 siseJson 기준입니다.
+        </span>
+      </div>
+
+      {error && <div className="banner warn" style={{ margin: '0.5rem 1rem' }}>{error}</div>}
+
+      {!loading && items.length === 0 && (
+        <p className="subtle" style={{ padding: '0.8rem 1rem', margin: 0 }}>
+          {data?.note ?? '갭 신호 데이터가 없습니다. 장 시작(09:05) 이후 적재됩니다.'}
+        </p>
+      )}
+
+      {items.length > 0 && (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>등급</th>
+                <th>종목명</th>
+                <th>코드</th>
+                <th>시초가 갭</th>
+                <th>시가</th>
+                <th>전일종가</th>
+                <th>거래대금</th>
+                <th>촉매(미검증)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((it) => {
+                const ts = TIER_STYLE[it.tier ?? 'C'] ?? TIER_STYLE.C
+                return (
+                  <tr key={it.code}>
+                    <td>
+                      <span style={{
+                        display: 'inline-block', minWidth: 22, textAlign: 'center',
+                        padding: '1px 7px', borderRadius: 6, fontWeight: 700,
+                        background: ts.bg, color: ts.fg,
+                      }}>{it.tier ?? '–'}</span>
+                    </td>
+                    <td>
+                      {it.name}
+                      {!it.priceVerified && (
+                        <span className="subtle" title="네이버 siseJson 재확인 보류 — 스캐너 값" style={{ marginLeft: 6 }}>⚠︎</span>
+                      )}
+                    </td>
+                    <td>{it.code}</td>
+                    <td className={it.gapPct >= 0 ? 'up' : 'down'}><b>{formatPercent(it.gapPct)}</b></td>
+                    <td>{it.open != null ? formatNumber(it.open) : 'N/A'}</td>
+                    <td>{it.prevClose != null ? formatNumber(it.prevClose) : 'N/A'}</td>
+                    <td>{fmtValue(it.tradeValueKrw)}</td>
+                    <td style={{ maxWidth: 320 }}>
+                      {it.catalyst ? (
+                        <span title={it.headlines.join('\n')}>
+                          <span style={{
+                            fontSize: '0.66rem', fontWeight: 700, color: '#fbbf24',
+                            border: '1px solid rgba(251,191,36,0.4)', borderRadius: 5,
+                            padding: '0px 5px', marginRight: 6,
+                          }}>미검증</span>
+                          {it.catalyst}
+                        </span>
+                      ) : (
+                        <span className="subtle">촉매 불명</span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {data && (
+        <p className="hint" style={{ marginTop: '0.6rem' }}>
+          {data.note} · 등급 A/B/C = 갭%·거래대금·촉매유무 결정론 산출 · 종목명에 ⚠︎ 는 siseJson 재확인 보류.
+        </p>
+      )}
+    </section>
+  )
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export function RecommendationsPage() {
   const [data, setData] = useState<RecommendationsResponse | null>(null)
   const [busyCode, setBusyCode] = useState<string | null>(null)
   const [watchCodes, setWatchCodes] = useState<Set<string>>(new Set())
-  const [tab, setTab] = useState<'standard' | 'king'>('standard')
+  const [tab, setTab] = useState<'standard' | 'king' | 'gap'>('standard')
 
   useEffect(() => {
     let cancelled = false
@@ -216,10 +369,16 @@ export function RecommendationsPage() {
           className={`pill-btn${tab === 'king' ? ' active' : ''}`}
           onClick={() => setTab('king')}
         >👑 KING</button>
+        <button
+          className={`pill-btn${tab === 'gap' ? ' active' : ''}`}
+          onClick={() => setTab('gap')}
+        >📈 시초가 갭 신호</button>
       </div>
 
       {tab === 'king' ? (
         <KingPanel />
+      ) : tab === 'gap' ? (
+        <GapSignalPanel />
       ) : (
         <>
           <section className="panel glass reveal">

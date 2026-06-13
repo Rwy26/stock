@@ -82,6 +82,50 @@ class Recommendation(Base):
     __table_args__ = (Index("uq_recommendations_date_code", "rec_date", "stock_code", unique=True),)
 
 
+class KrOpeningGapSignal(Base):
+    """KR 시초가 갭 신호 — 참고용 스크리닝 신호(거래 판단 미반영, reference-only).
+
+    소스: premarket-scanner/kr_gap_scanner.sh (네이버 모바일 API) → 종목별 시초가 갭
+    = (open - prev_close)/prev_close 재계산. 적재 시점에 갭/가격을 네이버 siseJson으로
+    재확인(price_verified)하며 어긋나면 siseJson을 우선한다(daily-prices-pipeline 원칙).
+    촉매(catalyst)는 LLM 뉴스 요약·참고치라 catalyst_verified=False 고정 — 추천에서
+    사실처럼 표기하지 않는다(data-accuracy 원칙). 제외 종목은 이 테이블에 저장하지 않고
+    excluded_stocks 인덱스에만 남긴다(exclusion_engine 경유, 완전제외+인덱스만).
+    (session_date, stock_code) UPSERT.
+    """
+
+    __tablename__ = "kr_opening_gap_signals"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_date: Mapped[date] = mapped_column(Date, index=True)              # 갭(시초가)이 발생한 거래일
+    # 갭 스캐너는 전 시장(KOSPI+KOSDAQ)을 훑으므로 추천 유니버스(stocks 마스터) 밖 코드가
+    # 다수다. reference-only 인 CrossvalCorpus/ExcludedStock 와 같이 stocks FK 를 두지 않는다.
+    stock_code: Mapped[str] = mapped_column(String(20), index=True)
+    name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    signal_type: Mapped[str] = mapped_column(String(20), default="opening_gap")
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)          # 스캐너 갭% 순위
+    tier: Mapped[str | None] = mapped_column(String(2), nullable=True)        # A | B | C (결정론 등급)
+    gap_pct: Mapped[float] = mapped_column(Float)                             # siseJson 재확인값
+    price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prev_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    trade_value_krw: Mapped[float | None] = mapped_column(Float, nullable=True)
+    catalyst: Mapped[str | None] = mapped_column(Text, nullable=True)         # LLM 뉴스 요약 (미검증)
+    catalyst_type: Mapped[str | None] = mapped_column(String(20), nullable=True)  # flow | fundamental | null
+    catalyst_verified: Mapped[bool] = mapped_column(Boolean, default=False)   # 항상 False (LLM 요약)
+    catalyst_source: Mapped[str] = mapped_column(String(40), default="naver_news_llm")
+    headlines: Mapped[list | None] = mapped_column(JSON, nullable=True)       # 근거 헤드라인[]
+    price_verified: Mapped[bool] = mapped_column(Boolean, default=False)      # siseJson 정합 재확인 통과 여부
+    disclaimer: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index("uq_kr_gap_signal_date_code", "session_date", "stock_code", unique=True),
+    )
+
+
 class PortfolioPosition(Base):
     __tablename__ = "portfolio"
 
