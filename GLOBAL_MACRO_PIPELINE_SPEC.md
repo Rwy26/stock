@@ -120,10 +120,10 @@ def compute_global_macro(force=False) -> dict
 
 ### 2.3 종합(composite) · 자금흐름 · 확률
 
-- composite = 8점수의 가중평균(가중치 상수 `COMPOSITE_WEIGHTS`, 합 1.0; 기본 균등 후 튜닝).
+- composite = 8점수의 가중평균(가중치 상수 `COMPOSITE_WEIGHTS` — **§7.1에서 확정**, 위험선호·유동성 가중).
 - flow ∈ {매우약세<20, 약세<40, 중립<60, 강세<80, 매우강세} — composite 구간 매핑.
-- 확률(1w/1m/3m): 위험선호·유동성·모멘텀의 함수. **결정론 공식**으로 산출하고 표본/근거를 함께 반환
-  (빈도 기반 원칙 — 향후 `macro_sentiment_daily` 축적 시 과거 유사국면 빈도로 교체).
+- 확률(1w/1m/3m): **§7.2 확정 공식**. Phase1 결정론 로지스틱(표본<60), Phase2 빈도(표본≥60) 자동 분기.
+  반환에 `method`·`n` 동반(표본 수 없는 확률 금지 원칙).
 
 ### 2.4 한국 섹터 매핑
 
@@ -195,9 +195,61 @@ LLM은 8점수와 확률을 **근거로만** 사용(환각 수치 금지, 기존
 - [ ] 신규 테이블 create_all + upsert UNIQUE 제약
 - [ ] 모든 출력 수치에 원천값 evidence 동반(데이터 정확성 원칙)
 
-## 7. 미결 결정사항 (구현 전 확정 필요)
+## 7. 확정 결정사항 (CIO 판단 — 구현 시 그대로 적용)
 
-1. `COMPOSITE_WEIGHTS` 8점수 가중치 — 균등 시작 vs 위험선호·유동성 가중.
-2. 확률 산출 공식 — 초기 결정론 함수 → 데이터 축적 후 빈도 기반 전환 시점.
-3. FRED API 키 사용 여부(경제지표 자동화 vs 수동 입력 폴백).
-4. 예측시장 추적 이벤트 최종 목록(현재 4개 → 확장 여부).
+> 2026-06-13 매크로 CIO 세션 확정. 변경 시 본 절과 §2.3·§1.3을 동시 갱신할 것.
+
+### 7.1 `COMPOSITE_WEIGHTS` — 위험선호·유동성 가중 (균등 아님)
+
+매크로 자금흐름은 **위험선호와 유동성이 선행지표**, 나머지는 그 원인/배경. 등가중은 후행지표(경기·
+인플레)가 선행신호를 희석시킨다. 확정 가중치(합 1.00):
+
+```python
+COMPOSITE_WEIGHTS = {
+    "risk_appetite": 0.22,   # 자금흐름 선행 — 최우선
+    "liquidity":     0.20,   # 연료 — 선행
+    "ai_cycle":      0.16,   # 현 사이클 구조적 주도 테마
+    "growth":        0.12,
+    "inflation":     0.10,   # 점수↑=물가안정 (부호 일관)
+    "geopolitics":   0.10,   # 점수↑=리스크완화
+    "us_equity":     0.06,   # 파생(중복가중 회피 위해 낮게)
+    "kr_equity":     0.04,   # 파생 — 한국향이라 글로벌 composite엔 소가중
+}
+```
+근거: 선행(risk+liq) 42% > 구조테마(ai) 16% > 후행(growth+infl) 22% > 배경(geo) 10% >
+파생(us+kr) 10%. us/kr_equity는 risk_appetite·liquidity와 상관이 높아 이중계산을 막기 위해 의도적 소가중.
+
+### 7.2 확률 산출 — 2단계 전환 (결정론 → 빈도, 표본 60 기준)
+
+- **Phase 1 (즉시):** 결정론 로지스틱. `z = 0.45·(risk-50) + 0.30·(liq-50) + 0.25·(mom-50)`,
+  `p_up = round(100 / (1 + exp(-z/18)))`. mom = 미국·한국 증시 20일 모멘텀 평균.
+  1w/1m/3m는 z에 기간감쇠 `[1.0, 0.7, 0.5]` 적용(장기일수록 50%로 수렴 — 불확실성 증가).
+  반환에 `method:"deterministic"`, `n:null` 명시.
+- **Phase 2 (자동 전환):** `MacroSentimentDaily` 누적 표본이 **≥60거래일**이면, 현재 composite와
+  ±8pt 이내 과거 국면을 찾아 익일/20일/60일 실제 상승빈도로 교체. `method:"frequency"`, `n` 동반.
+  표본 60 미만이면 Phase 1 유지(빈도 기반 원칙 — 표본 수 없는 확률 금지).
+- 전환은 `compute_global_macro` 내부에서 표본수로 자동 분기(수동 플래그 없음).
+
+### 7.3 경제지표 — FRED API 키 사용 (env 선택, 폴백 안전)
+
+`settings.py`에 `FRED_API_KEY`(선택) 추가. 키 있으면 FRED 시리즈 자동조회
+(CPIAUCSL, CPILFESL, PPIACO, UNRATE, GDPC1, NAPM 대용). **consensus(예상치)는 FRED에 없으므로**
+`backend/macro_consensus.json`(수동 갱신, 발표 캘린더 기준)에서 로드 → surprise 계산.
+키·파일 둘 다 없으면 surprise=0(부합) + `note` 기록(데이터 정확성: 추정 금지). 키는 git-ignored .env.
+
+### 7.4 예측시장 추적 이벤트 — 확정 6개 (현 4개 → 6개)
+
+`PREDICTION_TARGETS` 최종 목록. slug/ticker/id는 구현 시 실조회로 확정(§6 체크리스트).
+
+| key | 이벤트 | feeds_into |
+|-----|--------|-----------|
+| `recession_2026` | 미국 경기침체 2026년 내 | growth, risk_appetite |
+| `fed_cut_next` | 차기 FOMC 금리 인하 | liquidity |
+| `fed_path_eoy` | 연말 기준금리 구간 | liquidity, inflation |
+| `geopol_mideast` | 이란·중동 분쟁 확전/종결 | geopolitics |
+| `cpi_threshold` | 헤드라인 CPI > 임계 | inflation |
+| `us_gov_shutdown` | 미 정부 셧다운/부채한도 | risk_appetite, geopolitics |
+
+6개로 확정한 이유: 8점수 중 유동성·경기·인플레·지정학·위험선호 5개에 최소 1개 예측시장 신호를 매핑
+(AI사이클·증시는 시장데이터로 충분). 셧다운/부채한도는 2026 매크로 핵심 캘린더 리스크라 추가.
+타깃이 3소스 모두 결측이면 해당 점수는 시장데이터·뉴스만으로 산출하고 evidence에 'pred:N/A' 기록.
