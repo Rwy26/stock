@@ -38,7 +38,7 @@ import time
 from datetime import datetime
 from typing import Any, Iterable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("exclusion")
@@ -52,11 +52,13 @@ TAG_LABELS: dict[str, str] = {
     "SPAC":           "스팩(SPAC)",
     "PREFERRED":      "우선주",
     "REIT":           "리츠",
-    "ETF_ETN":        "ETF/ETN",
     "LOW_LIQUIDITY":  "저유동성(평균 거래대금 미달)",
     "PENNY":          "동전주(초저가)",
     "MANUAL":         "수동 지정",
-    # 폐기 태그 (주가·과열 기인 시장조치는 제외하지 않음 — 레거시 행 표시/정리용으로만 유지)
+    # 폐기 태그 (레거시 행 표시/자동 해제용으로만 유지)
+    #   ETF_ETN: ETF/ETN은 더 이상 제외하지 않고 보호한다(주도주와 동일 레벨).
+    #   INVEST_*/SHORT_OVERHEAT: 주가·과열 기인 시장조치는 제외하지 않는다.
+    "ETF_ETN":        "ETF/ETN(폐기)",
     "INVEST_RISK":    "투자위험(폐기)",
     "INVEST_WARN":    "투자경고(폐기)",
     "INVEST_CAUTION": "투자주의(폐기)",
@@ -70,6 +72,7 @@ MARKET_ACTION_TAGS = {
     "INVEST_RISK", "INVEST_WARN", "INVEST_CAUTION", "SHORT_OVERHEAT",
 }
 STATIC_NAME_TAGS = {"SPAC", "PREFERRED", "REIT"}
+# ETF_ETN 은 더 이상 발행하지 않지만, 갱신 카테고리에 남겨 레거시 행이 다음 스윕에서 자동 해제되게 한다.
 SWEEP_ONLY_TAGS = {"ETF_ETN", "LOW_LIQUIDITY", "PENNY"}
 
 # iscd_stat_cls_code 보조 매핑 — 여기 명시된 값에만 반응 (그 외 값은 무시)
@@ -88,6 +91,124 @@ def sector_etf_codes() -> set[str]:
     except Exception:
         # scoring_engine 로드 실패 시에도 동일 목록 유지 (KODEX 반도체/2차전지/K-바이오/K-방산/인공지능/미디어&엔터)
         return {"091160", "305720", "244580", "459580", "476600", "140570"}
+
+
+# ─── 주도주 보호 인덱스 (market_leaders) ─────────────────────────────────────
+#
+# 주도 섹터의 주도주는 어떤 제외 규칙에도 걸리지 않고 관심 종목 상위에 배치된다.
+# 섹터 ETF와 마찬가지로 '하드 예외' — 투자 주의 정보에 영향받지 않는다.
+
+_leader_cache: dict[str, dict] | None = None
+_leader_cache_at: float = 0.0
+_LEADER_TTL = 600.0
+_leader_table_ready = False
+
+# king-sector 이름(SECTOR_ETF_MAP 키) → sector_classification.json 섹터명 별칭
+KING_SECTOR_ALIASES: dict[str, set[str]] = {
+    "반도체":   {"반도체"},
+    "2차전지":  {"2차전지"},
+    "바이오":   {"바이오"},
+    "방산":     {"방산"},
+    "AI/로봇":  {"로봇 AI", "로봇AI", "AI 생태계", "AI생태계"},
+    "엔터":     {"엔터", "엔터테인먼트", "미디어", "소비재"},
+}
+
+
+def _ensure_leader_table() -> None:
+    global _leader_table_ready
+    if _leader_table_ready:
+        return
+    import db
+    import models
+
+    models.Base.metadata.create_all(db.get_engine(), tables=[models.MarketLeader.__table__])
+    _leader_table_ready = True
+
+
+def invalidate_leader_cache() -> None:
+    global _leader_cache, _leader_cache_at
+    with _lock:
+        _leader_cache = None
+        _leader_cache_at = 0.0
+
+
+def get_leaders(session: Session, *, force: bool = False) -> dict[str, dict]:
+    """주도주 인덱스를 {code: {name, sector, sector_rank, stock_rank, score_total}}로 반환."""
+    global _leader_cache, _leader_cache_at
+    with _lock:
+        if (not force) and _leader_cache is not None and (time.time() - _leader_cache_at) < _LEADER_TTL:
+            return _leader_cache
+
+    import models
+
+    _ensure_leader_table()
+    rows = session.execute(select(models.MarketLeader)).scalars().all()
+    fresh: dict[str, dict] = {}
+    for r in rows:
+        fresh[str(r.code)] = {
+            "name": str(r.name or ""),
+            "sector": str(r.sector or ""),
+            "sector_rank": r.sector_rank,
+            "stock_rank": r.stock_rank,
+            "score_total": r.score_total,
+            "source": str(r.source or "auto"),
+        }
+    with _lock:
+        _leader_cache = fresh
+        _leader_cache_at = time.time()
+    return fresh
+
+
+def leader_codes(session: Session) -> set[str]:
+    """주도주 코드 집합 — 제외 하드 예외 + 관심종목 상위 배치에 사용."""
+    try:
+        return set(get_leaders(session))
+    except Exception:
+        return set()
+
+
+# ─── ETF/ETN 판정 (전 종목 제외 면제 — 주도주와 동일 레벨) ──────────────────
+#
+# 사용자 확정(2026-06-12): ETF는 언제나 제외되지 않고 주도주와 같은 레벨로 활성화한다.
+# pykrx 목록은 이 환경에서 불안정해 1차 신호로 쓰지 않고, 한국 ETF/ETN의 고정 브랜드
+# 접두어로 판정한다. (제외가 아니라 '보호'이므로 오탐은 저위험 — 정상주를 보호로만 본다.)
+
+ETF_BRAND_PREFIXES = (
+    "KODEX", "TIGER", "KBSTAR", "ARIRANG", "HANARO", "KOSEF", "KINDEX",
+    "SOL", "ACE", "PLUS", "RISE", "TIMEFOLIO", "KIWOOM", "WON", "TREX",
+    "FOCUS", "히어로즈", "마이티", "파워", "에셋플러스", "BNK", "마이다스",
+)
+
+
+def is_etf(code: str, name: str = "") -> bool:
+    """ETF/ETN 여부 — 섹터 대표 ETF이거나 이름이 ETF/ETN 브랜드 접두어로 시작."""
+    code = str(code or "").strip()
+    if code in sector_etf_codes():
+        return True
+    nm = str(name or "").strip()
+    if not nm:
+        return False
+    up = nm.upper()
+    if up.endswith("ETN") or " ETN" in up:
+        return True
+    return any(up.startswith(p) or nm.startswith(p) for p in ETF_BRAND_PREFIXES)
+
+
+def _name_of(session: Session, code: str) -> str:
+    import models
+
+    n = session.execute(select(models.Stock.name).where(models.Stock.code == str(code).strip())).scalar_one_or_none()
+    return str(n or "")
+
+
+def is_protected(session: Session, code: str, name: str = "") -> bool:
+    """제외 규칙에서 면제되는 종목인가 (ETF/ETN · 섹터 대표 ETF · 주도주)."""
+    code = str(code or "").strip()
+    if code in sector_etf_codes() or code in leader_codes(session):
+        return True
+    if is_etf(code, name or _name_of(session, code)):
+        return True
+    return False
 
 
 class ExcludedStockError(Exception):
@@ -159,11 +280,21 @@ def is_excluded(session: Session, code: str) -> bool:
 
 
 def filter_codes(session: Session, codes: Iterable[str]) -> list[str]:
-    """제외 종목을 걸러낸 코드 목록 (DB 저장 파이프라인 입구용)."""
+    """제외 종목을 걸러낸 코드 목록 (DB 저장 파이프라인 입구용).
+
+    ETF/ETN·섹터 ETF·주도주는 항상 통과시킨다 (제외 인덱스에 잔존 행이 있어도 보호).
+    """
     all_codes = [str(c).strip() for c in codes]
     excluded = get_exclusions(session)
-    allow = sector_etf_codes()  # 섹터 대표 ETF는 항상 통과 (정보 정상 저장)
-    kept = [c for c in all_codes if c not in excluded or c in allow]
+    allow = sector_etf_codes() | leader_codes(session)
+
+    def _keep(c: str) -> bool:
+        if c not in excluded or c in allow:
+            return True
+        # 제외 인덱스에 남아 있어도 ETF면 보호 (저장된 이름으로 판정)
+        return is_etf(c, excluded[c].get("name", ""))
+
+    kept = [c for c in all_codes if _keep(c)]
     dropped = len(all_codes) - len(kept)
     if dropped:
         logger.info("제외 종목 %d건 파이프라인 제외", dropped)
@@ -349,6 +480,9 @@ def record_quote(session: Session, quote: Any) -> list[str]:
     if not code:
         return []
     name = str(getattr(quote, "name", "") or "").strip()
+    # ETF/주도주는 어떤 제외 태그도 부착하지 않는다 (투자 주의 정보에 영향받지 않음)
+    if code in sector_etf_codes() or code in leader_codes(session) or is_etf(code, name):
+        return []
     live = set(evaluate_quote_status(quote)) | set(evaluate_static(code, name))
     return merge_tags(
         session, code, name, sorted(live),
@@ -391,8 +525,8 @@ def gate(session: Session, code: str, name: str = "") -> None:
         return
 
     code = str(code or "").strip()
-    if code in sector_etf_codes():
-        return  # 섹터 대표 ETF는 제외 금지 (수동 지정보다 우선)
+    if code in sector_etf_codes() or code in leader_codes(session) or is_etf(code, name):
+        return  # ETF/ETN·섹터 대표 ETF·주도주는 제외 금지 (수동 지정보다 우선)
     entry = get_entry(session, code)
     if entry is not None:
         raise ExcludedStockError(
@@ -431,38 +565,30 @@ def run_sweep(
 
     stocks = session.execute(select(models.Stock.code, models.Stock.name)).all()
 
-    # ETF/ETN 목록 (pykrx — 실패 시 해당 태그 갱신 생략, 기존 값 보존)
-    etf_codes: set[str] | None = None
-    try:
-        from pykrx import stock as _pykrx
-
-        today = datetime.now().strftime("%Y%m%d")
-        etf = set(_pykrx.get_etf_ticker_list(today) or [])
-        try:
-            etn = set(_pykrx.get_etn_ticker_list(today) or [])
-        except Exception:
-            etn = set()
-        etf_codes = etf | etn
-    except Exception as exc:
-        logger.warning("pykrx ETF/ETN 목록 조회 실패 — ETF_ETN 태그는 기존 값 유지: %s", exc)
-
     checked = 0
     excluded_count = 0
     kis_errors = 0
-    sector_etfs = sector_etf_codes()  # 섹터 대표 ETF는 제외 금지 (정보 정상 저장)
+    etf_count = 0
+    # ETF/ETN·섹터 ETF·주도주는 제외 금지 (주도주와 동일 레벨로 보호)
+    protected = sector_etf_codes() | leader_codes(session)
 
     for code, name in stocks:
         code = str(code).strip()
         name = str(name or "").strip()
         checked += 1
 
+        # 보호 종목(ETF/ETN·섹터 ETF·주도주)은 어떤 태그도 부착하지 않고,
+        # 잔존 제외 행이 있으면 해제한다 (투자 주의 영향 차단).
+        if code in protected or is_etf(code, name):
+            if is_etf(code, name):
+                etf_count += 1
+            existing = get_entry(session, code)
+            if existing is not None and existing["tags"]:
+                _write_entry(session, code, name, [], source="sweep")
+            continue
+
         new_tags: set[str] = set(evaluate_static(code, name))
         refresh: set[str] = set(STATIC_NAME_TAGS)
-
-        if etf_codes is not None:
-            refresh.add("ETF_ETN")
-            if code in etf_codes and code not in sector_etfs:
-                new_tags.add("ETF_ETN")
 
         liq_tags, liq_detail = evaluate_liquidity(session, code)
         refresh |= {"LOW_LIQUIDITY", "PENNY"}
@@ -502,6 +628,155 @@ def run_sweep(
     return {
         "checked": checked,
         "excluded": excluded_count,
+        "etf_protected": etf_count,
         "kis_status_checked": bool(do_kis_status and kis_profile is not None),
         "kis_errors": kis_errors,
+    }
+
+
+# ─── 주도주 산출 (관리자/스케줄 공용) ────────────────────────────────────────
+
+def _load_classification_sector_map() -> dict[str, str]:
+    """code → 1차 섹터 분류 (sector_classification.json). main._load_sector_map과 동일 소스."""
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / "sector_classification.json"
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {k: v for k, v in data.items() if not str(k).startswith("_")} if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def compute_market_leaders(
+    session: Session,
+    *,
+    sector_top_n: int = 2,
+    leaders_per_sector: int = 3,
+    manual_codes: list[str] | None = None,
+) -> dict:
+    """주도 섹터의 주도주 인덱스 재구축.
+
+    주도 섹터 = compute_king_sectors(sector_top_n) (KOSPI 대비 섹터 ETF 알파 상위).
+    주도주 = 해당 섹터(sector_classification.json 분류) 종목 중 최신 IndicatorScore 상위.
+    manual_codes = 관리자 고정 주도주 (자동 산출과 무관하게 항상 보호, source=manual).
+
+    auto 산출은 매 호출 시 전량 교체(해제 포함). manual은 보존.
+    king-sector 계산(yfinance)이 실패하면 auto는 갱신하지 않고 기존 값을 보존한다.
+    """
+    import models
+
+    _ensure_leader_table()
+
+    # 1) 관리자 고정 주도주 먼저 반영 (자동 실패와 무관하게 항상 유효)
+    manual_set = {str(c).strip() for c in (manual_codes or []) if str(c).strip()}
+    name_of: dict[str, str] = {}
+    if manual_set:
+        rows = session.execute(
+            select(models.Stock.code, models.Stock.name).where(models.Stock.code.in_(manual_set))
+        ).all()
+        name_of = {str(c): str(n or "") for c, n in rows}
+
+    # 2) 주도 섹터 → 주도주 자동 산출 (yfinance 실패 시 auto는 보존)
+    auto_leaders: list[dict] = []
+    king_ok = False
+    try:
+        import scoring_engine
+
+        king = scoring_engine.compute_king_sectors(top_n=sector_top_n)
+        # 알파가 모두 None이면 yfinance 실패 — 주도 섹터를 신뢰할 수 없으므로 auto 보존
+        king_ok = bool(king) and any(k.get("alpha_1m") is not None for k in king)
+        if king and not king_ok:
+            logger.warning("주도 섹터 알파 전부 N/A(yfinance 실패) — auto 주도주는 기존 값 보존")
+    except Exception as exc:
+        logger.warning("주도 섹터 산출 실패 — auto 주도주는 기존 값 보존: %s", exc)
+        king = []
+
+    if king_ok:
+        sector_map = _load_classification_sector_map()
+        score_date = session.execute(select(func.max(models.IndicatorScore.scoring_date))).scalar_one_or_none()
+        for ks in king:
+            kname = str(ks.get("sector") or "")
+            srank = int(ks.get("rank") or 0)
+            aliases = KING_SECTOR_ALIASES.get(kname, {kname})
+            member_codes = [c for c, sec in sector_map.items() if sec in aliases]
+            if not member_codes or score_date is None:
+                continue
+            ranked = session.execute(
+                select(models.IndicatorScore.stock_code, models.IndicatorScore.score_total, models.Stock.name)
+                .join(models.Stock, models.Stock.code == models.IndicatorScore.stock_code)
+                .where(
+                    models.IndicatorScore.scoring_date == score_date,
+                    models.IndicatorScore.stock_code.in_(member_codes),
+                )
+                .order_by(func.coalesce(models.IndicatorScore.score_total, 0).desc())
+                .limit(int(leaders_per_sector))
+            ).all()
+            for i, (code, score, nm) in enumerate(ranked, start=1):
+                auto_leaders.append({
+                    "code": str(code), "name": str(nm or ""), "sector": kname,
+                    "sector_rank": srank, "stock_rank": i, "score_total": int(score or 0),
+                })
+
+    # 3) 인덱스 반영: manual은 항상, auto는 king_ok일 때만 전량 교체
+    existing = {str(r.code): r for r in session.execute(select(models.MarketLeader)).scalars().all()}
+    keep_codes: set[str] = set()
+
+    def _upsert(code, name, sector, srank, stkrank, score, source):
+        row = existing.get(code)
+        if row is None:
+            session.add(models.MarketLeader(
+                code=code, name=name or code, sector=sector, sector_rank=srank,
+                stock_rank=stkrank, score_total=score, source=source))
+        else:
+            row.name = name or row.name
+            row.sector = sector
+            row.sector_rank = srank
+            row.stock_rank = stkrank
+            row.score_total = score
+            row.source = source
+
+    for code in manual_set:
+        keep_codes.add(code)
+        _upsert(code, name_of.get(code, ""), None, 0, 0, None, "manual")
+
+    if king_ok:
+        for ld in auto_leaders:
+            if ld["code"] in manual_set:
+                continue
+            keep_codes.add(ld["code"])
+            _upsert(ld["code"], ld["name"], ld["sector"], ld["sector_rank"], ld["stock_rank"], ld["score_total"], "auto")
+        # king_ok일 때만 더 이상 주도주가 아닌 auto 행 삭제 (manual은 보존)
+        for code, row in existing.items():
+            if row.source == "auto" and code not in keep_codes:
+                session.delete(row)
+    else:
+        # auto 보존: 기존 auto 행 유지
+        for code, row in existing.items():
+            if row.source == "auto":
+                keep_codes.add(code)
+
+    session.commit()
+    leaders = get_leaders(session, force=True)
+
+    # 4) 보호 종목이 제외 인덱스에 남아 있으면 즉시 해제 (투자 주의 영향 차단)
+    cleared = 0
+    excl = get_exclusions(session)
+    for code in leaders:
+        if code in excl:
+            _write_entry(session, code, leaders[code].get("name", ""), [], source="leader")
+            cleared += 1
+    if cleared:
+        session.commit()
+        get_exclusions(session, force=True)
+
+    return {
+        "king_computed": king_ok,
+        "sector_top_n": sector_top_n,
+        "leaders_per_sector": leaders_per_sector,
+        "leaders": len(leaders),
+        "manual": len(manual_set),
+        "exclusions_cleared": cleared,
     }

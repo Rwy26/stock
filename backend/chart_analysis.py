@@ -647,6 +647,7 @@ def analyze_chart(
     csv_content: str | bytes | None = None,
     ohlcv_records: list[dict[str, Any]] | None = None,
     extra_note: str | None = None,
+    timeout_seconds: float = 90.0,
 ) -> dict[str, Any]:
     """End-to-end: load data → compute indicators → AI analysis.
 
@@ -674,16 +675,18 @@ def analyze_chart(
 
     # 3. AI analysis – dispatch to selected provider
     if provider == "gemini":
-        ai_result = gemini_analyze(symbol, indicators, api_key=api_key, model=model, extra_note=extra_note)
+        ai_result = gemini_analyze(symbol, indicators, api_key=api_key, model=model,
+                                   extra_note=extra_note, timeout_seconds=timeout_seconds)
     elif provider == "groq":
         ai_result = openai_analyze(
             symbol, indicators,
             api_key=api_key, model=model,
             base_url="https://api.groq.com/openai/v1",
-            extra_note=extra_note,
+            extra_note=extra_note, timeout_seconds=timeout_seconds,
         )
     else:
-        ai_result = openai_analyze(symbol, indicators, api_key=api_key, model=model, extra_note=extra_note)
+        ai_result = openai_analyze(symbol, indicators, api_key=api_key, model=model,
+                                   extra_note=extra_note, timeout_seconds=timeout_seconds)
 
     return {
         "symbol": symbol,

@@ -12,6 +12,10 @@ type WatchItem = {
   changeRate: number; score: number; sector: string; icon?: string
   marketCap?: number
   exclusion?: ExclusionInfo   // 거래 제외 종목이면 '투자 주의' 정보 동봉
+  isLeader?: boolean          // 주도 섹터의 주도주 — 상위 배치·제외 면제
+  isEtf?: boolean             // ETF/ETN — 주도주와 동일 레벨로 보호·상위 배치
+  leaderSectorRank?: number | null
+  leaderStockRank?: number | null
 }
 type WatchlistResponse = { items: WatchItem[]; quoteBasis?: string }
 type TRect = { id: string; x: number; y: number; w: number; h: number }
@@ -720,6 +724,8 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
                   onClick={() => setReportTarget({ code: item.code, name: item.name })}
                   title={
                     `${item.name} (${item.code})  ${item.price > 0 ? formatNumber(item.price) + '원  ' : ''}${formatPercent(item.changeRate)}  점수 ${item.score} — 클릭: AI 분석`
+                    + (item.isLeader ? `\n👑 주도주 (주도 섹터 ${item.leaderSectorRank ?? '-'}위 · 섹터 내 ${item.leaderStockRank ?? '-'}위) — 제외 면제` : '')
+                    + (!item.isLeader && item.isEtf ? '\n📊 ETF — 제외 면제 (주도주와 동일 레벨)' : '')
                     + (item.exclusion ? `\n${item.exclusion.message}${item.exclusion.detail ? `\n${item.exclusion.detail}` : ''}` : '')
                   }
                   style={{
@@ -736,8 +742,50 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
                     alignItems: 'center', justifyContent: 'center',
                   }}
                 >
-                  {/* 거래 제외 종목 — '투자 주의' 뱃지 (툴팁에 사유 표시) */}
-                  {item.exclusion && showTiny && (
+                  {/* 주도주 — 👑 뱃지 (주도 섹터의 주도주, 제외 면제) */}
+                  {item.isLeader && showTiny && (
+                    <span
+                      style={{
+                        position: 'absolute', top: 2, left: 2,
+                        fontSize: w >= 62 ? '0.66rem' : '0.56rem',
+                        lineHeight: 1,
+                        padding: '1px 4px',
+                        background: 'rgba(250,204,21,0.18)',
+                        border: '1px solid rgba(250,204,21,0.55)',
+                        borderRadius: 3,
+                        color: '#facc15',
+                        fontWeight: 800,
+                        zIndex: 4,
+                        pointerEvents: 'none',
+                      }}
+                    >
+                      👑{w >= 84 ? ' 주도주' : ''}
+                    </span>
+                  )}
+
+                  {/* ETF — 주도주와 동일 레벨 보호 뱃지 (주도주가 아닐 때 표시) */}
+                  {!item.isLeader && item.isEtf && showTiny && (
+                    <span
+                      style={{
+                        position: 'absolute', top: 2, left: 2,
+                        fontSize: w >= 62 ? '0.66rem' : '0.56rem',
+                        lineHeight: 1,
+                        padding: '1px 4px',
+                        background: 'rgba(96,165,250,0.18)',
+                        border: '1px solid rgba(96,165,250,0.55)',
+                        borderRadius: 3,
+                        color: '#60a5fa',
+                        fontWeight: 800,
+                        zIndex: 4,
+                        pointerEvents: 'none',
+                      }}
+                    >
+                      📊{w >= 84 ? ' ETF' : ''}
+                    </span>
+                  )}
+
+                  {/* 거래 제외 종목 — '투자 주의' 뱃지 (주도주·ETF가 아닐 때만; 툴팁에 사유) */}
+                  {item.exclusion && !item.isLeader && !item.isEtf && showTiny && (
                     <span
                       style={{
                         position: 'absolute', top: 2, left: 2,

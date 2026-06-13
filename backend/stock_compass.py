@@ -173,9 +173,19 @@ _SYSTEM_PROMPT = """당신은 월가 헤지펀드 PM, 글로벌 매크로 전략
 ---
 
 # 닷컴 대조 (1995~2002 · 참고용 — 데이터 제공 시에만)
-매칭 국면 : (dotcomAnalogs.phaseDistribution — 예: 과열기 12건 · 붕괴기 5건)
+매칭 국면 : (dotcomAnalogs.phaseDistribution — 예: 과열기 12건 · 붕괴기 5건.
+            가장 비중 큰 국면을 주국면으로 지목)
 당시 기록 : (dotcomCasebook 의 해당 국면 — 나스닥 변화·대표 P/E·실제 20일 후 분포 인용)
-시사점 : (현재 종목 판단에 주는 경고 또는 지지 — 1~2문장, 다른 시장·시대임을 명시)
+국면 신호 : (실제20일후수익의 상승비율로 그 국면의 성격을 한 단어로 판정 —
+            상승비율 ≥60% = "추세 우호", 45~60% = "방향성 불분명(동전던지기)",
+            <45% = "하방 우위". 중앙값·하위10%도 함께 인용해 손실 꼬리 크기 명시)
+포지션 연결 : (위 국면 신호를 이 종목의 확률 시나리오·분할매수 계획에 직접 연결 —
+             필수. 예: "바닥권=상승비율 47%·하위10% -14% → 반등 시도는 분할로만,
+             추세 확인(일봉 CHoCH 상향) 전 비중확대 보류. 닷컴 바닥권도 진입 시점이
+             빠르면 -14% 꼬리를 맞았다". 막연한 '주시 필요'가 아니라
+             담을지/기다릴지/줄일지를 한 가지로 권고)
+한계 : (다른 시장·다른 시대의 유사 국면임을 한 문장으로 명시 — 반드시 한국어로.
+        영어 단어 혼용 금지)
 
 ---
 
@@ -436,6 +446,8 @@ def _save_history(result: dict) -> None:
     }
     if result.get("etfHoldings"):
         payload["etfHoldings"] = result["etfHoldings"]
+    if result.get("dotcomCasebook"):
+        payload["dotcomCasebook"] = result["dotcomCasebook"]
 
     session = db.get_session_factory()()
     try:

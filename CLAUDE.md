@@ -40,6 +40,12 @@ endpoints directly on a single `app` object (no `APIRouter` split). Supporting m
     prefer the in-process endpoint to avoid KIS token churn with the running backend). Liquidity
     judgments hold off (no exclusion) on stale or zero-volume daily_prices data. Settings:
     `EXCLUSION_ENABLED`, `EXCLUSION_MIN_AVG_TRADING_VALUE`, `EXCLUSION_MIN_PRICE`, `EXCLUSION_LIQUIDITY_DAYS`.
+    **Market leaders** (`market_leaders` table): leading stocks of market-leading sectors are a hard
+    exemption — never excluded, never tagged with caution, and sorted to the top of the watchlist
+    (`isLeader` flag). Leading sectors = `compute_king_sectors` (KOSPI-relative sector-ETF alpha);
+    leaders = top IndicatorScore stocks within those sectors (`sector_classification.json`). Refresh:
+    `POST /api/admin/leaders/refresh` (`manualCodes` pins leaders regardless of auto); auto path is
+    preserved if yfinance alpha is unavailable. A protected stock cannot be manually excluded (409).
 - **External clients**: `kis_client.py` (Korea Investment & Securities OpenAPI — quotes, balances, orders; live + paper base URLs), `dart_client.py` (DART financial statements via OpenDartReader). Market data also comes from yfinance / pykrx / FinanceDataReader.
 - **Background threads** started in `@app.on_event("startup")`: `kis-token-refresh`, `autotrade-tick`, `recommendations-refresh` (all daemon threads, stopped via `threading.Event`s on shutdown).
 

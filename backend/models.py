@@ -459,6 +459,28 @@ class ExcludedStock(Base):
     last_checked: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class MarketLeader(Base):
+    """시장 주도 섹터의 주도주 보호 인덱스 — exclusion_engine 전용.
+
+    주도 섹터(compute_king_sectors: KOSPI 대비 섹터 ETF 알파 상위) 안에서
+    IndicatorScore 상위 종목을 주도주로 본다. 이 인덱스의 종목은:
+      - 어떤 제외 규칙에도 걸리지 않는다(투자 주의 정보에 영향받지 않음).
+      - 관심 종목에서 상위에 배치된다.
+    source: auto(king-sector 자동 산출) | manual(관리자 고정).
+    """
+
+    __tablename__ = "market_leaders"
+
+    code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    sector: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    sector_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)   # 주도 섹터 순위 (1=최상위)
+    stock_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)    # 섹터 내 주도주 순위
+    score_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String(20), default="auto")
+    computed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class NewsArticle(Base):
     """섹터/종목 뉴스 수집 저장소 (네이버 모바일 증권 뉴스 API).
 

@@ -19,6 +19,9 @@ import time
 from datetime import datetime, date
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 REPO = Path(__file__).resolve().parents[1]
 BACKEND = REPO / "backend"
 sys.path.insert(0, str(BACKEND))
@@ -115,6 +118,8 @@ def main() -> int:
     queue = build_queue()
     log(f"대기열: {len(queue)}건 (ETF {len(ETFS)} + 종목 {len(queue) - len(ETFS)})")
 
+    from exclusion_engine import ExcludedStockError
+
     ok = fail = skip = 0
     for i, (code, name) in enumerate(queue, start=1):
         if done_today(code):
@@ -126,6 +131,10 @@ def main() -> int:
             log(f"[{i}/{len(queue)}] {name}({code}) → {comp.get('score')}점 "
                 f"{comp.get('grade')} | LLM {r.get('aiProvider')}")
             ok += 1
+        except ExcludedStockError:
+            log(f"[{i}/{len(queue)}] {name}({code}) SKIP: 제외종목")
+            skip += 1
+            continue
         except Exception as exc:  # noqa: BLE001
             log(f"[{i}/{len(queue)}] {name}({code}) FAIL: {type(exc).__name__} {str(exc)[:120]}")
             fail += 1

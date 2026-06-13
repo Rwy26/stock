@@ -1797,8 +1797,10 @@ def get_watchlist(current_user=Depends(get_current_user)):
                         return v
             return _icon_from_map(name=name, sector=sector)
 
-        # 기등록 종목이 거래 제외 상태면 '투자 주의' 정보를 항목에 동봉해 공유한다
+        # 기등록 종목이 거래 제외 상태면 '투자 주의' 정보를 항목에 동봉해 공유한다.
+        # 주도주는 제외/투자 주의에 영향받지 않고 isLeader로 상위 배치된다.
         excluded_map = exclusion_engine.get_exclusions(db)
+        leaders_map = exclusion_engine.get_leaders(db)
         sector_etfs = exclusion_engine.sector_etf_codes()
 
         items: list[dict] = []
@@ -1809,6 +1811,8 @@ def get_watchlist(current_user=Depends(get_current_user)):
                 price, change_rate = 0, 0.0
             score = _get_latest_score_total(db, stock_code)
             sector = _load_sector_map().get(stock_code) or _extract_sector(raw_tags)
+            ld = leaders_map.get(str(stock_code))
+            is_etf = exclusion_engine.is_etf(str(stock_code), str(name or ""))
             item = {
                 "name": name,
                 "code": stock_code,
@@ -1817,13 +1821,25 @@ def get_watchlist(current_user=Depends(get_current_user)):
                 "score": int(score),
                 "sector": sector,
                 "icon": _extract_icon(raw_tags, name=str(name or ""), sector=sector),
+                "isLeader": ld is not None,
+                "isEtf": is_etf,
+                "leaderSectorRank": (ld.get("sector_rank") if ld else None),
+                "leaderStockRank": (ld.get("stock_rank") if ld else None),
             }
             entry = excluded_map.get(str(stock_code))
-            if entry and str(stock_code) not in sector_etfs:
+            if entry and ld is None and not is_etf and str(stock_code) not in sector_etfs:
                 item["exclusion"] = exclusion_engine.rejection_payload(
                     str(stock_code), str(name or entry["name"]), entry["tags"], entry.get("detail")
                 )
             items.append(item)
+
+        # 주도주·ETF를 목록 상위로 정렬(동일 레벨). 주도주는 섹터순위→섹터내순위 우선.
+        items.sort(key=lambda it: (
+            0 if (it.get("isLeader") or it.get("isEtf")) else 1,
+            0 if it.get("isLeader") else 1,
+            (it.get("leaderSectorRank") or 99),
+            (it.get("leaderStockRank") or 99),
+        ))
 
         # 시총 = 주가 × 발행주식수(D캐시). 캐시 없으면 네이버 시총으로 폴백.
         try:
@@ -2534,6 +2550,111 @@ def admin_refresh_exclusions(payload: dict = Body(default={}), _admin=Depends(re
         db.close()
 
 
+@app.get("/api/admin/leaders")
+def admin_list_leaders(_admin=Depends(require_admin)):
+    """주도주(주도 섹터의 주도주) 보호 인덱스 조회."""
+    if apollo_db is None:
+        raise HTTPException(status_code=500, detail="DB 모듈 없음")
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        leaders = exclusion_engine.get_leaders(db, force=True)
+        items = sorted(
+            (
+                {
+                    "code": code,
+                    "name": e["name"] or None,
+                    "sector": e["sector"] or None,
+                    "sectorRank": e["sector_rank"],
+                    "stockRank": e["stock_rank"],
+                    "score": e["score_total"],
+                    "source": e["source"],
+                }
+                for code, e in leaders.items()
+            ),
+            key=lambda x: (x["sectorRank"] or 99, x["stockRank"] or 99),
+        )
+        return {"count": len(items), "items": items}
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/leaders/refresh")
+def admin_refresh_leaders(payload: dict = Body(default={}), _admin=Depends(require_admin)):
+    """주도주 인덱스 재산출.
+
+    Body(선택): {"sectorTopN": 2, "leadersPerSector": 3, "manualCodes": ["005930", ...]}
+    주도 섹터 = KOSPI 대비 섹터 ETF 알파 상위(yfinance). manualCodes는 관리자 고정 주도주.
+    """
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB 모듈 없음")
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        result = exclusion_engine.compute_market_leaders(
+            db,
+            sector_top_n=int(payload.get("sectorTopN", 2)),
+            leaders_per_sector=int(payload.get("leadersPerSector", 3)),
+            manual_codes=list(payload.get("manualCodes") or []),
+        )
+        return {"ok": True, **result}
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/leaders/{code}")
+def admin_add_leader(code: str, payload: dict = Body(default={}), _admin=Depends(require_admin)):
+    """수동 주도주 고정 (source=manual). 자동 산출과 무관하게 항상 보호·상위 배치."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB 모듈 없음")
+    code = (code or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="code is required")
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        stock = db.execute(select(models.Stock).where(models.Stock.code == code)).scalar_one_or_none()
+        name = str(getattr(stock, "name", "") or "") or code
+        row = db.execute(
+            select(models.MarketLeader).where(models.MarketLeader.code == code)
+        ).scalar_one_or_none()
+        if row is None:
+            db.add(models.MarketLeader(
+                code=code, name=name, sector=str(payload.get("sector") or "") or None,
+                sector_rank=0, stock_rank=0, source="manual"))
+        else:
+            row.source = "manual"
+            if payload.get("sector"):
+                row.sector = str(payload.get("sector"))
+        # 제외 인덱스에 있으면 즉시 해제 (투자 주의 영향 차단)
+        ex = db.execute(select(models.ExcludedStock).where(models.ExcludedStock.code == code)).scalar_one_or_none()
+        if ex is not None:
+            db.delete(ex)
+        db.commit()
+        exclusion_engine.invalidate_leader_cache()
+        exclusion_engine.invalidate_cache()
+        return {"ok": True, "code": code}
+    finally:
+        db.close()
+
+
+@app.delete("/api/admin/leaders/{code}")
+def admin_remove_leader(code: str, _admin=Depends(require_admin)):
+    """주도주 인덱스에서 종목 제거."""
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB 모듈 없음")
+    code = (code or "").strip()
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        row = db.execute(
+            select(models.MarketLeader).where(models.MarketLeader.code == code)
+        ).scalar_one_or_none()
+        if row is not None:
+            db.delete(row)
+            db.commit()
+            exclusion_engine.invalidate_leader_cache()
+        return {"ok": True, "removed": row is not None}
+    finally:
+        db.close()
+
+
 @app.post("/api/admin/exclusions/{code}")
 def admin_add_exclusion(code: str, payload: dict = Body(default={}), _admin=Depends(require_admin)):
     """수동 제외 등록 (MANUAL 태그). Body: {"reason": "메모"}"""
@@ -2545,6 +2666,9 @@ def admin_add_exclusion(code: str, payload: dict = Body(default={}), _admin=Depe
 
     db: Session = apollo_db.get_session_factory()()
     try:
+        # 주도주/섹터 ETF는 제외할 수 없다 (보호 규칙이 수동 제외보다 우선)
+        if exclusion_engine.is_protected(db, code):
+            raise HTTPException(status_code=409, detail="보호 종목(주도주/섹터 ETF)은 제외할 수 없습니다")
         stock = db.execute(select(models.Stock).where(models.Stock.code == code)).scalar_one_or_none()
         name = str(getattr(stock, "name", "") or "")
         tags = exclusion_engine.merge_tags(
@@ -3328,11 +3452,12 @@ def search_stocks(
         response = {"items": items, "screen": screen_norm or None}
 
         # 검색창 문의가 거래 제외 종목과 일치하면 '투자 주의' 메시지를 함께 발행
+        # (주도주·섹터 ETF는 보호 대상이라 제외하지 않는다)
         if q_norm:
-            sector_etfs = exclusion_engine.sector_etf_codes()
+            protected = exclusion_engine.sector_etf_codes() | exclusion_engine.leader_codes(db)
             cautions: list[dict] = []
             for ex_code, entry in excluded_map.items():
-                if ex_code in sector_etfs:
+                if ex_code in protected:
                     continue
                 ex_name = str(entry["name"] or "")
                 if ex_code.startswith(q_norm) or (len(q_norm) >= 2 and q_norm in ex_name):
@@ -5183,6 +5308,25 @@ async def ai_chart_analysis_image(
         except Exception:
             pass
 
+    # ── 종목명 주입: 프론트 헤더(로고+이름) 표시용 — stocks 테이블 우선, 캐시/결과 폴백 ──
+    if isinstance(result, dict) and not result.get("stock_name"):
+        sname = None
+        if apollo_db is not None and models is not None:
+            try:
+                db_n: Session = apollo_db.get_session_factory()()
+                try:
+                    srow = db_n.execute(
+                        select(models.Stock).where(models.Stock.code == symbol.strip())
+                    ).scalar_one_or_none()
+                    if srow:
+                        sname = srow.name
+                finally:
+                    db_n.close()
+            except Exception:
+                pass
+        if sname:
+            result["stock_name"] = sname
+
     return result
 
 
@@ -5360,17 +5504,24 @@ def ai_crossval_analyze(symbol: str, _current_user=Depends(require_admin)):
             status_code=503,
             detail="AI API key not configured. Set GEMINI_API_KEY / GROQ_API_KEY / OPENAI_API_KEY in backend/.env",
         )
-    try:
-        result = _chart_analysis.analyze_chart(
-            symbol=sym, api_key=api_key, model=model, provider=provider,
-            ohlcv_records=focus["records"], extra_note=focus["note"],
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"분석 중 오류 발생: {exc}") from exc
+    # 변곡점·MTF가 더해진 리치 프롬프트라 LLM 응답이 길다 → 타임아웃 180초 + 일시 타임아웃 1회 재시도.
+    result = None
+    for attempt in range(2):
+        try:
+            result = _chart_analysis.analyze_chart(
+                symbol=sym, api_key=api_key, model=model, provider=provider,
+                ohlcv_records=focus["records"], extra_note=focus["note"],
+                timeout_seconds=180.0,
+            )
+            break
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            if attempt == 0 and ("timed out" in str(exc).lower() or "timeout" in str(exc).lower()):
+                continue   # 일시적 타임아웃 → 1회 재시도
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"분석 중 오류 발생: {exc}") from exc
 
     result["analysis_basis"] = {
         "timeframe": focus["timeframe"], "bars": focus["bars"],
@@ -5717,7 +5868,7 @@ def public_ai_history_detail(code: str):
         # 제외 인덱스 조회 (섹터 대표 ETF는 주의 대상 아님)
         exclusion_payload = None
         entry = exclusion_engine.get_entry(db, stock_code)
-        if entry is not None and stock_code not in exclusion_engine.sector_etf_codes():
+        if entry is not None and not exclusion_engine.is_protected(db, stock_code):
             exclusion_payload = exclusion_engine.rejection_payload(
                 stock_code, entry["name"], entry["tags"], entry.get("detail")
             )
@@ -5935,26 +6086,42 @@ def public_watchlist():
                         return v
             return _icon_from_map(name=name, sector=sector)
 
-        # 거래 제외 종목이면 '투자 주의' 정보를 공개 화면에도 동일하게 공유
+        # 거래 제외 종목이면 '투자 주의' 정보를 공개 화면에도 동일하게 공유.
+        # 주도주는 제외/투자 주의에 영향받지 않고 isLeader로 상위 배치된다.
         excluded_map = exclusion_engine.get_exclusions(db)
+        leaders_map = exclusion_engine.get_leaders(db)
         sector_etfs = exclusion_engine.sector_etf_codes()
 
         base: list[dict] = []
         for code, name, raw_tags in rows:
             sector = _load_sector_map().get(code) or _extract_sector(raw_tags)
+            ld = leaders_map.get(str(code))
+            is_etf = exclusion_engine.is_etf(str(code), str(name or ""))
             row_item = {
                 "name": name,
                 "code": code,
                 "score": int(_get_latest_score_total(db, code)),
                 "sector": sector,
                 "icon": _extract_icon(raw_tags, name=str(name or ""), sector=sector),
+                "isLeader": ld is not None,
+                "isEtf": is_etf,
+                "leaderSectorRank": (ld.get("sector_rank") if ld else None),
+                "leaderStockRank": (ld.get("stock_rank") if ld else None),
             }
             entry = excluded_map.get(str(code))
-            if entry and str(code) not in sector_etfs:
+            if entry and ld is None and not is_etf and str(code) not in sector_etfs:
                 row_item["exclusion"] = exclusion_engine.rejection_payload(
                     str(code), str(name or entry["name"]), entry["tags"], entry.get("detail")
                 )
             base.append(row_item)
+
+        # 주도주·ETF를 상위로 정렬(동일 레벨). 주도주는 섹터순위→섹터내순위 우선.
+        base.sort(key=lambda it: (
+            0 if (it.get("isLeader") or it.get("isEtf")) else 1,
+            0 if it.get("isLeader") else 1,
+            (it.get("leaderSectorRank") or 99),
+            (it.get("leaderStockRank") or 99),
+        ))
     finally:
         db.close()
 

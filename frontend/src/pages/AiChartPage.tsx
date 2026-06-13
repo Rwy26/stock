@@ -6,6 +6,7 @@ import { getAccessToken } from '../lib/auth'
 
 interface AiResult {
   symbol?: string
+  stock_name?: string
   current_price?: string
   signal?: '매수' | '매도' | '관망'
   confidence?: number
@@ -74,6 +75,7 @@ interface AnalysisBasis {
 }
 interface AnalysisResponse {
   symbol: string
+  stock_name?: string
   images_count?: number
   ai_result: AiResult
   analyzed_at: string
@@ -423,8 +425,36 @@ function ResultView({ data, onExport }: { data: AnalysisResponse; onExport?: () 
   const r = data.ai_result
   const cls = signalClass(r.signal)
 
+  const stockName = data.stock_name ?? r.stock_name
+  const logoUrl = /^\d{6}$/.test(data.symbol)
+    ? `https://file.alphasquare.co.kr/media/images/stock_logo/kr/${data.symbol}.png`
+    : null
+
   return (
     <div className="ai-right">
+      {/* ── 종목 헤더: 로고 + 이름(크게) + 코드(작게) ── */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
+        margin: '0 0 14px', textAlign: 'center',
+      }}>
+        {logoUrl && (
+          <img
+            src={logoUrl}
+            alt=""
+            onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+            style={{ width: 40, height: 40, borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }}
+          />
+        )}
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+          <span style={{ fontSize: 30, fontWeight: 900, color: 'var(--text, #f1f5f9)', lineHeight: 1 }}>
+            {stockName ?? data.symbol}
+          </span>
+          {stockName && (
+            <span style={{ fontSize: 14, color: 'var(--text-soft, #94a3b8)' }}>{data.symbol}</span>
+          )}
+        </div>
+      </div>
+
       <div className={`ai-signal-card ${cls} reveal`}>
         <div className="ai-signal-top">
           <div className="ai-signal-badge">
