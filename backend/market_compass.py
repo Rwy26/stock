@@ -103,6 +103,7 @@ def _stage0_global_sentiment() -> dict:
             "flow": g.get("flow"),
             "probabilities": g.get("probabilities"),
             "krSectors": g.get("kr_sectors"),
+            "krSectorMatrix": g.get("kr_sector_matrix"),
             "evidence": g.get("evidence"),
             "asof": g.get("asof"),
         }

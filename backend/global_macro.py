@@ -262,17 +262,65 @@ def _kr_equity(mkt, us_eq, ai) -> tuple[int, list[str]]:
 
 # ---------------------------------------------------------------------------
 # 한국 7섹터 매핑 (스펙 §2.4)
+#   규칙: (factor, weight, inverse). inverse=True 면 (100-점수) 사용(지정학 역수 등),
+#   factor="__neutral__" 는 상수 50(중립 기준). 섹터점수 = clamp(Σ weight·유효값).
 # ---------------------------------------------------------------------------
+KR_SECTOR_RULES: dict[str, list[tuple]] = {
+    "반도체":  [("ai_cycle", 0.5, False), ("risk_appetite", 0.5, False)],
+    "AI":      [("ai_cycle", 0.6, False), ("risk_appetite", 0.4, False)],
+    "방산":    [("geopolitics", 0.5, True), ("growth", 0.5, False)],   # 지정학 역수=리스크↑ 수혜
+    "조선":    [("geopolitics", 0.4, True), ("growth", 0.6, False)],
+    "2차전지": [("liquidity", 0.5, False), ("growth", 0.5, False)],    # 금리역수=유동성
+    "금융":    [("liquidity", 0.5, False), ("growth", 0.5, False)],
+    "바이오":  [("__neutral__", 0.5, False), ("risk_appetite", 0.5, False)],  # 중립 기준
+}
+
+# 매트릭스 행(글로벌 펙터) 표시 순서·라벨
+KR_FACTOR_LABELS = {
+    "risk_appetite": "위험선호", "liquidity": "유동성", "ai_cycle": "AI 사이클",
+    "growth": "경기", "geopolitics": "지정학", "__neutral__": "중립기준",
+}
+KR_FACTOR_ORDER = ["risk_appetite", "liquidity", "ai_cycle", "growth", "geopolitics", "__neutral__"]
+
+
+def _eff_value(scores: dict, factor: str, inverse: bool) -> float:
+    base = 50.0 if factor == "__neutral__" else float(scores.get(factor, 50))
+    return 100.0 - base if inverse else base
+
+
 def _kr_sectors(s: dict) -> dict[str, int]:
-    inv_geo = 100 - s["geopolitics"]            # 지정학 역수 (리스크↑ = 방산·조선 수혜)
+    out = {}
+    for sector, rules in KR_SECTOR_RULES.items():
+        out[sector] = _clamp_score(sum(w * _eff_value(s, f, inv) for f, w, inv in rules))
+    return out
+
+
+def _kr_sector_matrix(s: dict) -> dict:
+    """펙터×섹터 영향 매트릭스 (히트맵용). 어떤 글로벌 펙터가 어떤 섹터를 얼마나 움직였는지.
+
+    cell.value = 유효값(역수 반영, 50=중립) · cell.contribution = weight·유효값(섹터 점수 기여분).
+    used factor 만 행으로 반환.
+    """
+    used = [f for f in KR_FACTOR_ORDER
+            if any(f == rf for rules in KR_SECTOR_RULES.values() for rf, _, _ in rules)]
+    cells: dict[str, dict] = {}
+    for sector, rules in KR_SECTOR_RULES.items():
+        row: dict[str, dict] = {}
+        for f, w, inv in rules:
+            val = _eff_value(s, f, inv)
+            row[f] = {
+                "weight": w,
+                "value": round(val, 1),                 # 역수 반영된 유효값 (50=중립)
+                "rawScore": 50 if f == "__neutral__" else s.get(f),
+                "inverse": inv,
+                "contribution": round(w * val, 1),
+            }
+        cells[sector] = row
     return {
-        "반도체":   _clamp_score(s["ai_cycle"] * 0.5 + s["risk_appetite"] * 0.5),
-        "AI":       _clamp_score(s["ai_cycle"] * 0.6 + s["risk_appetite"] * 0.4),
-        "방산":     _clamp_score(inv_geo * 0.5 + s["growth"] * 0.5),
-        "조선":     _clamp_score(inv_geo * 0.4 + s["growth"] * 0.6),
-        "2차전지":  _clamp_score(s["liquidity"] * 0.5 + s["growth"] * 0.5),  # 금리역수=유동성
-        "금융":     _clamp_score(s["liquidity"] * 0.5 + s["growth"] * 0.5),
-        "바이오":   _clamp_score(50 * 0.5 + s["risk_appetite"] * 0.5),       # 중립 기준
+        "factors": used,
+        "factorLabels": {f: KR_FACTOR_LABELS[f] for f in used},
+        "sectors": list(KR_SECTOR_RULES.keys()),
+        "cells": cells,
     }
 
 
@@ -382,6 +430,7 @@ def compute_global_macro(force: bool = False) -> dict:
 
     prob = _prob_frequency(composite) or _prob_deterministic(scores)
     kr_sectors = _kr_sectors(scores)
+    kr_sector_matrix = _kr_sector_matrix(scores)
 
     result = {
         "asof": datetime.now().isoformat(timespec="seconds"),
@@ -390,6 +439,7 @@ def compute_global_macro(force: bool = False) -> dict:
         "flow": flow,
         "probabilities": prob,
         "kr_sectors": kr_sectors,
+        "kr_sector_matrix": kr_sector_matrix,
         "inputs": {
             "prediction": pred,
             "market": mkt,

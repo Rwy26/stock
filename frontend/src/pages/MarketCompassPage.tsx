@@ -263,8 +263,8 @@ export function MarketCompassPage() {
     <div>
       <header className="topbar glass">
         <div>
-          <p className="top-label">Market Compass</p>
-          <h2>📡 시장 나침반 (AI 자금흐름 분석)</h2>
+          <p className="top-label">Global Sentiment</p>
+          <h2>📡 글로벌 투자심리 (AI 자금흐름 분석)</h2>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn" type="button" disabled={mLoading} onClick={() => loadMarket(true)}>
