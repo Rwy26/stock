@@ -9,9 +9,22 @@ interface Ladder { position: string; groups: Record<string, LadderGroup>; ladder
 interface RankRow {
   rank: number; sector: string; score: number; lifecycle?: string; intradayPct?: number
 }
+interface ProbBand { up: number; down: number }
+interface GlobalSentiment {
+  available: boolean
+  scores?: Record<string, number>
+  composite?: number | null
+  flow?: string | null
+  probabilities?: { method?: string; n?: number | null } & Record<string, ProbBand | string | number | null>
+  krSectors?: Record<string, number>
+  evidence?: Record<string, string[]>
+  asof?: string
+  error?: string
+}
 interface MarketData {
   asOf: string
   vkospi: { value: number | null; level: string }
+  globalSentiment?: GlobalSentiment
   regime: Regime
   rotationLadder: Ladder
   sectorRanking: RankRow[]
@@ -83,6 +96,115 @@ const GRADE_COLOR: Record<string, string> = { S: '#fbbf24', A: '#34d399', B: '#6
 const panel: React.CSSProperties = {
   background: 'rgba(6,9,22,0.92)', border: '1px solid rgba(255,255,255,0.08)',
   borderRadius: 14, padding: '16px 18px', marginBottom: 18,
+}
+
+// ─── 글로벌 투자심리 (0단계) ─────────────────────────────────────────────────
+
+const SCORE_LABELS: Record<string, string> = {
+  risk_appetite: '위험선호', liquidity: '유동성', ai_cycle: 'AI 사이클', growth: '경기',
+  inflation: '물가안정', geopolitics: '지정학(완화)', us_equity: '미국증시', kr_equity: '한국증시',
+}
+// composite 가중치 순서 (선행지표 먼저)
+const SCORE_ORDER = ['risk_appetite', 'liquidity', 'ai_cycle', 'growth', 'inflation', 'geopolitics', 'us_equity', 'kr_equity']
+
+// 점수↑ = 우호(물가안정·지정학완화 포함 부호 일관) → 60↑ 강세, 40↓ 약세
+const scoreColor = (v: number) => (v >= 60 ? '#34d399' : v >= 40 ? '#fbbf24' : '#f87171')
+
+function ScoreBar({ k, v, evidence }: { k: string; v: number; evidence?: string[] }) {
+  return (
+    <div title={evidence?.join('\n')} style={{ marginBottom: 7, cursor: evidence?.length ? 'help' : 'default' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, marginBottom: 2 }}>
+        <span style={{ color: 'rgba(241,245,249,0.75)' }}>{SCORE_LABELS[k] ?? k}</span>
+        <span style={{ fontWeight: 700, color: scoreColor(v) }}>{v}</span>
+      </div>
+      <div style={{ height: 6, borderRadius: 99, background: 'rgba(255,255,255,0.07)', overflow: 'hidden' }}>
+        <div style={{ width: `${v}%`, height: '100%', background: scoreColor(v), transition: 'width .4s' }} />
+      </div>
+    </div>
+  )
+}
+
+function GlobalSentimentPanel({ g }: { g: GlobalSentiment }) {
+  if (!g.available) {
+    return (
+      <div style={panel}>
+        <h4 style={{ margin: 0, color: '#93c5fd' }}>🌐 글로벌 투자심리</h4>
+        <p style={{ fontSize: 12.5, color: '#64748b', margin: '6px 0 0' }}>
+          데이터 N/A — {g.error ?? '엔진 일시 불가'} (시장 분석은 정상 진행)
+        </p>
+      </div>
+    )
+  }
+  const scores = g.scores ?? {}
+  const comp = g.composite ?? null
+  const compColor = comp == null ? '#94a3b8' : scoreColor(comp)
+  const prob = g.probabilities ?? {}
+  const method = prob.method === 'frequency' ? `빈도 기반 (n=${prob.n})` : '로지스틱 (표본 누적 전)'
+  const bands: Array<[string, string]> = [['1w', '1주'], ['1m', '1개월'], ['3m', '3개월']]
+
+  return (
+    <div style={{ ...panel, borderColor: 'rgba(96,165,250,0.3)' }}>
+      <h4 style={{ margin: '0 0 12px', color: '#93c5fd' }}>
+        🌐 글로벌 투자심리 (0단계 — 국내 판정 선행)
+        <span style={{ marginLeft: 8, fontSize: 11, color: '#475569' }}>{g.asof?.replace('T', ' ')}</span>
+      </h4>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '200px 1fr', gap: 20, alignItems: 'start' }}>
+        {/* 종합 + 확률 */}
+        <div>
+          <div style={{ textAlign: 'center', padding: '10px 0' }}>
+            <div style={{ fontSize: 11, color: '#64748b', letterSpacing: 1 }}>COMPOSITE</div>
+            <div style={{ fontSize: 44, fontWeight: 800, color: compColor, lineHeight: 1.1 }}>{comp ?? 'N/A'}</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: compColor }}>{g.flow ?? ''}</div>
+          </div>
+          <div style={{ height: 1, background: 'rgba(255,255,255,0.08)', margin: '8px 0' }} />
+          <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>상승확률 ({method})</div>
+          {bands.map(([key, label]) => {
+            const b = prob[key] as ProbBand | undefined
+            if (!b) return null
+            return (
+              <div key={key} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, padding: '2px 0' }}>
+                <span style={{ color: 'rgba(241,245,249,0.65)' }}>{label}</span>
+                <span style={{ color: b.up >= 50 ? '#34d399' : '#f87171', fontWeight: 700 }}>
+                  ▲{b.up}% <span style={{ color: '#475569', fontWeight: 400 }}>/ ▼{b.down}%</span>
+                </span>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* 8 점수 바 */}
+        <div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: 24 }}>
+            {SCORE_ORDER.filter(k => scores[k] != null).map(k => (
+              <ScoreBar key={k} k={k} v={scores[k]} evidence={g.evidence?.[k]} />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* 한국 7섹터 매핑 */}
+      {g.krSectors && (
+        <>
+          <div style={{ height: 1, background: 'rgba(255,255,255,0.08)', margin: '12px 0 10px' }} />
+          <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>글로벌 → 한국 섹터 영향</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {Object.entries(g.krSectors).sort((a, b) => b[1] - a[1]).map(([sec, v]) => (
+              <span key={sec} style={{
+                padding: '4px 10px', borderRadius: 99, fontSize: 12.5,
+                background: 'rgba(255,255,255,0.05)', border: `1px solid ${scoreColor(v)}55`, color: scoreColor(v),
+              }}>
+                {sec} <b>{v}</b>
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+      <p style={{ fontSize: 11, color: '#475569', margin: '10px 0 0' }}>
+        점수 50=중립 · 높을수록 우호(물가안정·지정학완화 포함) · 점수에 마우스를 올리면 원천 근거 표시
+      </p>
+    </div>
+  )
 }
 
 // ─── Page ────────────────────────────────────────────────────────────────────
@@ -157,6 +279,8 @@ export function MarketCompassPage() {
 
       {market && (
         <>
+          {market.globalSentiment && <GlobalSentimentPanel g={market.globalSentiment} />}
+
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
             <div style={panel}>
               <h4 style={{ margin: '0 0 10px', color: '#93c5fd' }}>
