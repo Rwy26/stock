@@ -4779,6 +4779,11 @@ try:
 except Exception:  # pragma: no cover
     _chart_analysis = None  # type: ignore[assignment]
 
+try:
+    import crossval_intake as _crossval_intake
+except Exception:  # pragma: no cover
+    _crossval_intake = None  # type: ignore[assignment]
+
 
 from fastapi import UploadFile, File as FastAPIFile
 from pydantic import BaseModel as _BaseModel, Field as _Field
@@ -4910,6 +4915,18 @@ async def ai_chart_analysis_upload(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"분석 중 오류 발생: {exc}") from exc
+
+    # ── 교차검증 창구: 원본 CSV 적재(증거보존) + 데이터 성격 분석 ──────────────
+    # best-effort — 적재 실패는 분석 응답에 영향 없음. 참고용이며 거래 판단 반영 안 함.
+    if _crossval_intake is not None and isinstance(result, dict):
+        try:
+            result["crossval"] = {
+                "intake": _crossval_intake.save_csv(symbol.strip(), file.filename or "chart.csv", raw),
+                "data_nature": _crossval_intake.analyze_csv_nature(raw, file.filename or ""),
+                "reference_only": True,
+            }
+        except Exception:
+            pass
 
     return result
 
@@ -5133,7 +5150,61 @@ async def ai_chart_analysis_image(
             # 캐시 저장 실패는 무시 (분석 결과 반환에 영향 없음)
             pass
 
+    # ── 교차검증 창구: 차트 이미지 참고용 증거 보관 (수치 교차검증 불가) ──────────
+    if _crossval_intake is not None and isinstance(result, dict):
+        try:
+            intakes = [
+                _crossval_intake.save_image(symbol.strip(), fname, raw_bytes,
+                                            extra_context=extra_context)
+                for (fname, raw_bytes) in image_files
+            ]
+            result["crossval"] = {
+                "intake": intakes,
+                "data_nature": {"ok": True, "kind": "image", "count": len(image_files),
+                                "crossval": "불가 — 이미지는 참고용 증거. 네이버 수치 대조 대상 아님"},
+                "reference_only": True,
+            }
+        except Exception:
+            pass
+
     return result
+
+
+# ─── 교차검증 창구 API (적재 코퍼스 현황 · 언어학습 발전 가능성) ────────────────
+
+@app.get("/api/ai/crossval/corpus")
+def ai_crossval_corpus(_current_user=Depends(require_admin)):
+    """교차검증 폴더에 적재된 코퍼스 현황 (발전 제안의 grounding 근거)."""
+    if _crossval_intake is None:
+        raise HTTPException(status_code=503, detail="crossval_intake 모듈 로드 실패")
+    return _crossval_intake.corpus_stats()
+
+
+@app.post("/api/ai/crossval/dev-suggestions")
+def ai_crossval_dev_suggestions(_current_user=Depends(require_admin)):
+    """적재 코퍼스를 근거로 LLM이 '언어학습 발전 가능성'을 자율 제시 (해석/제안만)."""
+    if _crossval_intake is None:
+        raise HTTPException(status_code=503, detail="crossval_intake 모듈 로드 실패")
+    stats = _crossval_intake.corpus_stats()
+    if not stats.get("available"):
+        raise HTTPException(status_code=409, detail=stats.get("reason", "교차검증 드라이브 미마운트"))
+
+    provider, api_key, model = _resolve_ai_provider()
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="AI API key not configured. Set GEMINI_API_KEY / GROQ_API_KEY / OPENAI_API_KEY in backend/.env",
+        )
+    try:
+        suggestions = _crossval_intake.suggest_development(
+            stats, api_key=api_key, model=model, provider=provider
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"발전 제안 생성 중 오류: {exc}") from exc
+    return {"corpus": stats, "suggestions": suggestions,
+            "provider": provider, "model": model}
 
 
 # ─── AI 분석 캐시 API ─────────────────────────────────────────────────────────

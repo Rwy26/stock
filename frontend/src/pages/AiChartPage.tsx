@@ -30,11 +30,41 @@ interface AiResult {
   data_needed?: string | null
 }
 
+interface CrossvalField { field: string; verdict: 'ok' | 'caution' | 'no'; note: string }
+interface CrossvalDataNature {
+  ok: boolean; kind?: string; rows?: number; count?: number
+  columns?: string[]
+  layers?: { price: string[]; meta: string[]; derived: string[] }
+  date_range?: [string | null, string | null]
+  timeframe_inferred?: string | null
+  adjusted_price?: string
+  crossval_usable_fields?: CrossvalField[]
+  crossval_ready?: boolean
+  crossval?: string
+  blockers?: string[]
+}
+interface CrossvalIntake { stored: boolean; folder?: string; reason?: string; sha256?: string }
+interface CrossvalInfo {
+  intake?: CrossvalIntake | CrossvalIntake[]
+  data_nature?: CrossvalDataNature
+  reference_only?: boolean
+}
+
 interface AnalysisResponse {
   symbol: string
   images_count?: number
   ai_result: AiResult
   analyzed_at: string
+  crossval?: CrossvalInfo
+}
+
+// 언어학습 발전 가능성 (요구 4)
+interface DevIdea { title: string; what: string; data_needed: string; feasibility: 'now' | 'soon' | 'later'; caution: string }
+interface DevSuggestions { headline: string; readiness: string; ideas: DevIdea[]; next_actions: string[] }
+interface DevResponse {
+  corpus: { csv_count?: number; image_count?: number; symbol_count?: number; avg_verified_ratio?: number | null }
+  suggestions: DevSuggestions
+  provider: string; model: string
 }
 
 type DroppedFile = { file: File; previewUrl?: string; type: 'image' | 'csv' }
@@ -92,6 +122,64 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     <div className="panel glass reveal">
       <div className="panel-head"><h3>{title}</h3></div>
       {children}
+    </div>
+  )
+}
+
+// 교차검증 창구 적재 결과 + 데이터 성격 표시 (요구 1·2·3)
+function CrossvalBadge({ info }: { info: CrossvalInfo }) {
+  const intakes = Array.isArray(info.intake) ? info.intake : info.intake ? [info.intake] : []
+  const stored = intakes.filter(x => x?.stored)
+  const nat = info.data_nature
+  const isCsv = nat?.kind === 'csv'
+  const vColor = (v: string) => v === 'ok' ? '#22c55e' : v === 'caution' ? '#f59e0b' : '#94a3b8'
+  const vLabel = (v: string) => v === 'ok' ? '검증가능' : v === 'caution' ? '주의' : '대상아님'
+  return (
+    <div className="panel glass" style={{ marginTop: 12, padding: '12px 14px', display: 'grid', gap: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700, color: 'var(--text-main)' }}>
+        🗄️ 교차검증 창구 적재
+        <span style={{ fontSize: '0.7rem', padding: '1px 8px', borderRadius: 999,
+          background: 'rgba(148,163,184,0.18)', color: 'var(--text-soft)' }}>참고용 · 재가공 안 함</span>
+      </div>
+      <div style={{ fontSize: '0.8rem', color: 'var(--text-soft)', lineHeight: 1.6 }}>
+        {stored.length > 0
+          ? <>✅ {stored.length}건 적재됨 → <code>{stored[0].folder}</code>
+              {!isCsv && <span> (수치 교차검증 불가 — 참고 증거 보관)</span>}</>
+          : <>⚠️ 적재 안 됨{intakes[0]?.reason ? `: ${intakes[0].reason}` : ' (교차검증 드라이브 확인)'}</>}
+      </div>
+
+      {isCsv && nat && (
+        <>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-soft)' }}>
+            {nat.rows}행 · {nat.timeframe_inferred ?? '?'} · {nat.date_range?.[0] ?? '?'}~{nat.date_range?.[1] ?? '?'}
+            <span style={{ marginLeft: 8, color: nat.crossval_ready ? '#22c55e' : '#f59e0b' }}>
+              {nat.crossval_ready ? '교차검증 준비됨' : '교차검증 보류'}
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {(nat.crossval_usable_fields ?? []).map((f, i) => (
+              <span key={i} title={f.note} style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: 999,
+                background: vColor(f.verdict) + '1f', color: vColor(f.verdict), border: `1px solid ${vColor(f.verdict)}44` }}>
+                {f.field} · {vLabel(f.verdict)}
+              </span>
+            ))}
+          </div>
+          {nat.layers && (
+            <div style={{ fontSize: '0.74rem', color: 'var(--text-soft)', opacity: 0.9 }}>
+              가격층 [{nat.layers.price.join(', ') || '—'}] · 파생층 [{nat.layers.derived.join(', ') || '—'}]
+            </div>
+          )}
+          {nat.adjusted_price && (
+            <div style={{ fontSize: '0.74rem', color: '#fbbf24', opacity: 0.9 }}>⚠ {nat.adjusted_price}</div>
+          )}
+          {(nat.blockers?.length ?? 0) > 0 && (
+            <div style={{ fontSize: '0.74rem', color: '#f87171' }}>보류 사유: {nat.blockers!.join(' · ')}</div>
+          )}
+        </>
+      )}
+      {!isCsv && nat?.crossval && (
+        <div style={{ fontSize: '0.78rem', color: 'var(--text-soft)' }}>{nat.crossval}</div>
+      )}
     </div>
   )
 }
@@ -482,6 +570,9 @@ export function AiChartPage() {
   const [keyMsg, setKeyMsg] = useState('')
   const [diagSteps, setDiagSteps] = useState<{step: string; ok: boolean; msg: string}[] | null>(null)
   const [diagRunning, setDiagRunning] = useState(false)
+  const [devSug, setDevSug] = useState<DevResponse | null>(null)
+  const [devRunning, setDevRunning] = useState(false)
+  const [devErr, setDevErr] = useState<string | null>(null)
 
   const providerPrefixes: Record<string, string> = { openai: 'sk-', gemini: '', groq: 'gsk_' }
   const providerHints: Record<string, string> = {
@@ -527,6 +618,18 @@ export function AiChartPage() {
       setDiagSteps([{ step: '진단 실패', ok: false, msg: err instanceof Error ? err.message : String(err) }])
     } finally {
       setDiagRunning(false)
+    }
+  }
+
+  async function runDevSuggestions() {
+    setDevRunning(true); setDevErr(null); setDevSug(null)
+    try {
+      const data = await fetchJson<DevResponse>('/api/ai/crossval/dev-suggestions', { method: 'POST' })
+      setDevSug(data)
+    } catch (err: unknown) {
+      setDevErr(err instanceof Error ? err.message : String(err))
+    } finally {
+      setDevRunning(false)
     }
   }
 
@@ -700,6 +803,11 @@ export function AiChartPage() {
           onClick={runDiagnose} disabled={diagRunning} title="AI 파이프라인 진단">
           {diagRunning ? '⏳ 진단 중...' : '🔍 진단'}
         </button>
+        <button type="button" className="ai-key-settings-btn" style={{ marginLeft: 8 }}
+          onClick={runDevSuggestions} disabled={devRunning}
+          title="적재된 교차검증 코퍼스로 언어학습 발전 가능성 제시">
+          {devRunning ? '⏳ 분석 중...' : '🧠 발전 가능성'}
+        </button>
       </header>
 
       {diagSteps !== null && (
@@ -719,6 +827,58 @@ export function AiChartPage() {
           </ul>
           {diagSteps.length > 0 && diagSteps.every(s => s.ok) && (
             <p className="ai-diag-ok-msg">✅ 모든 단계 정상 — AI 분석을 바로 사용하세요</p>
+          )}
+        </div>
+      )}
+
+      {(devSug || devErr) && (
+        <div className="ai-diag-panel panel glass">
+          <div className="ai-key-panel-head">
+            <span>🧠 언어학습 발전 가능성 — 교차검증 코퍼스 기반</span>
+            <button type="button" className="ai-key-close"
+              onClick={() => { setDevSug(null); setDevErr(null) }}>✕</button>
+          </div>
+          {devErr ? (
+            <p className="ai-key-msg err">❌ {devErr}</p>
+          ) : devSug && (
+            <div style={{ display: 'grid', gap: 12, padding: '4px 2px' }}>
+              <div style={{ fontSize: '0.78rem', color: 'var(--text-soft)' }}>
+                코퍼스: CSV {devSug.corpus.csv_count ?? 0} · 이미지 {devSug.corpus.image_count ?? 0} · 종목 {devSug.corpus.symbol_count ?? 0}
+                {devSug.corpus.avg_verified_ratio != null && <> · 평균 검증통과율 {(devSug.corpus.avg_verified_ratio * 100).toFixed(1)}%</>}
+                <span style={{ marginLeft: 8, opacity: 0.7 }}>({devSug.provider}/{devSug.model})</span>
+              </div>
+              <div style={{ fontWeight: 700, fontSize: '0.98rem', color: 'var(--text-main)' }}>{devSug.suggestions.headline}</div>
+              <div style={{ fontSize: '0.85rem', color: 'var(--text-soft)' }}>📦 준비도: {devSug.suggestions.readiness}</div>
+              <div style={{ display: 'grid', gap: 8 }}>
+                {(devSug.suggestions.ideas ?? []).map((idea, i) => {
+                  const fc = idea.feasibility === 'now' ? '#22c55e' : idea.feasibility === 'soon' ? '#f59e0b' : '#94a3b8'
+                  const fl = idea.feasibility === 'now' ? '지금' : idea.feasibility === 'soon' ? '곧' : '추후'
+                  return (
+                    <div key={i} style={{ padding: '10px 12px', borderRadius: 10,
+                      background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                        <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>{idea.title}</span>
+                        <span style={{ fontSize: '0.72rem', padding: '1px 8px', borderRadius: 999,
+                          background: fc + '22', color: fc, border: `1px solid ${fc}55` }}>{fl}</span>
+                      </div>
+                      <div style={{ fontSize: '0.83rem', color: 'var(--text-soft)', lineHeight: 1.6 }}>
+                        {idea.what}<br />
+                        <span style={{ opacity: 0.85 }}>· 필요 데이터: {idea.data_needed}</span><br />
+                        <span style={{ color: '#fbbf24', opacity: 0.9 }}>⚠ {idea.caution}</span>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              {(devSug.suggestions.next_actions ?? []).length > 0 && (
+                <div style={{ fontSize: '0.83rem', color: 'var(--text-soft)' }}>
+                  <strong style={{ color: 'var(--text-main)' }}>다음 행동</strong>
+                  <ul style={{ margin: '4px 0 0', paddingLeft: 18, lineHeight: 1.7 }}>
+                    {devSug.suggestions.next_actions.map((a, i) => <li key={i}>{a}</li>)}
+                  </ul>
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -913,7 +1073,10 @@ export function AiChartPage() {
           {loading ? (
             <LoadingSkeleton />
           ) : result ? (
-            <ResultView data={result} onExport={exportOnePager} />
+            <>
+              <ResultView data={result} onExport={exportOnePager} />
+              {result.crossval && <CrossvalBadge info={result.crossval} />}
+            </>
           ) : (
             <div className="panel glass ai-empty-state">
               <div className="ai-empty-icon">🤖</div>
