@@ -359,6 +359,244 @@ def merge_symbol(symbol: str) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# 분석 기준 = 가장 큰 타임프레임 + 변곡점 집중 (업로드 순서 무관·결정론)
+# ──────────────────────────────────────────────────────────────────────
+_TF_UNIT_SEC = {"m": 60, "h": 3600, "H": 3600, "D": 86400, "W": 604800}
+
+
+def _tf_to_seconds(tf: str) -> int:
+    m = re.fullmatch(r"(\d+)([mhHDW])", tf or "")
+    return int(m.group(1)) * _TF_UNIT_SEC.get(m.group(2), 0) if m else 0
+
+
+def largest_timeframe(symbol: str):
+    """병합 parquet 중 가장 큰 타임프레임 (tf, 경로) 반환."""
+    d = MERGED / safe_symbol(symbol)
+    if not d.exists():
+        return None, None
+    best, best_sec = (None, None), -1
+    for p in d.glob("*.parquet"):
+        sec = _tf_to_seconds(p.stem)
+        if sec > best_sec:
+            best, best_sec = (p.stem, p), sec
+    return best
+
+
+def detect_inflections(df, window: int = 5, atr_mult: float = 1.0,
+                       top_m: int = 12, recent_k: int = 4) -> list[dict]:
+    """결정론적 스윙 변곡점 추출 (프랙탈 피벗 → 지그재그 ATR 유의성 → 유의도 랭킹)."""
+    import numpy as np
+    import pandas as pd
+    n = len(df)
+    if n < 2 * window + 5:
+        return []
+    high = df["high"].to_numpy(float)
+    low = df["low"].to_numpy(float)
+    close = df["close"].to_numpy(float)
+    ts = df["ts"]
+    prev = np.roll(close, 1); prev[0] = close[0]
+    tr = np.maximum(high - low, np.maximum(np.abs(high - prev), np.abs(low - prev)))
+    atr = pd.Series(tr).rolling(14, min_periods=1).mean().to_numpy()
+
+    cand = []
+    for i in range(window, n - window):
+        if high[i] == high[i - window:i + window + 1].max():
+            cand.append((i, "high", high[i]))
+        if low[i] == low[i - window:i + window + 1].min():
+            cand.append((i, "low", low[i]))
+    cand.sort(key=lambda x: x[0])
+
+    zz: list[list] = []
+    for i, typ, price in cand:
+        if not zz:
+            zz.append([i, typ, price]); continue
+        _, lt, lp = zz[-1]
+        if typ == lt:                                   # 같은 타입: 더 극단값으로 교체
+            if (typ == "high" and price > lp) or (typ == "low" and price < lp):
+                zz[-1] = [i, typ, price]
+        elif abs(price - lp) >= atr_mult * atr[i]:      # 반대 타입 + 유의 반전만 확정
+            zz.append([i, typ, price])
+
+    piv = []
+    for j, (i, typ, price) in enumerate(zz):
+        pv = zz[j - 1][2] if j > 0 else price
+        swing = abs(price - pv) / pv * 100 if pv else 0.0
+        piv.append({"idx": i, "date": ts.iloc[i].strftime("%Y-%m-%d"),
+                    "price": round(float(price), 2), "type": typ,
+                    "swing_pct": round(float(swing), 2)})
+    if not piv:
+        return []
+    sel = {p["idx"]: p for p in sorted(piv, key=lambda x: x["swing_pct"], reverse=True)[:top_m]}
+    for p in sorted(piv, key=lambda x: x["idx"])[-recent_k:]:   # 최근 변곡점 항상 포함
+        sel[p["idx"]] = p
+    out = sorted(sel.values(), key=lambda x: x["idx"])
+    for p in out:
+        p.pop("idx", None)
+    return out
+
+
+def _focus_note(tf: str, bars: int, cur: float, infl: list[dict]) -> str:
+    if not infl:
+        return f"## 분석 기준\n가장 큰 타임프레임 **{tf}** ({bars}봉) 전체를 기준으로 분석한다."
+    lines = "\n".join(f"- {p['date']} {p['type']} {p['price']:,} (직전 변곡 대비 {p['swing_pct']}%)"
+                      for p in infl)
+    return (
+        f"## 분석 기준 (업로드 순서 무관·결정론)\n"
+        f"가장 큰 타임프레임 **{tf}** ({bars}봉)을 기준으로 한다. 현재가 {cur:,.0f}.\n"
+        f"아래는 이 타임프레임에서 결정론적으로 추출한 **주요 변곡점(스윙 피벗)**이다. "
+        f"전체 봉을 뭉뚱그리지 말고 이 변곡점들을 중심으로, 현재가의 구조적 위치"
+        f"(직전 구조 전환 BOS/CHoCH, 핵심 지지·저항 변곡 레벨, 미청산 유동성)를 집중 해석하라:\n"
+        f"{lines}"
+    )
+
+
+def _mtf_confluence(symbol: str, primary_tf: str, pivots: list[dict],
+                    lower_tfs=("4H", "1H", "15m"), n_pivots: int = 4) -> str | None:
+    """②MTF 합류 — 1D 핵심(최근) 변곡점 순간에 하위 TF 구조를 선별 결합 (결정론·검증가능)."""
+    import pandas as pd
+    recent = pivots[-n_pivots:] if pivots else []
+    if not recent:
+        return None
+    avail = {}
+    for tf in lower_tfs:
+        p = MERGED / safe_symbol(symbol) / f"{tf}.parquet"
+        if p.exists() and _tf_to_seconds(tf) < _tf_to_seconds(primary_tf):
+            avail[tf] = pd.read_parquet(p).sort_values("ts").reset_index(drop=True)
+    if not avail:
+        return None
+    lines = []
+    for piv in recent:
+        anchor = pd.Timestamp(piv["date"], tz="Asia/Seoul")
+        segs = []
+        for tf, d in avail.items():
+            sub = d[(d["ts"] >= anchor - pd.Timedelta(days=3)) & (d["ts"] <= anchor + pd.Timedelta(days=3))]
+            if len(sub) < 2:
+                continue
+            dirn = "상승" if sub["close"].iloc[-1] > sub["close"].iloc[0] else "하락"
+            segs.append(f"{tf} {dirn}(고{sub['high'].max():,.0f}/저{sub['low'].min():,.0f}·{len(sub)}봉)")
+        if segs:
+            lines.append(f"- {piv['date']} {piv['type']} {piv['price']:,} 순간 → " + " · ".join(segs))
+    if not lines:
+        return None
+    return ("## 멀티 타임프레임 합류 (1D 핵심 변곡점 순간의 하위 TF 구조 · 결정론·검증가능)\n"
+            "각 변곡점이 하위 TF에서 확인(정합)되는지로 신호 강도를 가늠하라:\n" + "\n".join(lines))
+
+
+def _latest_raw(symbol: str, tf: str):
+    """해당 종목·TF의 가장 최근 원본 CSV DataFrame (지표 컬럼 포함)."""
+    import pandas as pd
+    sdir = symbol_dir(symbol)
+    files = sorted(sdir.glob(f"{safe_symbol(symbol)}_{tf}_*.csv"), key=lambda p: p.stat().st_mtime)
+    if not files:
+        return None
+    df = pd.read_csv(files[-1])
+    df.columns = [c.strip().lower() for c in df.columns]
+    return df
+
+
+def _cvd_reference(symbol: str, tf: str) -> str | None:
+    """③CVD 추세 (reference-only) — 원본 CSV의 누적 거래량 델타. 네이버 미검증."""
+    import pandas as pd
+    df = _latest_raw(symbol, tf)
+    if df is None or "close" not in df.columns:
+        return None
+    cvd_col = None
+    for c in df.columns:
+        if "cdv" in c and ("닫기" in c or "close" in c) and df[c].notna().any():
+            cvd_col = c; break
+    if not cvd_col:
+        for c in df.columns:
+            if "cdv" in c and df[c].notna().any():
+                cvd_col = c; break
+    if not cvd_col:
+        return None
+    cvd = pd.to_numeric(df[cvd_col], errors="coerce")
+    px = pd.to_numeric(df["close"], errors="coerce")
+    both = pd.concat([cvd, px], axis=1).dropna()
+    if len(both) < 30:
+        return None
+    look = max(20, len(both) // 20)
+    rc, rp = both.iloc[-look:, 0], both.iloc[-look:, 1]
+    cvd_dir = "상승" if rc.iloc[-1] > rc.iloc[0] else "하락"
+    px_dir = "상승" if rp.iloc[-1] > rp.iloc[0] else "하락"
+    note = f"CVD(누적 거래량 델타) 최근 {look}봉 {cvd_dir} · 가격 {px_dir}"
+    if cvd_dir != px_dir:
+        note += " → ⚠️ 가격-CVD 다이버전스(추세 약화 가능)"
+    else:
+        note += " → 가격-CVD 동행(추세 지지)"
+    return note
+
+
+def _smartmoney_zone(symbol: str, tf: str) -> str | None:
+    """④ZONE (reference-only) — 가격 스케일 밴드 기준 현재가 위치. 네이버 미검증.
+
+    주의: 'buysell upper/lower band'는 오실레이터 스케일(±) 밴드라 가격 존이 아니다.
+    가격 스케일 밴드(upper/lower band)만 사용하고, 현재가의 0.3~3배 범위 가드로
+    오실레이터 컬럼을 배제한다.
+    """
+    import pandas as pd
+    df = _latest_raw(symbol, tf)
+    if df is None or "close" not in df.columns:
+        return None
+    px = pd.to_numeric(df["close"], errors="coerce").dropna()
+    if px.empty:
+        return None
+    c = float(px.iloc[-1])
+
+    def price_band(name: str):
+        if name not in df.columns:
+            return None
+        s = pd.to_numeric(df[name], errors="coerce").dropna()
+        if s.empty:
+            return None
+        v = float(s.iloc[-1])
+        return v if 0.3 * c <= v <= 3 * c else None   # 가격 스케일만 (오실레이터 배제)
+
+    u, l = price_band("upper band"), price_band("lower band")
+    if u is None or l is None or u <= l:
+        return None
+    if c > u:
+        pos = "밴드 상단 돌파(강세)"
+    elif c < l:
+        pos = "밴드 하단 이탈(약세)"
+    else:
+        pos = f"밴드 내부 {(c - l) / (u - l) * 100:.0f}% 위치"
+    return f"가격 밴드 ZONE(참고): 현재가 {c:,.0f} — {pos} (상단 {u:,.0f}/하단 {l:,.0f})"
+
+
+def focus_input(symbol: str) -> dict | None:
+    """분석 입력 빌드: 가장 큰 TF 시계열 + 변곡점 + MTF합류 + (참고)CVD·ZONE."""
+    import pandas as pd
+    tf, path = largest_timeframe(symbol)
+    if not tf:
+        return None
+    df = pd.read_parquet(path)
+    if "ts" not in df.columns or len(df) < 30:
+        return None
+    df = df.sort_values("ts").reset_index(drop=True)
+    infl = detect_inflections(df)
+    records = (df.assign(time=df["ts"].dt.strftime("%Y-%m-%d %H:%M"))
+                 [["time", "open", "high", "low", "close", "volume"]].to_dict("records"))
+    cur = float(df["close"].iloc[-1])
+
+    parts = [_focus_note(tf, len(df), cur, infl)]
+    mtf = _mtf_confluence(symbol, tf, infl)
+    if mtf:
+        parts.append(mtf)
+    cvd = _cvd_reference(symbol, tf)
+    zone = _smartmoney_zone(symbol, tf)
+    refs = [f"- {x}" for x in (cvd, zone) if x]
+    if refs:
+        parts.append("## 참고 신호 (TradingView 독자 계산·네이버 미검증 — 사실값 아님, 보조 해석만)\n"
+                     + "\n".join(refs))
+
+    return {"timeframe": tf, "bars": len(df), "current_price": cur,
+            "inflections": infl, "records": records, "note": "\n\n".join(parts),
+            "mtf_used": bool(mtf),
+            "reference_signals": {"cvd": cvd, "smartmoney_zone": zone}}
+
+
+# ──────────────────────────────────────────────────────────────────────
 # 발전 가능성 (코퍼스 통계 — DB 기반은 main.py, 여기는 파일 기반 보조)
 # ──────────────────────────────────────────────────────────────────────
 def corpus_stats() -> dict:

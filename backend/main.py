@@ -4873,23 +4873,17 @@ async def ai_chart_analysis(
 async def ai_chart_analysis_upload(
     symbol: str,
     file: UploadFile = FastAPIFile(..., description="TradingView CSV 파일"),
+    intake_only: bool = False,
     _current_user=Depends(require_admin),
 ):
     """TradingView에서 내보낸 CSV 파일을 업로드하여 AI 분석.
 
     TradingView 차트 → 내보내기 → CSV 다운로드 후 이 엔드포인트에 업로드하세요.
     CSV 형식: time,open,high,low,close[,volume]
+
+    intake_only=true: AI 분석(LLM)을 건너뛰고 교차검증 적재·병합만 수행한다.
+    멀티 CSV 업로드 속도 최적화 — 첫 파일만 분석하고 나머지는 코퍼스 적재만 할 때 사용.
     """
-    if _chart_analysis is None:
-        raise HTTPException(status_code=503, detail="chart_analysis module not available")
-
-    provider, api_key, model = _resolve_ai_provider()
-    if not api_key:
-        raise HTTPException(
-            status_code=503,
-            detail="AI API key not configured. Set GEMINI_API_KEY / GROQ_API_KEY / OPENAI_API_KEY in backend/.env",
-        )
-
     content_type = (file.content_type or "").lower()
     if file.filename and not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="CSV 파일만 업로드 가능합니다")
@@ -4899,20 +4893,32 @@ async def ai_chart_analysis_upload(
     if len(raw) > MAX_SIZE:
         raise HTTPException(status_code=413, detail="파일 크기가 5MB를 초과합니다")
 
-    try:
-        result = _chart_analysis.analyze_chart(
-            symbol=symbol.strip(),
-            api_key=api_key,
-            model=model,
-            provider=provider,
-            csv_content=raw,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"분석 중 오류 발생: {exc}") from exc
+    if intake_only:
+        # 적재·병합 전용 (LLM 생략). AI 키 없이도 동작.
+        result: dict = {"symbol": symbol.strip(), "intake_only": True}
+    else:
+        if _chart_analysis is None:
+            raise HTTPException(status_code=503, detail="chart_analysis module not available")
+        provider, api_key, model = _resolve_ai_provider()
+        if not api_key:
+            raise HTTPException(
+                status_code=503,
+                detail="AI API key not configured. Set GEMINI_API_KEY / GROQ_API_KEY / OPENAI_API_KEY in backend/.env",
+            )
+        try:
+            result = _chart_analysis.analyze_chart(
+                symbol=symbol.strip(),
+                api_key=api_key,
+                model=model,
+                provider=provider,
+                csv_content=raw,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"분석 중 오류 발생: {exc}") from exc
 
     # ── 교차검증 창구: 종목별 적재 → 과거자료 확인 → 병합·업데이트 → 인덱스/노드 DB저장 ──
     # best-effort — 실패는 분석 응답에 영향 없음. 참고용이며 거래 판단 반영 안 함.
@@ -5332,6 +5338,48 @@ def ai_crossval_work_requests(_current_user=Depends(require_admin)):
         }
     finally:
         db.close()
+
+
+@app.post("/api/ai/crossval/analyze")
+def ai_crossval_analyze(symbol: str, _current_user=Depends(require_admin)):
+    """병합 코퍼스의 **가장 큰 타임프레임 + 변곡점 집중**으로 AI 분석.
+
+    업로드 순서와 무관하게 항상 같은 기준(최대 TF)으로 분석한다. 결정론적 변곡점을
+    프롬프트에 주입해 구조적으로 중요한 지점 중심으로 해석하게 한다.
+    """
+    if _crossval_intake is None or _chart_analysis is None:
+        raise HTTPException(status_code=503, detail="crossval_intake/chart_analysis 모듈 로드 실패")
+    sym = symbol.strip()
+    focus = _crossval_intake.focus_input(sym)
+    if not focus:
+        raise HTTPException(status_code=409, detail="병합된 시계열이 없습니다. 먼저 CSV를 업로드하세요.")
+
+    provider, api_key, model = _resolve_ai_provider()
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="AI API key not configured. Set GEMINI_API_KEY / GROQ_API_KEY / OPENAI_API_KEY in backend/.env",
+        )
+    try:
+        result = _chart_analysis.analyze_chart(
+            symbol=sym, api_key=api_key, model=model, provider=provider,
+            ohlcv_records=focus["records"], extra_note=focus["note"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"분석 중 오류 발생: {exc}") from exc
+
+    result["analysis_basis"] = {
+        "timeframe": focus["timeframe"], "bars": focus["bars"],
+        "inflection_count": len(focus["inflections"]),
+        "inflections": focus["inflections"],
+        "mtf_used": focus.get("mtf_used", False),
+        "reference_signals": focus.get("reference_signals", {}),
+    }
+    return result
 
 
 # ─── AI 분석 캐시 API ─────────────────────────────────────────────────────────

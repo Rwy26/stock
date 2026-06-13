@@ -160,6 +160,64 @@ def _atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     return tr.rolling(n).mean()
 
 
+def _mfi(df: pd.DataFrame, n: int = 14) -> pd.Series:
+    """Money Flow Index — 거래량 가중 RSI (OHLCV로 재계산, 신뢰값)."""
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    mf = tp * df["volume"]
+    pos = mf.where(tp > tp.shift(1), 0.0).rolling(n).sum()
+    neg = mf.where(tp < tp.shift(1), 0.0).rolling(n).sum()
+    mfr = pos / neg.replace(0, np.nan)
+    return 100 - (100 / (1 + mfr))
+
+
+def _vwap(df: pd.DataFrame, n: int = 20) -> pd.Series:
+    """롤링 VWAP(n) — 거래량 가중 평균가."""
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    pv = (tp * df["volume"]).rolling(n).sum()
+    vv = df["volume"].rolling(n).sum().replace(0, np.nan)
+    return pv / vv
+
+
+def _ichimoku(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """일목균형표 전환선/기준선/선행스팬 (현재 상태 판정용, 미래 시프트 없음)."""
+    high, low = df["high"], df["low"]
+    tenkan = (high.rolling(9).max() + low.rolling(9).min()) / 2
+    kijun = (high.rolling(26).max() + low.rolling(26).min()) / 2
+    span_a = (tenkan + kijun) / 2
+    span_b = (high.rolling(52).max() + low.rolling(52).min()) / 2
+    return {"tenkan": tenkan, "kijun": kijun, "span_a": span_a, "span_b": span_b}
+
+
+def _rsi_divergence(close: pd.Series, rsi: pd.Series, lookback: int = 60, window: int = 3) -> dict:
+    """최근 구간 가격-RSI 정규 다이버전스 탐지 (결정론)."""
+    c = close.tail(lookback).reset_index(drop=True)
+    r = rsi.tail(lookback).reset_index(drop=True)
+    n = len(c)
+    if n < window * 2 + 5 or r.isna().all():
+        return {"type": "none"}
+    lows, highs = [], []
+    for i in range(window, n - window):
+        seg = c[i - window:i + window + 1]
+        if c[i] == seg.min():
+            lows.append(i)
+        if c[i] == seg.max():
+            highs.append(i)
+    bull = bear = None
+    if len(lows) >= 2:
+        a, b = lows[-2], lows[-1]
+        if c[b] < c[a] and r[b] > r[a]:
+            bull = (b, f"가격 저점 하락({round(c[a])}→{round(c[b])}) vs RSI 상승({round(r[a],1)}→{round(r[b],1)})")
+    if len(highs) >= 2:
+        a, b = highs[-2], highs[-1]
+        if c[b] > c[a] and r[b] < r[a]:
+            bear = (b, f"가격 고점 상승({round(c[a])}→{round(c[b])}) vs RSI 하락({round(r[a],1)}→{round(r[b],1)})")
+    if bull and (not bear or bull[0] >= bear[0]):
+        return {"type": "bullish", "detail": bull[1]}
+    if bear:
+        return {"type": "bearish", "detail": bear[1]}
+    return {"type": "none"}
+
+
 def compute_indicators(df: pd.DataFrame) -> dict[str, Any]:
     """Compute key technical indicators and return a summary dict.
 
@@ -179,6 +237,10 @@ def compute_indicators(df: pd.DataFrame) -> dict[str, Any]:
     bb_upper, bb_mid, bb_lower = _bollinger(close)
     atr14 = _atr(df)
     vol_ma20 = volume.rolling(20).mean()
+    mfi14 = _mfi(df, 14)
+    vwap20 = _vwap(df, 20)
+    ichi = _ichimoku(df)
+    rsi_div = _rsi_divergence(close, rsi14)
 
     def _last(s: pd.Series, n: int = 1) -> float | list[float]:
         vals = s.dropna().tail(n).round(4).tolist()
@@ -217,6 +279,17 @@ def compute_indicators(df: pd.DataFrame) -> dict[str, Any]:
             "pct_b": round((current_price - _last(bb_lower)) / ((_last(bb_upper) - _last(bb_lower)) or 1), 4),
         },
         "atr_14": _last(atr14),
+        "mfi_14": _last(mfi14),
+        "vwap_20": _last(vwap20),
+        "ichimoku": {
+            "tenkan": _last(ichi["tenkan"]),
+            "kijun": _last(ichi["kijun"]),
+            "price_vs_kijun": "위" if current_price >= _last(ichi["kijun"]) else "아래",
+            "cloud": ("구름 위" if current_price > max(_last(ichi["span_a"]), _last(ichi["span_b"]))
+                      else "구름 아래" if current_price < min(_last(ichi["span_a"]), _last(ichi["span_b"]))
+                      else "구름 안"),
+        },
+        "rsi_divergence": rsi_div,
         "volume": {
             "last": float(volume.iloc[-1]),
             "ma20": round(float(vol_ma20.iloc[-1]), 2) if not pd.isna(vol_ma20.iloc[-1]) else None,
@@ -324,13 +397,15 @@ def _clean_json_response(text: str) -> str:
     return t
 
 
-def build_prompt(symbol: str, indicators: dict[str, Any]) -> str:
+def build_prompt(symbol: str, indicators: dict[str, Any], extra_note: str | None = None) -> str:
     ind = dict(indicators)
     recent = ind.pop("recent_ohlcv", [])
+    note = f"\n{extra_note}\n" if extra_note else ""
     return (
         f"종목: {symbol}\n\n"
         f"## 기술적 지표\n```json\n{json.dumps(ind, ensure_ascii=False, indent=2)}\n```\n\n"
-        f"## 최근 20봉 OHLCV\n```json\n{json.dumps(recent, ensure_ascii=False, indent=2)}\n```\n\n"
+        f"## 최근 20봉 OHLCV\n```json\n{json.dumps(recent, ensure_ascii=False, indent=2)}\n```\n"
+        f"{note}\n"
         "위 데이터를 분석하여 지정된 JSON 형식으로만 응답해주세요."
     )
 
@@ -343,12 +418,13 @@ def openai_analyze(
     model: str = "gpt-4o-mini",
     base_url: str = "https://api.openai.com/v1",
     timeout_seconds: float = 60.0,
+    extra_note: str | None = None,
 ) -> dict[str, Any]:
     """Call OpenAI-compatible Chat Completions API (OpenAI / Groq) and parse the JSON response."""
     if not api_key:
         raise ValueError("API key is not configured")
 
-    prompt = build_prompt(symbol, indicators)
+    prompt = build_prompt(symbol, indicators, extra_note)
 
     payload = {
         "model": model,
@@ -397,12 +473,13 @@ def gemini_analyze(
     api_key: str,
     model: str = "gemini-2.5-flash",
     timeout_seconds: float = 60.0,
+    extra_note: str | None = None,
 ) -> dict[str, Any]:
     """Call Google Gemini API (free tier) and parse the JSON response."""
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not configured")
 
-    prompt = build_prompt(symbol, indicators)
+    prompt = build_prompt(symbol, indicators, extra_note)
 
     url = (
         f"https://generativelanguage.googleapis.com/v1beta"
@@ -527,11 +604,13 @@ def analyze_chart(
     yfinance_interval: str = "1d",
     csv_content: str | bytes | None = None,
     ohlcv_records: list[dict[str, Any]] | None = None,
+    extra_note: str | None = None,
 ) -> dict[str, Any]:
     """End-to-end: load data → compute indicators → AI analysis.
 
     Returns a dict with keys: symbol, indicators (summary), ai_result, analyzed_at.
     provider: "openai" | "gemini" (완전 무료) | "groq" (무료)
+    extra_note: 프롬프트에 덧붙일 추가 분석 노트 (예: 변곡점 집중 분석).
     """
     # 1. Load OHLCV
     if csv_content is not None:
@@ -553,15 +632,16 @@ def analyze_chart(
 
     # 3. AI analysis – dispatch to selected provider
     if provider == "gemini":
-        ai_result = gemini_analyze(symbol, indicators, api_key=api_key, model=model)
+        ai_result = gemini_analyze(symbol, indicators, api_key=api_key, model=model, extra_note=extra_note)
     elif provider == "groq":
         ai_result = openai_analyze(
             symbol, indicators,
             api_key=api_key, model=model,
             base_url="https://api.groq.com/openai/v1",
+            extra_note=extra_note,
         )
     else:
-        ai_result = openai_analyze(symbol, indicators, api_key=api_key, model=model)
+        ai_result = openai_analyze(symbol, indicators, api_key=api_key, model=model, extra_note=extra_note)
 
     return {
         "symbol": symbol,

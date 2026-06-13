@@ -66,12 +66,19 @@ interface WorkRequest {
 }
 interface WorkRequestsResp { watchlist_total: number; covered: number; request_count: number; requests: WorkRequest[] }
 
+interface InflectionPoint { date: string; price: number; type: string; swing_pct: number }
+interface AnalysisBasis {
+  timeframe: string; bars: number; inflection_count: number; inflections?: InflectionPoint[]
+  mtf_used?: boolean
+  reference_signals?: { cvd?: string | null; smartmoney_zone?: string | null }
+}
 interface AnalysisResponse {
   symbol: string
   images_count?: number
   ai_result: AiResult
   analyzed_at: string
   crossval?: CrossvalInfo
+  analysis_basis?: AnalysisBasis
 }
 
 // 언어학습 발전 가능성 (요구 4)
@@ -607,6 +614,7 @@ export function AiChartPage() {
   const [workReqs, setWorkReqs] = useState<WorkRequestsResp | null>(null)
   const [workRunning, setWorkRunning] = useState(false)
   const [workErr, setWorkErr] = useState<string | null>(null)
+  const [csvBatchNote, setCsvBatchNote] = useState<string | null>(null)
 
   const providerPrefixes: Record<string, string> = { openai: 'sk-', gemini: '', groq: 'gsk_' }
   const providerHints: Record<string, string> = {
@@ -770,7 +778,7 @@ export function AiChartPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    setError(null); setResult(null)
+    setError(null); setResult(null); setCsvBatchNote(null)
 
     if (mode === 'drop') {
       if (droppedFiles.length === 0) { setError('파일을 1개 이상 업로드하세요'); return }
@@ -802,18 +810,52 @@ export function AiChartPage() {
           if (!resp.ok) throw new Error(data.detail ?? `서버 오류 ${resp.status}`)
           setResult(data as AnalysisResponse)
         } else if (csvFiles.length > 0) {
-          const form = new FormData()
-          form.append('file', csvFiles[0].file)
+          // 1) 드롭한 전 파일을 intake_only로 빠르게 적재·병합 (LLM 생략).
+          // 2) 그 후 '가장 큰 타임프레임 + 변곡점 집중'으로 1회만 분석 → 업로드 순서 무관·결정론.
           const token = getAccessToken()
-          const params = new URLSearchParams({ symbol: effectiveSymbol })
-          const resp = await fetch(`/api/ai/chart-analysis/upload?${params}`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}` },
-            body: form,
-          })
-          const data = await resp.json()
-          if (!resp.ok) throw new Error(data.detail ?? `서버 오류 ${resp.status}`)
-          setResult(data as AnalysisResponse)
+          let lastCrossval: CrossvalInfo | undefined      // 마지막 응답 = 가장 완전한 병합 요약
+          let okCount = 0
+          const failed: string[] = []
+          for (const d of csvFiles) {
+            const fsym = extractSymbolFromFilename(d.file.name) || effectiveSymbol
+            const form = new FormData()
+            form.append('file', d.file)
+            const params = new URLSearchParams({ symbol: fsym, intake_only: 'true' })
+            try {
+              const resp = await fetch(`/api/ai/chart-analysis/upload?${params}`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}` },
+                body: form,
+              })
+              const data = await resp.json()
+              if (!resp.ok) throw new Error(data.detail ?? `서버 오류 ${resp.status}`)
+              if (data.crossval) lastCrossval = data.crossval as CrossvalInfo
+              okCount++
+            } catch (e) {
+              failed.push(`${d.file.name}: ${e instanceof Error ? e.message : String(e)}`)
+            }
+          }
+          // 가장 큰 TF + 변곡점 집중 분석 1회 (기준 고정)
+          if (okCount > 0) {
+            try {
+              const aparams = new URLSearchParams({ symbol: effectiveSymbol })
+              const resp = await fetch(`/api/ai/crossval/analyze?${aparams}`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}` },
+              })
+              const data = await resp.json()
+              if (!resp.ok) throw new Error(data.detail ?? `분석 오류 ${resp.status}`)
+              const analyzed = data as AnalysisResponse
+              setResult({ ...analyzed, crossval: lastCrossval ?? analyzed.crossval })
+            } catch (e) {
+              setError(`적재 ${okCount}개 완료, 분석 실패: ${e instanceof Error ? e.message : String(e)}`)
+            }
+          }
+          setCsvBatchNote(
+            `CSV ${csvFiles.length}개 중 ${okCount}개 적재·병합 완료 (가장 큰 TF 변곡점 기준 분석)` +
+            (failed.length ? ` · 실패 ${failed.length}개` : '')
+          )
+          if (okCount === 0 && failed.length > 0) setError(failed.join('\n'))
         }
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : String(err))
@@ -1174,6 +1216,27 @@ export function AiChartPage() {
             <LoadingSkeleton />
           ) : result ? (
             <>
+              {csvBatchNote && (
+                <div className="panel glass" style={{ marginBottom: 12, padding: '10px 14px',
+                  fontSize: '0.84rem', color: '#22c55e', border: '1px solid rgba(34,197,94,0.3)' }}>
+                  📥 {csvBatchNote}
+                </div>
+              )}
+              {result.analysis_basis && (
+                <div className="panel glass" style={{ marginBottom: 12, padding: '10px 14px', fontSize: '0.82rem', color: 'var(--text-soft)', lineHeight: 1.7 }}>
+                  🎯 분석 기준: <strong style={{ color: 'var(--text-main)' }}>{result.analysis_basis.timeframe}</strong>
+                  {' '}(가장 큰 타임프레임, {result.analysis_basis.bars.toLocaleString()}봉) · 변곡점 {result.analysis_basis.inflection_count}개 집중
+                  {result.analysis_basis.mtf_used && <span style={{ marginLeft: 6, color: '#22c55e' }}>· MTF 합류 ✓</span>}
+                  <span style={{ marginLeft: 6, opacity: 0.7 }}>· 업로드 순서 무관</span>
+                  {(result.analysis_basis.reference_signals?.cvd || result.analysis_basis.reference_signals?.smartmoney_zone) && (
+                    <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.08)', fontSize: '0.76rem' }}>
+                      <span style={{ color: '#fbbf24' }}>참고 신호(미검증)</span>
+                      {result.analysis_basis.reference_signals?.cvd && <div>· {result.analysis_basis.reference_signals.cvd}</div>}
+                      {result.analysis_basis.reference_signals?.smartmoney_zone && <div>· {result.analysis_basis.reference_signals.smartmoney_zone}</div>}
+                    </div>
+                  )}
+                </div>
+              )}
               <ResultView data={result} onExport={exportOnePager} />
               {result.crossval && <CrossvalBadge info={result.crossval} />}
             </>
