@@ -400,6 +400,85 @@ def _prob_frequency(composite: int) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
+# 위험 신호 (결정론 탐지 — 수집 데이터에서 위험 조건을 룰로 판정, 근거 동반)
+#   level: "위험"(danger) > "경고"(warning) > "주의"(caution). 없으면 "정상" 1건.
+#   모든 신호는 원천값을 detail 에 명시(데이터 정확성 원칙 — 추정 금지).
+# ---------------------------------------------------------------------------
+_LEVEL_RANK = {"위험": 3, "경고": 2, "주의": 1, "정상": 0}
+
+
+def _risk_signals(scores: dict, mkt: dict, pred: dict, prob: dict) -> list[dict]:
+    sig: list[dict] = []
+
+    def add(level, title, detail):
+        sig.append({"level": level, "title": title, "detail": detail})
+
+    # --- 종합/점수 기반 ---
+    comp = _composite(scores)
+    if comp < 20:
+        add("위험", "종합심리 매우약세", f"composite {comp}/100 — 자금흐름 전반 위축(20 미만)")
+    elif comp < 40:
+        add("경고", "종합심리 약세", f"composite {comp}/100 — 약세 국면(40 미만)")
+
+    thresholds = [
+        ("risk_appetite", "위험선호 위축", "Risk-Off — VIX·신용·BTC·S&P 종합", 25, 35),
+        ("liquidity", "유동성 긴축", "Fed경로·US10Y·DXY 종합 — 연료 부족", 25, 35),
+        ("growth", "경기 둔화", "GDP·실업·ISM·침체확률 종합", 25, 35),
+        ("inflation", "물가 재점화", "점수↓=물가압박 (CPI·유가·근원)", 25, 35),
+        ("geopolitics", "지정학 리스크 고조", "점수↓=리스크확대 (예측시장·뉴스·Gold)", 25, 35),
+    ]
+    for key, title, why, dlvl, wlvl in thresholds:
+        v = scores.get(key)
+        if v is None:
+            continue
+        if v < dlvl:
+            add("위험", title, f"{title.split()[0]} {v}/100 — {why}")
+        elif v < wlvl:
+            add("경고", title, f"{title.split()[0]} {v}/100 — {why}")
+
+    # --- 시장 내부 신호 ---
+    if mkt.get("yield_inverted"):
+        sp = mkt.get("spread_10y_2y")
+        add("경고", "장단기 금리 역전", f"US10Y-US2Y 스프레드 {sp}%p (<0) — 과거 경기침체 선행 신호")
+    vix = (mkt.get("VIX") or {}).get("last") if isinstance(mkt.get("VIX"), dict) else None
+    if vix is not None:
+        if vix >= 30:
+            add("위험", "변동성 급등(VIX)", f"VIX {vix} — 공포 구간(30↑)")
+        elif vix >= 25:
+            add("경고", "변동성 경계(VIX)", f"VIX {vix} — 경계 구간(25↑)")
+        elif vix >= 20:
+            add("주의", "변동성 상승(VIX)", f"VIX {vix} — 중립 상단(20↑)")
+    gold = (mkt.get("Gold") or {}).get("chg5d_pct") if isinstance(mkt.get("Gold"), dict) else None
+    if gold is not None and gold >= 3:
+        add("주의", "안전자산 쏠림", f"금 5일 +{gold}% — 위험회피 자금 유입")
+    dxy = (mkt.get("DXY") or {}).get("chg20d_pct") if isinstance(mkt.get("DXY"), dict) else None
+    if dxy is not None and dxy >= 3:
+        add("주의", "달러 강세 압박", f"DXY 20일 +{dxy}% — 신흥국·원화 긴축 압박")
+    wti = (mkt.get("WTI") or {}).get("chg5d_pct") if isinstance(mkt.get("WTI"), dict) else None
+    if wti is not None and wti >= 7:
+        add("주의", "유가 급등", f"WTI 5일 +{wti}% — 인플레 재자극 가능")
+
+    # --- 예측시장 기반 ---
+    rec = _pred(pred, "recession_2026")
+    if rec is not None and rec >= 50:
+        add("경고", "경기침체 베팅 우위", f"침체 확률 {rec}% — 예측시장 과반(50%↑)")
+    shut = _pred(pred, "us_gov_shutdown")
+    if shut is not None and shut >= 50:
+        add("주의", "셧다운/부채한도 리스크", f"확률 {shut}% — 캘린더 리스크")
+
+    # --- 확률 기반 ---
+    wk = prob.get("1w") if isinstance(prob.get("1w"), dict) else None
+    if wk and wk.get("down", 0) > wk.get("up", 0):
+        add("주의", "단기 하방 우위", f"1주 하락확률 {wk['down']}% > 상승확률 {wk['up']}% ({'빈도 n=' + str(prob.get('n')) if prob.get('method') == 'frequency' else '로지스틱'})")
+
+    if not sig:
+        add("정상", "특이 위험 신호 없음", "탐지 룰 임계 미달 — 현재 결정론 위험 신호 없음")
+
+    sig.sort(key=lambda x: _LEVEL_RANK[x["level"]], reverse=True)
+    return sig
+
+
+# ---------------------------------------------------------------------------
 # 진입점
 # ---------------------------------------------------------------------------
 def compute_global_macro(force: bool = False) -> dict:
@@ -431,6 +510,7 @@ def compute_global_macro(force: bool = False) -> dict:
     prob = _prob_frequency(composite) or _prob_deterministic(scores)
     kr_sectors = _kr_sectors(scores)
     kr_sector_matrix = _kr_sector_matrix(scores)
+    risk_signals = _risk_signals(scores, mkt, pred, prob)
 
     result = {
         "asof": datetime.now().isoformat(timespec="seconds"),
@@ -440,6 +520,7 @@ def compute_global_macro(force: bool = False) -> dict:
         "probabilities": prob,
         "kr_sectors": kr_sectors,
         "kr_sector_matrix": kr_sector_matrix,
+        "risk_signals": risk_signals,
         "inputs": {
             "prediction": pred,
             "market": mkt,

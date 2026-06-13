@@ -5729,6 +5729,36 @@ def admin_market_compass(force: int = 0, ai: int = 1, user=Depends(require_admin
         raise HTTPException(status_code=502, detail=f"시장 나침반 계산 실패: {exc}") from exc
 
 
+@app.get("/api/admin/global-macro/history")
+def admin_global_macro_history(days: int = 180, user=Depends(require_admin)):
+    """글로벌 투자심리 8점수 + composite 일별 시계열 (MacroSentimentDaily) — 일봉 로그 차트용.
+
+    매일 06:00 fundamentals_sync 가 1행씩 누적 → 기간이 쌓일수록 채워진다.
+    실데이터만 반환(시드 없음) — 행이 적으면 그대로 적게 반환.
+    """
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    days = max(1, min(int(days or 180), 1000))
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        rows = db.execute(
+            select(models.MacroSentimentDaily)
+            .order_by(models.MacroSentimentDaily.trade_date.asc())
+        ).scalars().all()
+    finally:
+        db.close()
+    rows = rows[-days:]
+    keys = ["composite", "liquidity", "growth", "inflation", "ai_cycle",
+            "geopolitics", "risk_appetite", "us_equity", "kr_equity"]
+    series = []
+    for r in rows:
+        item: dict = {"date": r.trade_date.isoformat(), "flow": r.flow}
+        for k in keys:
+            item[k] = getattr(r, k)
+        series.append(item)
+    return {"keys": keys, "count": len(series), "series": series}
+
+
 @app.get("/api/admin/mtf-analysis")
 def admin_mtf_analysis(code: str, user=Depends(require_admin)):
     """멀티 타임프레임 차트 분석 (시장 나침반 8단계) — 월/주/일/60분/15분.

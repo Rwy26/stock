@@ -226,6 +226,15 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         vkospi_note += f" news(FAIL {type(exc).__name__})"
 
+    # 경제지표 컨센서스 자동 갱신 (ForexFactory 피드) — 매크로 점수 산출 전에 먼저 갱신
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import econ_consensus_sync
+        cres = econ_consensus_sync.sync_consensus()
+        vkospi_note += f" consensus(+{cres.get('matched', 0)})"
+    except Exception as exc:  # noqa: BLE001
+        vkospi_note += f" consensus(FAIL {type(exc).__name__})"
+
     # 글로벌 매크로 투자심리 지수 (스펙 §5 — 06:00 체인 합류, 실패해도 본 동기화는 계속)
     try:
         vkospi_note += " " + _sync_global_macro(now)

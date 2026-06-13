@@ -86,16 +86,17 @@ def _vkospi_context() -> dict:
     return out
 
 
-def _stage0_global_sentiment() -> dict:
+def _stage0_global_sentiment(force: bool = False) -> dict:
     """[0단계] 글로벌 투자심리 (스펙 §4.2) — 국내 regime 판정에 선행.
 
     global_macro.compute_global_macro() 의 8점수·composite·flow·확률·한국섹터를 그대로 싣는다.
+    force 면 글로벌 레이어도 재계산(시장 재분석 버튼이 글로벌까지 갱신하도록 전파).
     엔진 실패 시 {available: False} 로 fail-soft — market_compass 본체는 정상 동작(회귀 없음).
     """
     try:
         import global_macro
 
-        g = global_macro.compute_global_macro()
+        g = global_macro.compute_global_macro(force=force)
         return {
             "available": True,
             "scores": g.get("scores", {}),
@@ -104,6 +105,7 @@ def _stage0_global_sentiment() -> dict:
             "probabilities": g.get("probabilities"),
             "krSectors": g.get("kr_sectors"),
             "krSectorMatrix": g.get("kr_sector_matrix"),
+            "riskSignals": g.get("risk_signals"),
             "evidence": g.get("evidence"),
             "asof": g.get("asof"),
         }
@@ -421,7 +423,7 @@ def compute_market_compass(force: bool = False, with_ai: bool = True) -> dict:
     macro = rotation.get("macroDetail", {})
     vkospi = _vkospi_context()
 
-    global_sent = _stage0_global_sentiment()
+    global_sent = _stage0_global_sentiment(force=force)
     regime = _stage1_market_regime(macro, vkospi, sectors, global_sent)
     macro_map = _stage2_macro_map(
         macro, global_sent.get("scores") if global_sent.get("available") else None

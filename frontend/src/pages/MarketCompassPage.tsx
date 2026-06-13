@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { fetchJson } from '../lib/api'
+import { GlobalMacroCharts } from '../components/GlobalMacroCharts'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -10,6 +11,13 @@ interface RankRow {
   rank: number; sector: string; score: number; lifecycle?: string; intradayPct?: number
 }
 interface ProbBand { up: number; down: number }
+interface MatrixCell { weight: number; value: number; rawScore: number | null; inverse: boolean; contribution: number }
+interface KrSectorMatrix {
+  factors: string[]
+  factorLabels: Record<string, string>
+  sectors: string[]
+  cells: Record<string, Record<string, MatrixCell>>
+}
 interface GlobalSentiment {
   available: boolean
   scores?: Record<string, number>
@@ -17,6 +25,8 @@ interface GlobalSentiment {
   flow?: string | null
   probabilities?: { method?: string; n?: number | null } & Record<string, ProbBand | string | number | null>
   krSectors?: Record<string, number>
+  krSectorMatrix?: KrSectorMatrix
+  riskSignals?: Array<{ level: string; title: string; detail: string }>
   evidence?: Record<string, string[]>
   asof?: string
   error?: string
@@ -110,6 +120,11 @@ const SCORE_ORDER = ['risk_appetite', 'liquidity', 'ai_cycle', 'growth', 'inflat
 // 점수↑ = 우호(물가안정·지정학완화 포함 부호 일관) → 60↑ 강세, 40↓ 약세
 const scoreColor = (v: number) => (v >= 60 ? '#34d399' : v >= 40 ? '#fbbf24' : '#f87171')
 
+// 위험 신호 레벨 색상
+const RISK_COLOR: Record<string, string> = {
+  위험: '#f87171', 경고: '#fb923c', 주의: '#facc15', 정상: '#34d399',
+}
+
 function ScoreBar({ k, v, evidence }: { k: string; v: number; evidence?: string[] }) {
   return (
     <div title={evidence?.join('\n')} style={{ marginBottom: 7, cursor: evidence?.length ? 'help' : 'default' }}>
@@ -183,12 +198,38 @@ function GlobalSentimentPanel({ g }: { g: GlobalSentiment }) {
         </div>
       </div>
 
-      {/* 한국 7섹터 매핑 */}
+      {/* 위험 신호 — 결정론 탐지 (수집 데이터 기반, 근거 동반) */}
+      {g.riskSignals && g.riskSignals.length > 0 && (
+        <>
+          <div style={{ height: 1, background: 'rgba(255,255,255,0.08)', margin: '12px 0 10px' }} />
+          <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>⚠️ 위험 신호 (결정론 탐지)</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {g.riskSignals.map((r, i) => {
+              const c = RISK_COLOR[r.level] ?? '#94a3b8'
+              return (
+                <div key={i} style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', borderRadius: 8,
+                  background: `${c}14`, border: `1px solid ${c}44`,
+                }}>
+                  <span style={{
+                    flexShrink: 0, fontSize: 11, fontWeight: 700, color: '#0b1120', background: c,
+                    borderRadius: 5, padding: '2px 7px', minWidth: 34, textAlign: 'center',
+                  }}>{r.level}</span>
+                  <span style={{ fontSize: 12.5, color: '#f1f5f9', fontWeight: 600 }}>{r.title}</span>
+                  <span style={{ fontSize: 12, color: 'rgba(241,245,249,0.6)' }}>— {r.detail}</span>
+                </div>
+              )
+            })}
+          </div>
+        </>
+      )}
+
+      {/* 한국 7섹터 매핑 — 요약 칩 + 펙터×섹터 매트릭스 */}
       {g.krSectors && (
         <>
           <div style={{ height: 1, background: 'rgba(255,255,255,0.08)', margin: '12px 0 10px' }} />
-          <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>글로벌 → 한국 섹터 영향</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>글로벌 → 한국 섹터 영향 (종합 점수)</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
             {Object.entries(g.krSectors).sort((a, b) => b[1] - a[1]).map(([sec, v]) => (
               <span key={sec} style={{
                 padding: '4px 10px', borderRadius: 99, fontSize: 12.5,
@@ -198,12 +239,74 @@ function GlobalSentimentPanel({ g }: { g: GlobalSentiment }) {
               </span>
             ))}
           </div>
+          {g.krSectorMatrix && <KrSectorHeatmap m={g.krSectorMatrix} />}
         </>
       )}
       <p style={{ fontSize: 11, color: '#475569', margin: '10px 0 0' }}>
         점수 50=중립 · 높을수록 우호(물가안정·지정학완화 포함) · 점수에 마우스를 올리면 원천 근거 표시
       </p>
     </div>
+  )
+}
+
+// ─── 글로벌 펙터 × 한국 섹터 영향 매트릭스 히트맵 ──────────────────────────────
+
+function KrSectorHeatmap({ m }: { m: KrSectorMatrix }) {
+  // 셀 배경: 유효값(역수 반영, 50=중립) 기준 색 + weight 로 불투명도
+  const cellBg = (c: MatrixCell) => {
+    const base = c.value >= 60 ? '52,211,153' : c.value >= 40 ? '251,191,36' : '248,113,113'
+    const op = 0.18 + c.weight * 0.55   // 가중치 클수록 진하게
+    return `rgba(${base},${op.toFixed(2)})`
+  }
+  const cols = `120px repeat(${m.sectors.length}, 1fr)`
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 3, minWidth: 560 }}>
+        {/* 헤더 행 */}
+        <div style={{ fontSize: 11, color: '#64748b', alignSelf: 'end', padding: '0 4px 4px' }}>펙터 ＼ 섹터</div>
+        {m.sectors.map(sec => (
+          <div key={sec} style={{ fontSize: 11.5, color: 'rgba(241,245,249,0.8)', textAlign: 'center', padding: '0 2px 4px', fontWeight: 600 }}>
+            {sec}
+          </div>
+        ))}
+        {/* 펙터 행들 */}
+        {m.factors.map(f => (
+          <Row key={f} f={f} m={m} cellBg={cellBg} />
+        ))}
+      </div>
+      <p style={{ fontSize: 11, color: '#475569', margin: '8px 0 0' }}>
+        셀 = 해당 펙터가 그 섹터에 미친 <b>유효값</b>(50=중립, 진할수록 가중치 큼) · ‘역수’는 지정학 리스크↑가 방산·조선 수혜로 반전됨 · 셀에 마우스 올리면 계산식
+      </p>
+    </div>
+  )
+}
+
+function Row({ f, m, cellBg }: { f: string; m: KrSectorMatrix; cellBg: (c: MatrixCell) => string }) {
+  return (
+    <>
+      <div style={{ fontSize: 12, color: 'rgba(241,245,249,0.75)', display: 'flex', alignItems: 'center', padding: '0 4px' }}>
+        {m.factorLabels[f] ?? f}
+      </div>
+      {m.sectors.map(sec => {
+        const c = m.cells[sec]?.[f]
+        if (!c) {
+          return <div key={sec} style={{ borderRadius: 6, minHeight: 34, background: 'rgba(255,255,255,0.02)' }} />
+        }
+        const tip = `${m.factorLabels[f] ?? f} ${c.rawScore ?? 'N/A'}`
+          + (c.inverse ? ` → 역수 ${c.value}` : '')
+          + ` × 가중 ${c.weight} = 섹터 기여 ${c.contribution}`
+        return (
+          <div key={sec} title={tip} style={{
+            borderRadius: 6, minHeight: 34, display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center', cursor: 'help',
+            background: cellBg(c), border: '1px solid rgba(255,255,255,0.06)',
+          }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: '#0b1120' }}>{c.value}</span>
+            <span style={{ fontSize: 9, color: 'rgba(11,17,32,0.7)' }}>×{c.weight}{c.inverse ? ' 역' : ''}</span>
+          </div>
+        )
+      })}
+    </>
   )
 }
 
@@ -280,6 +383,7 @@ export function MarketCompassPage() {
       {market && (
         <>
           {market.globalSentiment && <GlobalSentimentPanel g={market.globalSentiment} />}
+          {market.globalSentiment?.available && <GlobalMacroCharts />}
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
             <div style={panel}>
