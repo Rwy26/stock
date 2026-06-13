@@ -43,12 +43,28 @@ interface CrossvalDataNature {
   crossval?: string
   blockers?: string[]
 }
-interface CrossvalIntake { stored: boolean; folder?: string; reason?: string; sha256?: string }
+interface CrossvalIntake { stored: boolean; folder?: string; reason?: string; sha256?: string; timeframe?: string }
+interface CrossvalExisting { found: boolean; file_count?: number; last_uploaded?: string; files?: string[] }
+interface CrossvalTf { rows: number; first: string; last: string; files: number; added_this_run: number }
+interface CrossvalMerge {
+  ok: boolean; timeframes?: Record<string, CrossvalTf>
+  total_rows?: number; file_count?: number; last_close?: number; last_data_at?: string; added_this_run?: number
+}
 interface CrossvalInfo {
+  existing_data?: CrossvalExisting
   intake?: CrossvalIntake | CrossvalIntake[]
   data_nature?: CrossvalDataNature
+  merge?: CrossvalMerge
   reference_only?: boolean
 }
+
+// 데이터 작업 요구 (요구 6)
+interface WorkRequest {
+  stock_code: string; stock_name?: string
+  priority: 'high' | 'medium' | 'low'
+  reason: string; total_rows: number; last_data_at?: string | null; suggested_action: string
+}
+interface WorkRequestsResp { watchlist_total: number; covered: number; request_count: number; requests: WorkRequest[] }
 
 interface AnalysisResponse {
   symbol: string
@@ -147,6 +163,21 @@ function CrossvalBadge({ info }: { info: CrossvalInfo }) {
               {!isCsv && <span> (수치 교차검증 불가 — 참고 증거 보관)</span>}</>
           : <>⚠️ 적재 안 됨{intakes[0]?.reason ? `: ${intakes[0].reason}` : ' (교차검증 드라이브 확인)'}</>}
       </div>
+
+      {info.existing_data?.found && (
+        <div style={{ fontSize: '0.78rem', color: '#60a5fa' }}>
+          📁 과거 자료 {info.existing_data.file_count}건 발견 (최근 {info.existing_data.last_uploaded}) → 같은 종목 폴더에서 병합
+        </div>
+      )}
+      {info.merge?.ok && (
+        <div style={{ fontSize: '0.78rem', color: 'var(--text-soft)', lineHeight: 1.6 }}>
+          🔗 병합·업데이트: 총 <strong style={{ color: 'var(--text-main)' }}>{info.merge.total_rows?.toLocaleString()}봉</strong>
+          {(info.merge.added_this_run ?? 0) > 0 && <span style={{ color: '#22c55e' }}> (이번 +{info.merge.added_this_run?.toLocaleString()})</span>}
+          {' · '}TF {Object.keys(info.merge.timeframes ?? {}).join(', ') || '—'}
+          {info.merge.last_close != null && <> · 최신종가 {info.merge.last_close.toLocaleString()}원</>}
+          <span style={{ marginLeft: 6, opacity: 0.7 }}>· 인덱스/노드 DB 갱신됨</span>
+        </div>
+      )}
 
       {isCsv && nat && (
         <>
@@ -573,6 +604,9 @@ export function AiChartPage() {
   const [devSug, setDevSug] = useState<DevResponse | null>(null)
   const [devRunning, setDevRunning] = useState(false)
   const [devErr, setDevErr] = useState<string | null>(null)
+  const [workReqs, setWorkReqs] = useState<WorkRequestsResp | null>(null)
+  const [workRunning, setWorkRunning] = useState(false)
+  const [workErr, setWorkErr] = useState<string | null>(null)
 
   const providerPrefixes: Record<string, string> = { openai: 'sk-', gemini: '', groq: 'gsk_' }
   const providerHints: Record<string, string> = {
@@ -631,6 +665,25 @@ export function AiChartPage() {
     } finally {
       setDevRunning(false)
     }
+  }
+
+  async function loadWorkRequests() {
+    setWorkRunning(true); setWorkErr(null)
+    try {
+      const data = await fetchJson<WorkRequestsResp>('/api/ai/crossval/work-requests')
+      setWorkReqs(data)
+    } catch (err: unknown) {
+      setWorkErr(err instanceof Error ? err.message : String(err))
+    } finally {
+      setWorkRunning(false)
+    }
+  }
+
+  // 작업 요구 클릭 → 해당 종목 코드 채우고 드롭 모드로 (바로 CSV 업로드 가능)
+  function pickWorkRequest(code: string) {
+    setMode('drop'); setSymbol(code); setSymbolAutoDetected(true)
+    setWorkReqs(null)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   async function exportOnePager() {
@@ -808,6 +861,11 @@ export function AiChartPage() {
           title="적재된 교차검증 코퍼스로 언어학습 발전 가능성 제시">
           {devRunning ? '⏳ 분석 중...' : '🧠 발전 가능성'}
         </button>
+        <button type="button" className="ai-key-settings-btn" style={{ marginLeft: 8 }}
+          onClick={loadWorkRequests} disabled={workRunning}
+          title="관심종목 중 데이터 부족 종목 작업 요구">
+          {workRunning ? '⏳ 조회 중...' : '📋 작업 요구'}
+        </button>
       </header>
 
       {diagSteps !== null && (
@@ -878,6 +936,48 @@ export function AiChartPage() {
                   </ul>
                 </div>
               )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {(workReqs || workErr) && (
+        <div className="ai-diag-panel panel glass">
+          <div className="ai-key-panel-head">
+            <span>📋 데이터 작업 요구 — 관심종목 커버리지</span>
+            <button type="button" className="ai-key-close"
+              onClick={() => { setWorkReqs(null); setWorkErr(null) }}>✕</button>
+          </div>
+          {workErr ? (
+            <p className="ai-key-msg err">❌ {workErr}</p>
+          ) : workReqs && (
+            <div style={{ display: 'grid', gap: 10, padding: '4px 2px' }}>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-soft)' }}>
+                관심종목 {workReqs.watchlist_total}개 중 <strong style={{ color: '#22c55e' }}>{workReqs.covered}개 충분</strong>,
+                <strong style={{ color: '#f59e0b' }}> {workReqs.request_count}개 데이터 필요</strong>
+                <span style={{ marginLeft: 6, opacity: 0.7 }}>· 클릭하면 종목코드 자동 입력 → CSV 업로드</span>
+              </div>
+              <div style={{ display: 'grid', gap: 6, maxHeight: 380, overflowY: 'auto' }}>
+                {workReqs.requests.map((r) => {
+                  const pc = r.priority === 'high' ? '#ef4444' : r.priority === 'medium' ? '#f59e0b' : '#94a3b8'
+                  const pl = r.priority === 'high' ? '없음' : r.priority === 'medium' ? '부족' : '보완'
+                  return (
+                    <button type="button" key={r.stock_code} onClick={() => pickWorkRequest(r.stock_code)}
+                      style={{ display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
+                        padding: '8px 12px', borderRadius: 10, cursor: 'pointer',
+                        background: 'rgba(255,255,255,0.04)', border: `1px solid ${pc}44`, color: 'var(--text-main)' }}>
+                      <span style={{ fontSize: '0.7rem', padding: '1px 8px', borderRadius: 999,
+                        background: pc + '22', color: pc, border: `1px solid ${pc}66`, flexShrink: 0 }}>{pl}</span>
+                      <span style={{ fontWeight: 700, minWidth: 64 }}>{r.stock_code}</span>
+                      <span style={{ flex: 1, fontSize: '0.84rem' }}>{r.stock_name ?? ''}</span>
+                      <span style={{ fontSize: '0.76rem', color: 'var(--text-soft)' }}>{r.reason} · {r.suggested_action}</span>
+                    </button>
+                  )
+                })}
+                {workReqs.requests.length === 0 && (
+                  <div style={{ fontSize: '0.85rem', color: '#22c55e', padding: 8 }}>✅ 모든 관심종목 데이터 충분</div>
+                )}
+              </div>
             </div>
           )}
         </div>

@@ -3134,16 +3134,14 @@ def search_stocks(
         foreign_qty = max(_to_int(getattr(flow_row, "foreign_net_qty", 0)), 0)
         inst_qty = max(_to_int(getattr(flow_row, "inst_net_qty", 0)), 0)
         net_buy_qty = foreign_qty + inst_qty
-        if net_buy_qty >= 2_000_000:
+        if net_buy_qty >= 1_500_000:
             score += 20
-        elif net_buy_qty >= 800_000:
+        elif net_buy_qty >= 700_000:
             score += 16
-        elif net_buy_qty >= 300_000:
+        elif net_buy_qty >= 250_000:
             score += 12
-        elif net_buy_qty >= 100_000:
+        elif net_buy_qty >= 80_000:
             score += 8
-        elif net_buy_qty >= 30_000:
-            score += 4
 
         volume = max(_to_int(getattr(quote, "volume", 0)), 1)
         net_buy_ratio = net_buy_qty / volume
@@ -4916,13 +4914,25 @@ async def ai_chart_analysis_upload(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"분석 중 오류 발생: {exc}") from exc
 
-    # ── 교차검증 창구: 원본 CSV 적재(증거보존) + 데이터 성격 분석 ──────────────
-    # best-effort — 적재 실패는 분석 응답에 영향 없음. 참고용이며 거래 판단 반영 안 함.
+    # ── 교차검증 창구: 종목별 적재 → 과거자료 확인 → 병합·업데이트 → 인덱스/노드 DB저장 ──
+    # best-effort — 실패는 분석 응답에 영향 없음. 참고용이며 거래 판단 반영 안 함.
     if _crossval_intake is not None and isinstance(result, dict):
         try:
+            sym = symbol.strip()
+            existing = _crossval_intake.existing_data(sym)          # (2) 과거 자료 확인
+            intake = _crossval_intake.save_csv(sym, file.filename or "chart.csv", raw)  # (1) 종목 폴더 적재
+            nature = _crossval_intake.analyze_csv_nature(raw, file.filename or "")       # (3 성격)
+            merge = _crossval_intake.merge_symbol(sym)              # (3) 병합 + (4) 인덱스/노드
+            if isinstance(merge, dict) and merge.get("ok"):
+                _upsert_crossval_corpus(sym, merge)                # (5) 공유 DB 저장
             result["crossval"] = {
-                "intake": _crossval_intake.save_csv(symbol.strip(), file.filename or "chart.csv", raw),
-                "data_nature": _crossval_intake.analyze_csv_nature(raw, file.filename or ""),
+                "existing_data": existing,
+                "intake": intake,
+                "data_nature": nature,
+                "merge": {k: merge.get(k) for k in
+                          ("ok", "timeframes", "total_rows", "file_count",
+                           "last_close", "last_data_at", "added_this_run")}
+                         if isinstance(merge, dict) else {"ok": False},
                 "reference_only": True,
             }
         except Exception:
@@ -5205,6 +5215,123 @@ def ai_crossval_dev_suggestions(_current_user=Depends(require_admin)):
         raise HTTPException(status_code=500, detail=f"발전 제안 생성 중 오류: {exc}") from exc
     return {"corpus": stats, "suggestions": suggestions,
             "provider": provider, "model": model}
+
+
+# 데이터 부족 판정 임계치 (요구 6)
+_CROSSVAL_MIN_ROWS = 500       # 이 미만이면 데이터 부족
+_CROSSVAL_STALE_DAYS = 30      # 최신 봉이 이보다 오래되면 갱신 필요
+
+
+def _upsert_crossval_corpus(symbol: str, merge: dict) -> None:
+    """병합 결과의 인덱스/노드를 crossval_corpus 테이블에 UPSERT (모든 세션 공유)."""
+    if apollo_db is None or models is None:
+        return
+    node = merge.get("node") or {}
+    last_dt = None
+    raw_last = merge.get("last_data_at")
+    if raw_last:
+        try:
+            last_dt = datetime.strptime(raw_last, "%Y-%m-%d %H:%M")
+        except Exception:
+            last_dt = None
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        name = db.execute(
+            select(models.Stock.name).where(models.Stock.code == symbol)
+        ).scalar_one_or_none()
+        row = db.get(models.CrossvalCorpus, symbol)
+        if row is None:
+            row = models.CrossvalCorpus(stock_code=symbol)
+            db.add(row)
+        row.stock_name = name or row.stock_name
+        node["name"] = name or node.get("name")
+        row.timeframes = merge.get("timeframes")
+        row.total_rows = int(merge.get("total_rows") or 0)
+        row.file_count = int(merge.get("file_count") or 0)
+        row.last_close = merge.get("last_close")
+        row.last_data_at = last_dt
+        row.node_json = node
+        db.commit()
+    finally:
+        db.close()
+
+
+@app.get("/api/ai/crossval/corpus-index")
+def ai_crossval_corpus_index(_current_user=Depends(require_admin)):
+    """교차검증 코퍼스 인덱스 + 노드 (DB, 모든 세션 공유). 요구 4·5."""
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        rows = db.execute(
+            select(models.CrossvalCorpus).order_by(models.CrossvalCorpus.total_rows.desc())
+        ).scalars().all()
+        index = [{
+            "stock_code": r.stock_code, "stock_name": r.stock_name,
+            "timeframes": r.timeframes, "total_rows": r.total_rows,
+            "file_count": r.file_count, "last_close": r.last_close,
+            "last_data_at": r.last_data_at.isoformat() if r.last_data_at else None,
+            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+        } for r in rows]
+        nodes = [r.node_json for r in rows if r.node_json]
+        return {"count": len(index), "index": index, "nodes": nodes}
+    finally:
+        db.close()
+
+
+@app.get("/api/ai/crossval/work-requests")
+def ai_crossval_work_requests(_current_user=Depends(require_admin)):
+    """관심종목 vs 코퍼스 인덱스 비교 → 데이터 부족 종목 작업 요구. 요구 6.
+
+    AI 종목 분석 페이지 패널 + 관리자 페이지 섹션이 함께 소비.
+    """
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        # 관심종목(전 사용자 distinct) + 이름
+        wl = db.execute(
+            select(models.Watchlist.stock_code, models.Stock.name)
+            .join(models.Stock, models.Stock.code == models.Watchlist.stock_code)
+            .distinct()
+        ).all()
+        corpus = {r.stock_code: r for r in db.execute(select(models.CrossvalCorpus)).scalars().all()}
+        now = datetime.utcnow()
+
+        requests: list[dict] = []
+        covered = 0
+        for code, name in wl:
+            r = corpus.get(code)
+            if r is None or (r.total_rows or 0) == 0:
+                requests.append({"stock_code": code, "stock_name": name, "priority": "high",
+                                 "reason": "데이터 없음", "total_rows": 0, "last_data_at": None,
+                                 "suggested_action": "TradingView CSV 업로드"})
+                continue
+            rows = r.total_rows or 0
+            stale = r.last_data_at is not None and (now - r.last_data_at).days > _CROSSVAL_STALE_DAYS
+            tf_count = len(r.timeframes or {})
+            last_iso = r.last_data_at.isoformat() if r.last_data_at else None
+            if rows < _CROSSVAL_MIN_ROWS:
+                requests.append({"stock_code": code, "stock_name": name, "priority": "medium",
+                                 "reason": f"데이터 부족 ({rows}봉 < {_CROSSVAL_MIN_ROWS})",
+                                 "total_rows": rows, "last_data_at": last_iso,
+                                 "suggested_action": "장기 타임프레임 CSV 추가"})
+            elif stale:
+                requests.append({"stock_code": code, "stock_name": name, "priority": "medium",
+                                 "reason": f"데이터 오래됨 (최신 {last_iso})",
+                                 "total_rows": rows, "last_data_at": last_iso,
+                                 "suggested_action": "최신 CSV 업로드"})
+            elif tf_count < 2:
+                requests.append({"stock_code": code, "stock_name": name, "priority": "low",
+                                 "reason": f"단일 타임프레임 ({tf_count}종)",
+                                 "total_rows": rows, "last_data_at": last_iso,
+                                 "suggested_action": "다른 타임프레임 CSV 추가"})
+            else:
+                covered += 1
+        order = {"high": 0, "medium": 1, "low": 2}
+        requests.sort(key=lambda x: order.get(x["priority"], 9))
+        return {
+            "watchlist_total": len(wl), "covered": covered,
+            "request_count": len(requests), "requests": requests,
+        }
+    finally:
+        db.close()
 
 
 # ─── AI 분석 캐시 API ─────────────────────────────────────────────────────────

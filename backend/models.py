@@ -305,6 +305,28 @@ class AiAnalysisCache(Base):
     image_hashes: Mapped[list | None] = mapped_column(JSON, nullable=True)          # 이미지 SHA-256 해시 목록
 
 
+class CrossvalCorpus(Base):
+    """교차검증 코퍼스 인덱스·노드 — 모든 세션 공동 사용 공유 저장소.
+
+    참고용 메타데이터(커버리지 인덱스 + 결정론 노드 메트릭)만 보관한다.
+    원본 CSV·병합 시계열(parquet)은 D:\\개인연구용 데이터\\교차검증 에 있고,
+    이 테이블은 그 요약/색인일 뿐 — 거래 판단에 반영하지 않는다(reference-only).
+    종목당 1행, 업로드/병합 시 UPSERT.
+    """
+
+    __tablename__ = "crossval_corpus"
+
+    stock_code: Mapped[str] = mapped_column(String(20), primary_key=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    timeframes: Mapped[dict | None] = mapped_column(JSON, nullable=True)   # 인덱스: {tf: {rows, first, last, files}}
+    total_rows: Mapped[int] = mapped_column(Integer, default=0)
+    file_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_data_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 최신 봉 시각
+    node_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)    # 추출 노드(결정론 메트릭)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class PublicVisitor(Base):
     """공개(게스트) 페이지 진입 기록.
 

@@ -93,6 +93,22 @@ type PendingItem = {
   priority: 'high' | 'medium' | 'low'
 }
 
+type CrossvalWorkItem = {
+  stock_code: string
+  stock_name?: string
+  priority: 'high' | 'medium' | 'low'
+  reason: string
+  total_rows: number
+  last_data_at?: string | null
+  suggested_action: string
+}
+type CrossvalWorkResp = {
+  watchlist_total: number
+  covered: number
+  request_count: number
+  requests: CrossvalWorkItem[]
+}
+
 type StockValidationResult = {
   ok: boolean
   kisLinked: boolean
@@ -172,6 +188,7 @@ export function AdminPage() {
 
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null)
   const [pendingItems, setPendingItems] = useState<PendingItem[] | null>(null)
+  const [crossvalWork, setCrossvalWork] = useState<CrossvalWorkResp | null>(null)
   const [sysLoading, setSysLoading] = useState(true)
 
   const isAdminOnlyMessage = useMemo(() => {
@@ -182,12 +199,14 @@ export function AdminPage() {
   const loadSystemInfo = async () => {
     setSysLoading(true)
     try {
-      const [statusRes, pendingRes] = await Promise.all([
+      const [statusRes, pendingRes, crossvalRes] = await Promise.all([
         fetchJson<SystemStatus>('/api/admin/system-status'),
         fetchJson<{ items: PendingItem[] }>('/api/admin/pending-items'),
+        fetchJson<CrossvalWorkResp>('/api/ai/crossval/work-requests').catch(() => null),
       ])
       setSystemStatus(statusRes)
       setPendingItems(pendingRes.items)
+      setCrossvalWork(crossvalRes)
     } catch {
       // main error state handles auth failures
     } finally {
@@ -458,6 +477,50 @@ export function AdminPage() {
               </tbody>
             </table>
           </div>
+        )}
+      </section>
+
+      <section className="panel glass reveal">
+        <div className="panel-head">
+          <h3>교차검증 데이터 커버리지 · 작업 요구</h3>
+          {sysLoading ? <div className="hint">불러오는 중…</div> : null}
+        </div>
+        {crossvalWork ? (
+          <>
+            <p className="hint" style={{ marginTop: 0 }}>
+              관심종목 {crossvalWork.watchlist_total}개 중 <strong>{crossvalWork.covered}개</strong> 데이터 충분 ·
+              <strong> {crossvalWork.request_count}개</strong> CSV 업로드 필요
+              (AI 종목 분석 페이지에서 업로드)
+            </p>
+            {crossvalWork.request_count === 0 ? (
+              <p className="hint">✅ 모든 관심종목의 교차검증 데이터가 충분합니다.</p>
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>우선순위</th><th>종목</th><th>종목명</th><th>사유</th><th>권장 작업</th></tr>
+                  </thead>
+                  <tbody>
+                    {crossvalWork.requests.map((r) => (
+                      <tr key={r.stock_code}>
+                        <td>
+                          <StatusChip on={r.priority === 'high' ? false : undefined}>
+                            {r.priority === 'high' ? '없음' : r.priority === 'medium' ? '부족' : '보완'}
+                          </StatusChip>
+                        </td>
+                        <td>{r.stock_code}</td>
+                        <td>{r.stock_name ?? ''}</td>
+                        <td className="hint">{r.reason}</td>
+                        <td className="hint">{r.suggested_action}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        ) : (
+          !sysLoading && <p className="hint">교차검증 코퍼스 정보를 불러올 수 없습니다 (드라이브/모듈 확인).</p>
         )}
       </section>
 

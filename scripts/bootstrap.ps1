@@ -150,7 +150,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Output "Installing backend deps..."
 Invoke-NativeOrThrow $pythonExe @('-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel') "Failed to upgrade pip tooling"
-Invoke-NativeOrThrow $pythonExe @('-m', 'pip', 'install', 'fastapi', 'uvicorn[standard]', 'sqlalchemy', 'pymysql', 'python-dotenv', 'cryptography', 'passlib', 'PyJWT', 'httpx', 'websocket-client') "Failed to install backend dependencies"
+Invoke-NativeOrThrow $pythonExe @('-m', 'pip', 'install', 'fastapi', 'uvicorn[standard]', 'sqlalchemy', 'pymysql', 'python-dotenv', 'cryptography', 'passlib', 'PyJWT', 'httpx', 'websocket-client', 'pandas', 'pyarrow') "Failed to install backend dependencies"
 
 # 4) Minimal backend app file (idempotent)
 $mainPath = Join-Path $PWD "backend\main.py"
