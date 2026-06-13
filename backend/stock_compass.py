@@ -434,6 +434,8 @@ def _save_history(result: dict) -> None:
         "aiReport": result.get("aiReport"),
         "aiProvider": result.get("aiProvider"),
     }
+    if result.get("etfHoldings"):
+        payload["etfHoldings"] = result["etfHoldings"]
 
     session = db.get_session_factory()()
     try:
