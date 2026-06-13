@@ -185,7 +185,7 @@ const TIER_STYLE: Record<string, { bg: string; fg: string }> = {
 
 function GapSignalPanel() {
   const [data, setData] = useState<GapSignalResponse | null>(null)
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const load = () => {
@@ -197,8 +197,14 @@ function GapSignalPanel() {
       .finally(() => setLoading(false))
   }
 
+  // 초기 로드 — 효과 내 동기 setState 회피(비동기 콜백에서만 갱신)
   useEffect(() => {
-    load()
+    let cancelled = false
+    fetchJson<GapSignalResponse>('/api/recommendations/gap-signal')
+      .then((r) => { if (!cancelled) setData(r) })
+      .catch((e) => { if (!cancelled) setError(String(e)) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
   }, [])
 
   const items = data?.items ?? []
