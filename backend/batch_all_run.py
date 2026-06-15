@@ -1,6 +1,20 @@
 """전 종목 최신 규칙 재분석 (닷컴 포지션 연결 + Volume Profile + A/B/C 레벨 등)."""
 import sys, os, time
 sys.stdout.reconfigure(encoding='utf-8')
+
+from datetime import datetime
+
+def _is_market_hours() -> bool:
+    now = datetime.now()
+    if now.weekday() >= 5:
+        return False
+    t = now.hour * 60 + now.minute
+    return 9 * 60 <= t < 15 * 60 + 30
+
+if _is_market_hours():
+    print("[영웅문4 최우선] 장중 실행 차단 — 15:30 이후 재실행하십시오.")
+    sys.exit(0)
+
 sys.path.insert(0, '.')
 from dotenv import load_dotenv
 load_dotenv('.env')
