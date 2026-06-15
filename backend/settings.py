@@ -80,7 +80,7 @@ class Settings:
 
     # Google Gemini (무료 티어 – aistudio.google.com에서 발급)
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "").strip()
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash").strip() or "gemini-3.5-flash"
 
     # Groq (무료 티어 – console.groq.com에서 발급)
     groq_api_key: str = os.getenv("GROQ_API_KEY", "").strip()

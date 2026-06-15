@@ -513,11 +513,14 @@ def gemini_analyze(
     indicators: dict[str, Any],
     *,
     api_key: str,
-    model: str = "gemini-2.5-flash",
+    model: str | None = None,
     timeout_seconds: float = 60.0,
     extra_note: str | None = None,
 ) -> dict[str, Any]:
     """Call Google Gemini API (free tier) and parse the JSON response."""
+    if model is None:
+        from settings import settings as _s
+        model = _s.gemini_model
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not configured")
 
