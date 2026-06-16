@@ -5383,15 +5383,17 @@ async def ai_chart_analysis_image(
         except Exception:
             pass
 
-    # ── 종목명 주입: 프론트 헤더(로고+이름) 표시용 — stocks 테이블 우선, 캐시/결과 폴백 ──
+    # ── 종목명 주입: 프론트 헤더(로고+이름) 표시용 ──
+    # 우선순위: stocks 테이블(관심종목) → FDR 전체 KRX(임의 종목) → AI가 차트에서 읽은 이름
     if isinstance(result, dict) and not result.get("stock_name"):
         sname = None
+        code_q = symbol.strip()
         if apollo_db is not None and models is not None:
             try:
                 db_n: Session = apollo_db.get_session_factory()()
                 try:
                     srow = db_n.execute(
-                        select(models.Stock).where(models.Stock.code == symbol.strip())
+                        select(models.Stock).where(models.Stock.code == code_q)
                     ).scalar_one_or_none()
                     if srow:
                         sname = srow.name
@@ -5399,6 +5401,21 @@ async def ai_chart_analysis_image(
                     db_n.close()
             except Exception:
                 pass
+        # FDR 전체 KRX에서 코드로 이름 조회 (관심종목 외 임의 종목 대응)
+        if not sname and code_q.isdigit() and len(code_q) == 6:
+            try:
+                import FinanceDataReader as fdr
+                df = fdr.StockListing("KRX")
+                hit = df[df["Code"].astype(str).str.zfill(6) == code_q]
+                if not hit.empty:
+                    sname = str(hit.iloc[0]["Name"])
+            except Exception:
+                pass
+        # AI가 차트에서 읽은 종목명 폴백 (코드가 아니면)
+        if not sname:
+            ai_sym = (result.get("ai_result") or {}).get("symbol") if isinstance(result.get("ai_result"), dict) else None
+            if ai_sym and not str(ai_sym).strip().isdigit():
+                sname = str(ai_sym).strip()
         if sname:
             result["stock_name"] = sname
 

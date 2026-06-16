@@ -7,6 +7,7 @@ import { getAccessToken } from '../lib/auth'
 interface AiResult {
   symbol?: string
   stock_name?: string
+  directive_response?: string
   current_price?: string
   signal?: '매수' | '매도' | '관망'
   confidence?: number
@@ -425,7 +426,10 @@ function ResultView({ data, onExport }: { data: AnalysisResponse; onExport?: () 
   const r = data.ai_result
   const cls = signalClass(r.signal)
 
-  const stockName = data.stock_name ?? r.stock_name
+  // 종목명 우선순위: 백엔드 주입(stocks/FDR) → AI가 차트에서 읽은 이름(숫자코드 제외)
+  const aiReadName = r.symbol && !/^\d{6}$/.test(r.symbol.trim()) && r.symbol.trim() !== data.symbol
+    ? r.symbol.trim() : null
+  const stockName = data.stock_name ?? r.stock_name ?? aiReadName
   const logoUrl = /^\d{6}$/.test(data.symbol)
     ? `https://file.alphasquare.co.kr/media/images/stock_logo/kr/${data.symbol}.png`
     : null
@@ -511,6 +515,17 @@ function ResultView({ data, onExport }: { data: AnalysisResponse; onExport?: () 
           )}
         </div>
         {r.summary && <div className="ai-summary-box">{r.summary}</div>}
+        {r.directive_response && (
+          <div className="ai-summary-box" style={{
+            marginTop: '0.6rem', borderLeft: '3px solid #a78bfa',
+            background: 'rgba(167,139,250,0.08)',
+          }}>
+            <div style={{ fontSize: '0.72rem', color: '#a78bfa', fontWeight: 700, marginBottom: 4 }}>
+              💬 지시 수행 결과
+            </div>
+            {r.directive_response}
+          </div>
+        )}
       </div>
 
       {(r.targets || r.supply_demand) && (

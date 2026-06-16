@@ -420,7 +420,8 @@ _SYSTEM_PROMPT = """\
     "short_term": "단기(1~5일) 전망",
     "mid_term": "중기(1~4주) 전망"
   },
-  "data_needed": "판단에 추가로 필요한 정보 (없으면 null)"
+  "data_needed": "판단에 추가로 필요한 정보 (없으면 null)",
+  "directive_response": "사용자가 [사용자 지시]를 준 경우 그 지시 수행 결과/답변 요약 (지시 없으면 null)"
 }
 """
 
@@ -781,7 +782,8 @@ _VISION_SYSTEM_PROMPT = """\
     "short_term": "단기(1~5일) 전망",
     "mid_term": "중기(1~4주) 전망"
   },
-  "data_needed": "판단에 추가로 필요한 정보 (없으면 null)"
+  "data_needed": "판단에 추가로 필요한 정보 (없으면 null)",
+  "directive_response": "사용자가 [사용자 지시]를 준 경우 그 지시 수행 결과/답변 요약 (지시 없으면 null)"
 }
 """
 
@@ -851,7 +853,15 @@ def analyze_chart_images(
     timeframe_labels = ["일봉", "4시간봉", "1시간봉", "15분봉", "5분봉", "주봉"]
     intro_text = f"종목: {symbol}\n첨부된 {len(image_files)}개의 TradingView 차트를 분석해주세요."
     if extra_context:
-        intro_text += f"\n추가 정보: {extra_context}"
+        # 추가 정보는 단순 참고가 아니라 '사용자 지시'로 취급한다 —
+        # 예: "섹터 구분해서 리포트에 반영", "보유 중이니 매도 타이밍 위주로",
+        # "이미지가 서로 다른 종목이면 각각 식별해서 알려줘" 등 자연어 명령을 수행한다.
+        intro_text += (
+            f"\n\n[사용자 지시 — 반드시 수행]\n{extra_context}\n"
+            "위 지시를 분석에 우선 반영하라. 섹터 분류를 요청하면 company_analysis.sector에 채우고, "
+            "특정 관점(보유/신규/매도 등)을 지정하면 그 관점으로 summary와 targets를 작성하라. "
+            "지시 수행 결과나 사용자에게 전할 답을 directive_response 필드에 한국어로 요약하라."
+        )
     intro_text += "\n지정된 JSON 형식으로만 응답하세요."
 
     content.append({"type": "text", "text": intro_text})
