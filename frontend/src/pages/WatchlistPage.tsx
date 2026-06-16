@@ -27,13 +27,13 @@ function squarify(
   items: Array<{ id: string; value: number }>,
   x0: number, y0: number, w0: number, h0: number,
   gap = 0,
+  preserveOrder = false,   // true면 입력 순서대로 배치 (면적은 그대로, 위치만 입력 순서)
 ): TRect[] {
   if (!items.length || w0 < 0.5 || h0 < 0.5) return []
   const total = items.reduce((s, i) => s + Math.max(i.value, 0.001), 0)
   const area = w0 * h0
-  const sorted = [...items]
-    .sort((a, b) => b.value - a.value)
-    .map(i => ({ id: i.id, a: (Math.max(i.value, 0.001) / total) * area }))
+  const ordered = preserveOrder ? [...items] : [...items].sort((a, b) => b.value - a.value)
+  const sorted = ordered.map(i => ({ id: i.id, a: (Math.max(i.value, 0.001) / total) * area }))
   const out: TRect[] = []
 
   function worst(row: typeof sorted, side: number): number {
@@ -556,12 +556,13 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
       const value = visibleStocks.reduce((sum, st) => sum + compress(rawCap(st), allCaps), 0)
       return { ...s, visibleStocks, value }
     })
-    // 로테이션 점수 내림차순 — 강한 섹터가 squarify 앞쪽(좌상단)에 배치됨
+    // 로테이션 점수 내림차순 — 강한 섹터가 좌상단에 배치 (면적은 시총대로 유지, 순서만 점수순)
     secs.sort((a, b) => b.rotScore - a.rotScore)
 
     const secRects: TRect[] = squarify(
       secs.map(s => ({ id: s.id, value: s.value })),
       0, 0, dims.w, dims.h, SEC_GAP,
+      true,   // preserveOrder: 입력(점수순) 순서 유지 — squarify 내부 면적 재정렬 비활성
     )
 
     return secRects.map(sr => {
