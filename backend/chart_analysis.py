@@ -737,7 +737,8 @@ _VISION_SYSTEM_PROMPT = """\
 
 반드시 아래 JSON만 반환하세요 (설명 텍스트 없음):
 {
-  "symbol": "종목명 (차트에서 읽은 값)",
+  "symbol": "종목명만 (차트에 보이는 한글 종목명. 절대 종목코드를 붙이거나 괄호로 코드를 병기하지 말 것. 차트에 종목명이 안 보이면 null)",
+  "code_in_chart": "차트 화면에 '종목코드 6자리'가 명확히 보이면 그 숫자만, 안 보이면 null (추정·생성 절대 금지)",
   "timeframes": ["확인된 타임프레임 목록"],
   "current_price": "현재가 (숫자)",
   "signal": "매수" | "매도" | "관망",
@@ -851,7 +852,12 @@ def analyze_chart_images(
     content: list[dict[str, Any]] = []
 
     timeframe_labels = ["일봉", "4시간봉", "1시간봉", "15분봉", "5분봉", "주봉"]
-    intro_text = f"종목: {symbol}\n첨부된 {len(image_files)}개의 TradingView 차트를 분석해주세요."
+    intro_text = (
+        f"참고 식별자(검증 안 됨): {symbol}\n"
+        "※ 이 식별자는 파일명에서 추출됐을 수 있어 틀릴 수 있다. 종목명은 반드시 차트 이미지에서 직접 읽어라. "
+        "이 식별자를 종목코드로 단정하거나 종목명에 병기하지 마라.\n"
+        f"첨부된 {len(image_files)}개의 TradingView 차트를 분석해주세요."
+    )
     if extra_context:
         # 추가 정보는 단순 참고가 아니라 '사용자 지시'로 취급한다 —
         # 예: "섹터 구분해서 리포트에 반영", "보유 중이니 매도 타이밍 위주로",
@@ -964,3 +970,131 @@ def analyze_chart_images(
         "ai_result": ai_result,
         "analyzed_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Multi-stock: 이미지가 서로 다른 종목이면 그룹별로 순차 분석 (지시문 트리거)
+# ---------------------------------------------------------------------------
+
+_CLASSIFY_PROMPT = """\
+첨부된 차트/데이터 이미지들이 각각 어느 '종목'에 관한 것인지 식별하라.
+같은 종목의 다른 타임프레임/데이터 이미지는 하나의 그룹으로 묶는다.
+시황·지수·시장 전체 데이터처럼 특정 종목이 아닌 이미지는 stock을 "공통"으로 둔다.
+반드시 아래 JSON만 반환:
+{"groups": [{"stock": "종목명(차트에서 읽은 값)", "code": "6자리코드 또는 null", "images": [0-기반 이미지 인덱스 배열]}]}
+"""
+
+
+def classify_images_by_stock(
+    *,
+    image_files: list[tuple[str, bytes]],
+    api_key: str,
+    model: str,
+    provider: str,
+    timeout_seconds: float = 60.0,
+) -> list[dict[str, Any]]:
+    """1회 비전 호출로 이미지를 종목별 그룹으로 분류. 실패 시 전체를 한 그룹으로."""
+    fallback = [{"stock": "", "code": None, "images": list(range(len(image_files)))}]
+    if len(image_files) <= 1:
+        return fallback
+
+    parts_intro = (
+        _CLASSIFY_PROMPT
+        + f"\n이미지 수: {len(image_files)} (인덱스 0~{len(image_files) - 1})"
+    )
+    try:
+        if provider == "gemini":
+            gurl = (
+                f"https://generativelanguage.googleapis.com/v1beta"
+                f"/models/{model}:generateContent?key={api_key}"
+            )
+            g_parts: list[dict[str, Any]] = [{"text": parts_intro}]
+            for idx, (fname, img) in enumerate(image_files):
+                durl = _image_bytes_to_data_url(img, fname)
+                g_parts.append({"text": f"[이미지 {idx}]"})
+                g_parts.append({"inlineData": {
+                    "mimeType": durl.split(";")[0].split("data:")[1],
+                    "data": durl.split(";base64,")[1],
+                }})
+            payload = {
+                "contents": [{"role": "user", "parts": g_parts}],
+                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.1},
+            }
+            resp = httpx.post(gurl, json=payload, timeout=timeout_seconds)
+            resp.raise_for_status()
+            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        else:
+            base = "https://api.groq.com/openai/v1" if provider == "groq" else "https://api.openai.com/v1"
+            content: list[dict[str, Any]] = [{"type": "text", "text": parts_intro}]
+            for idx, (fname, img) in enumerate(image_files):
+                content.append({"type": "text", "text": f"[이미지 {idx}]"})
+                content.append({"type": "image_url",
+                                "image_url": {"url": _image_bytes_to_data_url(img, fname), "detail": "low"}})
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": content}],
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"},
+            }
+            resp = httpx.post(f"{base}/chat/completions", json=payload,
+                              headers={"Authorization": f"Bearer {api_key}"}, timeout=timeout_seconds)
+            resp.raise_for_status()
+            raw = resp.json()["choices"][0]["message"]["content"]
+        groups = json.loads(_clean_json_response(raw)).get("groups") or []
+        # 유효성: 인덱스 범위 보정
+        clean = []
+        for grp in groups:
+            idxs = [i for i in (grp.get("images") or []) if isinstance(i, int) and 0 <= i < len(image_files)]
+            if idxs:
+                clean.append({"stock": grp.get("stock") or "", "code": grp.get("code"), "images": idxs})
+        return clean or fallback
+    except Exception:
+        return fallback
+
+
+def analyze_chart_images_multi(
+    *,
+    symbol: str,
+    image_files: list[tuple[str, bytes]],
+    api_key: str,
+    model: str = "gpt-4o",
+    provider: str = "openai",
+    extra_context: str | None = None,
+    timeout_seconds: float = 90.0,
+) -> dict[str, Any]:
+    """이미지를 종목별로 분류 후 그룹마다 순차 분석. 그룹이 1개면 단일 분석과 동일.
+
+    Returns: {"multi": bool, "results": [analyze_chart_images() 결과, ...], "groups": [...]}
+    """
+    groups = classify_images_by_stock(
+        image_files=image_files, api_key=api_key, model=model,
+        provider=provider, timeout_seconds=timeout_seconds,
+    )
+    # 단일 종목(또는 분류 실패)이면 다종목 처리 불필요
+    real = [g for g in groups if (g.get("stock") or "").strip() and (g.get("stock") != "공통")]
+    if len(real) <= 1:
+        single = analyze_chart_images(
+            symbol=symbol, image_files=image_files, api_key=api_key,
+            model=model, provider=provider, extra_context=extra_context,
+            timeout_seconds=timeout_seconds,
+        )
+        return {"multi": False, "results": [single], "groups": groups}
+
+    # 공통(시황) 이미지는 각 종목 그룹에 맥락으로 동봉
+    common_idxs = [i for g in groups if (g.get("stock") == "공통") for i in g["images"]]
+    results = []
+    for g in real:
+        idxs = list(dict.fromkeys(g["images"] + common_idxs))
+        sub_imgs = [image_files[i] for i in idxs]
+        sym = (g.get("code") or g.get("stock") or symbol).strip()
+        try:
+            res = analyze_chart_images(
+                symbol=sym, image_files=sub_imgs, api_key=api_key,
+                model=model, provider=provider, extra_context=extra_context,
+                timeout_seconds=timeout_seconds,
+            )
+            results.append(res)
+        except Exception as exc:  # noqa: BLE001
+            results.append({"symbol": sym, "error": str(exc), "ai_result": None,
+                            "analyzed_at": datetime.now(timezone.utc).isoformat()})
+    return {"multi": True, "results": results, "groups": groups}

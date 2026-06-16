@@ -5307,15 +5307,25 @@ async def ai_chart_analysis_image(
     else:
         vision_model = model
 
+    # ── 다종목 지시 감지: 추가 정보에 '각각/여러 종목/개별/종목별/따로' 등이 있으면
+    #    이미지를 종목별로 분류해 순차 분석 (지시문 트리거 — 평소엔 단일 분석, 비용 0) ──
+    _MULTI_KW = ("각각", "여러 종목", "여러종목", "개별", "종목별", "따로", "각 종목", "종목마다", "multi")
+    multi_intent = bool(extra_context) and any(k in extra_context for k in _MULTI_KW) and len(image_files) >= 2
+
     try:
-        result = _chart_analysis.analyze_chart_images(
-            symbol=symbol.strip(),
-            image_files=image_files,
-            api_key=api_key,
-            model=vision_model,
-            provider=provider,
-            extra_context=extra_context,
-        )
+        if multi_intent:
+            bundle = _chart_analysis.analyze_chart_images_multi(
+                symbol=symbol.strip(), image_files=image_files, api_key=api_key,
+                model=vision_model, provider=provider, extra_context=extra_context,
+            )
+            results_list = [r for r in bundle.get("results", []) if isinstance(r, dict)]
+            is_multi = bool(bundle.get("multi"))
+        else:
+            results_list = [_chart_analysis.analyze_chart_images(
+                symbol=symbol.strip(), image_files=image_files, api_key=api_key,
+                model=vision_model, provider=provider, extra_context=extra_context,
+            )]
+            is_multi = False
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -5323,103 +5333,93 @@ async def ai_chart_analysis_image(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"이미지 분석 중 오류 발생: {exc}") from exc
 
-    # ── AI 분석 결과 캐시 저장 ──────────────────────────────────────────────
-    if apollo_db is not None and models is not None:
-        try:
-            stock_code_clean = symbol.strip()
-            sig = str(result.get("signal", "") or "").upper() if isinstance(result, dict) else ""
-            conf = result.get("confidence") if isinstance(result, dict) else None
-            upsid = result.get("upside_probability") if isinstance(result, dict) else None
-            sname = result.get("stock_name") or result.get("company") if isinstance(result, dict) else None
+    def _postprocess(result: dict) -> None:
+        """결과별: 종목 정체성 KRX 검증 → 검증분만 캐시 저장 + 종목명/코드 주입.
 
-            db_cache: Session = apollo_db.get_session_factory()()
+        [데이터 정확성] 가짜 코드(파일명 타임스탬프 등)를 사실로 저장·표기하지 않는다.
+        검증 실패 시 codeVerified=false 경고를 달고 ai_analysis_cache에 저장하지 않는다.
+        """
+        air = result.get("ai_result") or {}
+        vcode, vname, verified = _verify_krx_identity(
+            provided_code=symbol.strip(),
+            ai_name=air.get("symbol"),
+            ai_code_in_chart=air.get("code_in_chart"),
+        )
+        # 결과 정체성 확정 — 오염된 'OOO (163330)' 표기 정리
+        result["codeVerified"] = verified
+        if verified:
+            result["symbol"] = vcode
+            result["stock_name"] = vname
+            if isinstance(air, dict):
+                air["symbol"] = vname  # 차트 읽은 이름에 가짜코드 병기됐던 것 교정
+        else:
+            # 미검증: 코드는 사실로 제시하지 않음. 이름은 정제본만 참고로.
+            result["stock_name"] = vname
+            result["identityNote"] = (
+                f"종목 식별 미검증 — 입력 식별자 '{symbol.strip()}'는 KRX 상장 코드와 일치하지 않습니다. "
+                "차트에서 읽은 종목명을 KRX 상장목록에서 확인하지 못했습니다. 코드·종목명을 직접 확인하세요."
+            )
+
+        # 교차검증 증거 적재 (검증 여부와 무관 — 이미지 보관)
+        evidence_code = vcode if verified else f"UNVERIFIED_{symbol.strip()}"
+        if _crossval_intake is not None:
             try:
-                existing = db_cache.execute(
-                    select(models.AiAnalysisCache).where(
-                        models.AiAnalysisCache.stock_code == stock_code_clean
-                    )
-                ).scalar_one_or_none()
-                now_utc = datetime.utcnow()
-                if existing is None:
-                    db_cache.add(models.AiAnalysisCache(
-                        stock_code=stock_code_clean,
-                        stock_name=sname,
-                        analyzed_at=now_utc,
-                        signal=sig or None,
-                        confidence=float(conf) if conf is not None else None,
-                        upside_probability=float(upsid) if upsid is not None else None,
-                        result_json=result if isinstance(result, dict) else None,
-                        image_hashes=image_hashes,
-                    ))
-                else:
-                    existing.stock_name = sname or existing.stock_name
-                    existing.analyzed_at = now_utc
-                    existing.signal = sig or None
-                    existing.confidence = float(conf) if conf is not None else None
-                    existing.upside_probability = float(upsid) if upsid is not None else None
-                    existing.result_json = result if isinstance(result, dict) else None
-                    existing.image_hashes = image_hashes
-                db_cache.commit()
-            finally:
-                db_cache.close()
-        except Exception as _cache_err:
-            # 캐시 저장 실패는 무시 (분석 결과 반환에 영향 없음)
-            pass
+                intakes = [
+                    _crossval_intake.save_image(evidence_code, fname, raw_bytes, extra_context=extra_context)
+                    for (fname, raw_bytes) in image_files
+                ]
+                result["crossval"] = {
+                    "intake": intakes,
+                    "data_nature": {"ok": True, "kind": "image", "count": len(image_files),
+                                    "crossval": "불가 — 이미지는 참고용 증거. 네이버 수치 대조 대상 아님"},
+                    "reference_only": True,
+                }
+            except Exception:
+                pass
 
-    # ── 교차검증 창구: 차트 이미지 참고용 증거 보관 (수치 교차검증 불가) ──────────
-    if _crossval_intake is not None and isinstance(result, dict):
-        try:
-            intakes = [
-                _crossval_intake.save_image(symbol.strip(), fname, raw_bytes,
-                                            extra_context=extra_context)
-                for (fname, raw_bytes) in image_files
-            ]
-            result["crossval"] = {
-                "intake": intakes,
-                "data_nature": {"ok": True, "kind": "image", "count": len(image_files),
-                                "crossval": "불가 — 이미지는 참고용 증거. 네이버 수치 대조 대상 아님"},
-                "reference_only": True,
-            }
-        except Exception:
-            pass
-
-    # ── 종목명 주입: 프론트 헤더(로고+이름) 표시용 ──
-    # 우선순위: stocks 테이블(관심종목) → FDR 전체 KRX(임의 종목) → AI가 차트에서 읽은 이름
-    if isinstance(result, dict) and not result.get("stock_name"):
-        sname = None
-        code_q = symbol.strip()
-        if apollo_db is not None and models is not None:
+        # 캐시 저장 — 검증된 실제 코드일 때만 (가짜 코드로 ai_analysis_cache 오염 방지)
+        if verified and apollo_db is not None and models is not None:
             try:
-                db_n: Session = apollo_db.get_session_factory()()
+                sig = str(air.get("signal", "") or "").upper()
+                conf = air.get("confidence")
+                upsid = air.get("upside_probability")
+                db_cache: Session = apollo_db.get_session_factory()()
                 try:
-                    srow = db_n.execute(
-                        select(models.Stock).where(models.Stock.code == code_q)
+                    existing = db_cache.execute(
+                        select(models.AiAnalysisCache).where(
+                            models.AiAnalysisCache.stock_code == vcode
+                        )
                     ).scalar_one_or_none()
-                    if srow:
-                        sname = srow.name
+                    now_utc = datetime.utcnow()
+                    if existing is None:
+                        db_cache.add(models.AiAnalysisCache(
+                            stock_code=vcode, stock_name=vname, analyzed_at=now_utc,
+                            signal=sig or None,
+                            confidence=float(conf) if conf is not None else None,
+                            upside_probability=float(upsid) if upsid is not None else None,
+                            result_json=result, image_hashes=image_hashes,
+                        ))
+                    else:
+                        existing.stock_name = vname or existing.stock_name
+                        existing.analyzed_at = now_utc
+                        existing.signal = sig or None
+                        existing.confidence = float(conf) if conf is not None else None
+                        existing.upside_probability = float(upsid) if upsid is not None else None
+                        existing.result_json = result
+                        existing.image_hashes = image_hashes
+                    db_cache.commit()
                 finally:
-                    db_n.close()
+                    db_cache.close()
             except Exception:
                 pass
-        # FDR 전체 KRX에서 코드로 이름 조회 (관심종목 외 임의 종목 대응)
-        if not sname and code_q.isdigit() and len(code_q) == 6:
-            try:
-                import FinanceDataReader as fdr
-                df = fdr.StockListing("KRX")
-                hit = df[df["Code"].astype(str).str.zfill(6) == code_q]
-                if not hit.empty:
-                    sname = str(hit.iloc[0]["Name"])
-            except Exception:
-                pass
-        # AI가 차트에서 읽은 종목명 폴백 (코드가 아니면)
-        if not sname:
-            ai_sym = (result.get("ai_result") or {}).get("symbol") if isinstance(result.get("ai_result"), dict) else None
-            if ai_sym and not str(ai_sym).strip().isdigit():
-                sname = str(ai_sym).strip()
-        if sname:
-            result["stock_name"] = sname
 
-    return result
+    for res in results_list:
+        if isinstance(res, dict) and not res.get("error"):
+            _postprocess(res)
+
+    if is_multi:
+        return {"multi": True, "results": results_list}
+    return results_list[0]
 
 
 # ─── 교차검증 창구 API (적재 코퍼스 현황 · 언어학습 발전 가능성) ────────────────
@@ -6260,6 +6260,57 @@ def public_watchlist():
     _PUBLIC_WATCHLIST_CACHE["basis"] = basis
     _PUBLIC_WATCHLIST_CACHE["ts"] = time.time()
     return {"items": items, "cached": False, "quoteBasis": basis}
+
+
+def _clean_stock_name(name: str | None) -> str | None:
+    """종목명 정제: 괄호 안 코드/부가설명 제거, 끝의 6자리 코드 제거. '신흥에스이씨 (163330)' → '신흥에스이씨'."""
+    if not name:
+        return None
+    import re as _re
+    n = _re.sub(r"\s*\(.*?\)\s*", " ", str(name)).strip()
+    n = _re.sub(r"\s*\d{6}\s*$", "", n).strip()
+    return n or None
+
+
+def _verify_krx_identity(
+    provided_code: str | None, ai_name: str | None, ai_code_in_chart: str | None = None,
+) -> tuple[str | None, str | None, bool]:
+    """종목 정체성을 실제 KRX 상장목록(DB+FDR)으로 검증.
+
+    반환 (code, name, verified). 검증 안 된 코드는 절대 사실인 양 반환하지 않는다.
+    우선순위: AI가 차트에서 읽은 '이름'으로 실제 코드 역조회(가장 신뢰) →
+             후보 코드(차트표기/파일명)를 상장목록에 대조 → 둘 다 실패 시 미검증.
+    """
+    name = _clean_stock_name(ai_name)
+    df = None
+    try:
+        import FinanceDataReader as fdr
+        df = fdr.StockListing("KRX")
+    except Exception:
+        df = None
+
+    # 1) 이름 → 실제 코드 역조회 (AI는 차트에서 이름을 직접 읽으므로 가장 신뢰)
+    if name and df is not None:
+        try:
+            hit = df[df["Name"] == name]
+            if not hit.empty:
+                return str(hit.iloc[0]["Code"]).zfill(6), str(hit.iloc[0]["Name"]), True
+        except Exception:
+            pass
+
+    # 2) 후보 코드(차트 표기 우선, 그다음 파일명)를 상장목록에 대조
+    for cand in (ai_code_in_chart, provided_code):
+        c = str(cand or "").strip()
+        if c.isdigit() and len(c) == 6 and df is not None:
+            try:
+                hit = df[df["Code"].astype(str).str.zfill(6) == c]
+                if not hit.empty:
+                    return c, str(hit.iloc[0]["Name"]), True
+            except Exception:
+                pass
+
+    # 3) 미검증 — 코드는 None(가짜 코드 사실화 금지), 이름은 정제본만 참고로
+    return None, name, False
 
 
 def _fdr_lookup(query: str) -> tuple[str, str] | None:

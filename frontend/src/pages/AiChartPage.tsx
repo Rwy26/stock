@@ -7,6 +7,7 @@ import { getAccessToken } from '../lib/auth'
 interface AiResult {
   symbol?: string
   stock_name?: string
+  code_in_chart?: string
   directive_response?: string
   current_price?: string
   signal?: '매수' | '매도' | '관망'
@@ -77,6 +78,8 @@ interface AnalysisBasis {
 interface AnalysisResponse {
   symbol: string
   stock_name?: string
+  codeVerified?: boolean
+  identityNote?: string
   images_count?: number
   ai_result: AiResult
   analyzed_at: string
@@ -426,16 +429,29 @@ function ResultView({ data, onExport }: { data: AnalysisResponse; onExport?: () 
   const r = data.ai_result
   const cls = signalClass(r.signal)
 
-  // 종목명 우선순위: 백엔드 주입(stocks/FDR) → AI가 차트에서 읽은 이름(숫자코드 제외)
+  // 종목명 우선순위: 백엔드 주입(검증된 stocks/FDR) → AI가 차트에서 읽은 이름(숫자코드 제외)
   const aiReadName = r.symbol && !/^\d{6}$/.test(r.symbol.trim()) && r.symbol.trim() !== data.symbol
     ? r.symbol.trim() : null
   const stockName = data.stock_name ?? r.stock_name ?? aiReadName
-  const logoUrl = /^\d{6}$/.test(data.symbol)
+  const verifiedCode = data.codeVerified !== false  // 검증된 경우에만 코드/로고 신뢰
+  const logoUrl = verifiedCode && /^\d{6}$/.test(data.symbol)
     ? `https://file.alphasquare.co.kr/media/images/stock_logo/kr/${data.symbol}.png`
     : null
 
+  const codeVerified = data.codeVerified !== false  // undefined(구버전)=경고 안 함
+
   return (
     <div className="ai-right">
+      {/* ── 종목 식별 미검증 경고 (데이터 정확성: 가짜 코드 사실화 금지) ── */}
+      {data.codeVerified === false && (
+        <div style={{
+          margin: '0 0 12px', padding: '10px 14px', borderRadius: 8,
+          background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.4)',
+          color: '#fca5a5', fontSize: '0.82rem', lineHeight: 1.5,
+        }}>
+          ⚠️ <b>종목 식별 미검증</b> — {data.identityNote ?? '코드·종목명을 KRX 상장목록에서 확인하지 못했습니다. 직접 확인하세요.'}
+        </div>
+      )}
       {/* ── 종목 헤더: 로고 + 이름(크게) + 코드(작게) ── */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
@@ -453,8 +469,11 @@ function ResultView({ data, onExport }: { data: AnalysisResponse; onExport?: () 
           <span style={{ fontSize: 30, fontWeight: 900, color: 'var(--text, #f1f5f9)', lineHeight: 1 }}>
             {stockName ?? data.symbol}
           </span>
-          {stockName && (
+          {stockName && verifiedCode && (
             <span style={{ fontSize: 14, color: 'var(--text-soft, #94a3b8)' }}>{data.symbol}</span>
+          )}
+          {!verifiedCode && (
+            <span style={{ fontSize: 13, color: '#fca5a5' }}>코드 미확인</span>
           )}
         </div>
       </div>
@@ -645,6 +664,7 @@ export function AiChartPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<AnalysisResponse | null>(null)
+  const [multiResults, setMultiResults] = useState<AnalysisResponse[] | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [showKeyPanel, setShowKeyPanel] = useState(false)
   const [keyProvider, setKeyProvider] = useState<'gemini' | 'groq' | 'openai'>('gemini')
@@ -739,8 +759,9 @@ export function AiChartPage() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
-  async function exportOnePager() {
-    if (!result) return
+  async function exportOnePager(override?: AnalysisResponse) {
+    const rep = override ?? result
+    if (!rep) return
     // Convert image object URLs → base64 data URLs
     const images: string[] = []
     for (const f of droppedFiles.filter(d => d.type === 'image' && d.previewUrl)) {
@@ -755,13 +776,13 @@ export function AiChartPage() {
         images.push(b64)
       } catch { /* skip failed images */ }
     }
-    const html = buildReportHtml(result, images)
+    const html = buildReportHtml(rep, images)
     const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    const dateStr = new Date(result.analyzed_at).toISOString().slice(0, 10)
-    a.download = `${result.symbol}_AI분석_${dateStr}.html`
+    const dateStr = new Date(rep.analyzed_at).toISOString().slice(0, 10)
+    a.download = `${rep.stock_name ?? rep.symbol}_AI분석_${dateStr}.html`
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -823,7 +844,7 @@ export function AiChartPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    setError(null); setResult(null); setCsvBatchNote(null)
+    setError(null); setResult(null); setMultiResults(null); setCsvBatchNote(null)
 
     if (mode === 'drop') {
       if (droppedFiles.length === 0) { setError('파일을 1개 이상 업로드하세요'); return }
@@ -853,7 +874,12 @@ export function AiChartPage() {
           })
           const data = await resp.json()
           if (!resp.ok) throw new Error(data.detail ?? `서버 오류 ${resp.status}`)
-          setResult(data as AnalysisResponse)
+          // 다종목 응답: {multi:true, results:[...]} → 순차 렌더
+          if (data && data.multi && Array.isArray(data.results)) {
+            setMultiResults(data.results as AnalysisResponse[])
+          } else {
+            setResult(data as AnalysisResponse)
+          }
         } else if (csvFiles.length > 0) {
           // 1) 드롭한 전 파일을 intake_only로 빠르게 적재·병합 (LLM 생략).
           // 2) 그 후 '가장 큰 타임프레임 + 변곡점 집중'으로 1회만 분석 → 업로드 순서 무관·결정론.
@@ -1259,6 +1285,22 @@ export function AiChartPage() {
         <div>
           {loading ? (
             <LoadingSkeleton />
+          ) : multiResults ? (
+            <>
+              <div className="panel glass" style={{ marginBottom: 12, padding: '10px 14px',
+                fontSize: '0.84rem', color: '#a78bfa', border: '1px solid rgba(167,139,250,0.3)' }}>
+                🧩 다종목 감지 — {multiResults.length}개 종목을 개별 분석했습니다
+              </div>
+              {multiResults.map((res, i) => (
+                <div key={i} style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: '0.78rem', color: '#64748b', fontWeight: 700, margin: '4px 0 8px' }}>
+                    {i + 1} / {multiResults.length}
+                  </div>
+                  <ResultView data={res} onExport={() => exportOnePager(res)} />
+                  {res.crossval && <CrossvalBadge info={res.crossval} />}
+                </div>
+              ))}
+            </>
           ) : result ? (
             <>
               {csvBatchNote && (
@@ -1282,7 +1324,7 @@ export function AiChartPage() {
                   )}
                 </div>
               )}
-              <ResultView data={result} onExport={exportOnePager} />
+              <ResultView data={result} onExport={() => exportOnePager()} />
               {result.crossval && <CrossvalBadge info={result.crossval} />}
             </>
           ) : (
