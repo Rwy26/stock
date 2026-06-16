@@ -10,7 +10,7 @@ type GNode = {
   code: string; name: string; sector: string
   cap: number; capNorm: number; score: number
   signal: string | null; hasReport: boolean; chg1d: number
-  aligned?: boolean; alignStr?: number; isEtf?: boolean; leader?: boolean
+  aligned?: boolean; alignStr?: number; isEtf?: boolean; leader?: boolean; isNew?: boolean
   x: number; y: number; vx: number; vy: number
 }
 type GEdge = { a: number; b: number; w: number }
@@ -460,6 +460,27 @@ export function PublicAiHistoryPage() {
             // 필터·그림자 리셋
             ctx.shadowBlur = 0
             ctx.filter = 'none'
+
+            // ── '관종 신입' 뱃지 (편입 3일 이내) — 점멸하며 시선 유도 ──
+            if (n.isNew && !dim && cam.scale > 0.3) {
+              const pulse = 0.55 + Math.sin(t * 2.2 + i * 0.5) * 0.45
+              const bx2 = x + r * 0.72, by2 = y - r * 0.72
+              const txt = '신입'
+              ctx.font = 'bold 9px sans-serif'
+              const bw = ctx.measureText(txt).width + 8
+              ctx.globalAlpha = pulse
+              ctx.fillStyle = '#f59e0b'
+              const rr = 6
+              ctx.beginPath()
+              ctx.roundRect(bx2 - bw / 2, by2 - rr, bw, rr * 2, rr)
+              ctx.fill()
+              ctx.fillStyle = '#1a1206'
+              ctx.textAlign = 'center'
+              ctx.textBaseline = 'middle'
+              ctx.fillText(txt, bx2, by2 + 0.5)
+              ctx.textBaseline = 'alphabetic'
+              ctx.globalAlpha = 1
+            }
 
             // ── 레이블 (lag 위치, 폰트 ∝ 원) ──
             const lx = toSX(lp2[i]?.x ?? n.x)

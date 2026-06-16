@@ -1,6 +1,8 @@
 import { useCallback, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { fetchJson } from '../lib/api'
 import { getAccessToken } from '../lib/auth'
+import { StockReportModal } from '../components/StockReportModal'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -99,11 +101,30 @@ interface DevResponse {
 type DroppedFile = { file: File; previewUrl?: string; type: 'image' | 'csv' }
 type Mode = 'drop' | 'code'
 
+// 텍스트 추출 우선 인식 결과 (시장데이터 표·미인식 등)
+interface ExEntity { type: 'stock' | 'sector'; name: string; code?: string | null; inWatchlist?: boolean; known?: boolean }
+interface Extraction {
+  content_type?: string
+  confidence?: number
+  extracted_summary?: string
+  stocks?: { name?: string; code?: string | null; inWatchlist?: boolean; code_in_image?: string | null; sector?: string | null; context?: string }[]
+  sectors?: { sector?: string; theme?: string; stocks?: string[]; known?: boolean }[]
+  single_stock?: { name?: string | null; code_in_image?: string | null }
+  user_intent?: string
+  intent_response?: string
+  entities?: ExEntity[]
+  canonicalSectors?: string[]
+  error?: string
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function extractSymbolFromFilename(name: string): string {
-  // 009150_2026-05-30_... 형태: 숫자 6자리가 시작 또는 비숫자 뒤에 오는 경우
-  const code6 = name.match(/(?:^|[^\d])(\d{6})(?:[^\d]|$)/)
+  // 코드 위치 한정: 파일명 '시작' 또는 '_' 바로 뒤의 6자리만 코드로 인정.
+  // (예: "009150_2026-05-30.png" → 009150) — 끝에 붙는 타임스탬프
+  // "...외인 기관 매수 163259.png"(16:32:59)를 코드로 오인하지 않기 위함.
+  // 숫자만으로는 005930(00:59:30)처럼 코드/시각 구분 불가 → 위치로 판별.
+  const code6 = name.match(/(?:^|_)(\d{6})(?:[_\-.]|$)/)
   if (code6) return code6[1]
   // AAPL_... 형태: 대문자 알파벳 2~5자
   const ticker = name.match(/^([A-Z]{2,5})[_\-\s,.]/)
@@ -425,6 +446,154 @@ function buildReportHtml(data: AnalysisResponse, images: string[]): string {
 </html>`
 }
 
+// 추출 텍스트 안의 관심종목·정식섹터 이름을 파란 클릭 링크로 변환
+function linkifyEntities(
+  text: string, entities: ExEntity[],
+  onStock: (code: string, name: string) => void, onSector: (name: string) => void,
+): React.ReactNode[] {
+  const links = entities.filter(e =>
+    (e.type === 'stock' && e.inWatchlist && e.code) || (e.type === 'sector' && e.known))
+  if (!links.length) return [text]
+  // 긴 이름 우선 (부분 겹침 방지)
+  const sorted = [...links].sort((a, b) => b.name.length - a.name.length)
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`(${sorted.map(e => esc(e.name)).join('|')})`, 'g')
+  const out: React.ReactNode[] = []
+  let key = 0
+  text.split(re).forEach(seg => {
+    const ent = links.find(e => e.name === seg)
+    if (ent) {
+      out.push(
+        <span key={key++} onClick={() => ent.type === 'stock' ? onStock(ent.code!, ent.name) : onSector(ent.name)}
+          style={{ color: '#60a5fa', cursor: 'pointer', fontWeight: 700, textDecoration: 'underline' }}
+          title={ent.type === 'stock' ? '리포트 보기' : '섹터 나침반으로 이동'}>
+          {seg}
+        </span>,
+      )
+    } else if (seg) {
+      out.push(<span key={key++}>{seg}</span>)
+    }
+  })
+  return out
+}
+
+// 시장데이터 표 · 미인식 결과 — 단일종목 리포트(관망/목표가) 대신 추출 내용·의도 응답만 표시
+function DocView({ mode, ex, onOpenReport }: {
+  mode: string; ex: Extraction; onOpenReport: (code: string, name: string) => void
+}) {
+  const navigate = useNavigate()
+  const isUnrec = mode === 'unrecognized'
+  const onSector = (_name: string) => navigate('/sector-rotation')
+  const link = (t?: string) => t ? linkifyEntities(t, ex.entities ?? [], onOpenReport, onSector) : null
+  // 편입 대상: 관심종목에 아직 없는 종목들
+  const newStocks = (ex.stocks ?? []).filter(s => s.name && !s.inWatchlist)
+  const [inducting, setInducting] = useState(false)
+  const [inductMsg, setInductMsg] = useState<string | null>(null)
+  async function induct() {
+    setInducting(true); setInductMsg(null)
+    try {
+      const token = getAccessToken()
+      const resp = await fetch('/api/ai/extract/induct', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stocks: newStocks.map(s => ({ name: s.name, code: s.code })) }),
+      })
+      const d = await resp.json()
+      if (!resp.ok) throw new Error(d.detail ?? `오류 ${resp.status}`)
+      const added = (d.results ?? []).filter((r: { status: string }) => r.status === 'added')
+      const excluded = (d.results ?? []).filter((r: { status: string }) => r.status === 'excluded')
+      setInductMsg(`편입 ${added.length}건 (리포트 생성 중) · 제외 ${excluded.length}건 · 이미보유/미확인 ${(d.results?.length ?? 0) - added.length - excluded.length}건`)
+    } catch (e) {
+      setInductMsg(`편입 실패: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setInducting(false)
+    }
+  }
+  return (
+    <div className="ai-right">
+      <div className="panel glass" style={{
+        padding: '14px 16px', marginBottom: 12,
+        border: `1px solid ${isUnrec ? 'rgba(239,68,68,0.4)' : 'rgba(96,165,250,0.35)'}`,
+        background: isUnrec ? 'rgba(239,68,68,0.08)' : 'rgba(96,165,250,0.06)',
+      }}>
+        <div style={{ fontSize: '1rem', fontWeight: 800, color: isUnrec ? '#fca5a5' : '#93c5fd' }}>
+          {isUnrec
+            ? '⚠️ 종목 미인식 — 분석 결과를 생성하지 않았습니다'
+            : '📊 시장데이터 인식 — 단일 종목 차트가 아닙니다'}
+        </div>
+        <div style={{ fontSize: '0.82rem', color: 'var(--text-soft)', marginTop: 6, lineHeight: 1.6 }}>
+          {isUnrec
+            ? '이미지에서 분석 가능한 단일 종목 차트를 식별하지 못했습니다. 아래 추출 내용을 확인하고, 종목 차트라면 종목코드를 입력해 다시 시도하세요. 잘못된 종목 리포트를 만드는 대신 인식 결과만 보고합니다.'
+            : '여러 종목·섹터가 포함된 시장 데이터(순매수·시황 등)로 인식되어, 가짜 종목 리포트 대신 추출·분류 결과를 제공합니다.'}
+        </div>
+      </div>
+
+      {ex.extracted_summary && (
+        <Section title="📝 추출 내용 (이미지에서 읽은 텍스트)">
+          <div className="ai-summary-box" style={{ lineHeight: 1.7 }}>{link(ex.extracted_summary)}</div>
+          <p className="hint" style={{ marginTop: 6 }}>※ <span style={{ color: '#60a5fa', fontWeight: 700 }}>파란 종목/섹터</span>는 관심종목·정식섹터 — 눌러서 리포트·나침반으로 이동</p>
+        </Section>
+      )}
+
+      {ex.intent_response && (
+        <Section title="💬 지시 수행 결과">
+          <div className="ai-summary-box" style={{ borderLeft: '3px solid #a78bfa', background: 'rgba(167,139,250,0.08)', lineHeight: 1.7 }}>
+            {ex.user_intent && <div style={{ fontSize: '0.74rem', color: '#a78bfa', marginBottom: 6 }}>요청: {ex.user_intent}</div>}
+            {link(ex.intent_response)}
+          </div>
+        </Section>
+      )}
+
+      {newStocks.length > 0 && (
+        <Section title="➕ 신규 종목 관심종목 편입">
+          <p className="hint" style={{ marginBottom: 8 }}>
+            관심종목에 없는 {newStocks.length}개 종목: {newStocks.map(s => s.name).join(', ')}
+            <br />편입 시 제외원칙 필터를 통과한 종목만 등록되고, 엔진·LLM 리포트가 생성됩니다.
+          </p>
+          <button type="button" className="ai-export-btn" disabled={inducting} onClick={induct}
+            style={{ opacity: inducting ? 0.6 : 1 }}>
+            {inducting ? '편입 중…' : `➕ ${newStocks.length}개 종목 편입 + 리포트 생성`}
+          </button>
+          {inductMsg && <p className="hint" style={{ marginTop: 8, color: '#34d399' }}>{inductMsg}</p>}
+        </Section>
+      )}
+
+      {Array.isArray(ex.sectors) && ex.sectors.length > 0 && (
+        <Section title="🗂️ 섹터 분류">
+          <div style={{ display: 'grid', gap: 8 }}>
+            {ex.sectors.map((s, i) => (
+              <div key={i} className="ai-summary-box" style={{ padding: '8px 12px' }}>
+                {s.known
+                  ? <b onClick={() => onSector(s.sector!)} style={{ color: '#60a5fa', cursor: 'pointer', textDecoration: 'underline' }} title="섹터 나침반으로 이동">{s.sector}</b>
+                  : <b style={{ color: '#93c5fd' }}>{s.sector}</b>}
+                {s.theme && <span style={{ color: 'var(--text-soft)', fontSize: '0.78rem' }}> · {s.theme}</span>}
+                <div style={{ fontSize: '0.84rem', marginTop: 4 }}>{link((s.stocks ?? []).join(', ')) }</div>
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {Array.isArray(ex.stocks) && ex.stocks.length > 0 && (
+        <Section title="📋 등장 종목">
+          <div style={{ display: 'grid', gap: 4 }}>
+            {ex.stocks.map((s, i) => (
+              <div key={i} style={{ fontSize: '0.84rem', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                {s.inWatchlist && s.code
+                  ? <b onClick={() => onOpenReport(s.code!, s.name!)} style={{ color: '#60a5fa', cursor: 'pointer', textDecoration: 'underline' }} title="리포트 보기">{s.name}</b>
+                  : <b>{s.name}</b>}
+                {s.inWatchlist && <span style={{ fontSize: '0.68rem', color: '#34d399', border: '1px solid rgba(52,211,153,0.4)', borderRadius: 4, padding: '0 4px' }}>관심</span>}
+                {s.sector && <span style={{ color: '#60a5fa' }}>{s.sector}</span>}
+                {s.context && <span style={{ color: 'var(--text-soft)' }}>· {s.context}</span>}
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+    </div>
+  )
+}
+
 function ResultView({ data, onExport }: { data: AnalysisResponse; onExport?: () => void }) {
   const r = data.ai_result
   const cls = signalClass(r.signal)
@@ -437,8 +606,6 @@ function ResultView({ data, onExport }: { data: AnalysisResponse; onExport?: () 
   const logoUrl = verifiedCode && /^\d{6}$/.test(data.symbol)
     ? `https://file.alphasquare.co.kr/media/images/stock_logo/kr/${data.symbol}.png`
     : null
-
-  const codeVerified = data.codeVerified !== false  // undefined(구버전)=경고 안 함
 
   return (
     <div className="ai-right">
@@ -665,6 +832,8 @@ export function AiChartPage() {
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<AnalysisResponse | null>(null)
   const [multiResults, setMultiResults] = useState<AnalysisResponse[] | null>(null)
+  const [docResult, setDocResult] = useState<{ mode: string; extraction: Extraction } | null>(null)
+  const [reportModal, setReportModal] = useState<{ code: string; name: string } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [showKeyPanel, setShowKeyPanel] = useState(false)
   const [keyProvider, setKeyProvider] = useState<'gemini' | 'groq' | 'openai'>('gemini')
@@ -844,11 +1013,11 @@ export function AiChartPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    setError(null); setResult(null); setMultiResults(null); setCsvBatchNote(null)
+    setError(null); setResult(null); setMultiResults(null); setDocResult(null); setCsvBatchNote(null)
 
     if (mode === 'drop') {
       if (droppedFiles.length === 0) { setError('파일을 1개 이상 업로드하세요'); return }
-      // symbol이 비어있으면 파일명에서 자동 추출 시도
+      // symbol이 비어있으면 파일명에서 자동 추출 시도 (실패해도 진행 — 백엔드가 콘텐츠 인식)
       let effectiveSymbol = symbol.trim()
       if (!effectiveSymbol) {
         for (const d of droppedFiles) {
@@ -856,16 +1025,19 @@ export function AiChartPage() {
           if (effectiveSymbol) break
         }
       }
-      if (!effectiveSymbol) { setError('종목명 또는 종목코드를 입력하세요 (파일명에서 자동 감지 실패)'); return }
+      const imageFiles = droppedFiles.filter(d => d.type === 'image')
+      const csvFiles = droppedFiles.filter(d => d.type === 'csv')
+      // CSV는 종목 식별자가 반드시 필요. 이미지는 콘텐츠 인식으로 진행 가능.
+      if (!effectiveSymbol && csvFiles.length > 0 && imageFiles.length === 0) {
+        setError('CSV는 종목명 또는 종목코드를 입력하세요 (파일명에서 자동 감지 실패)'); return
+      }
       setLoading(true)
       try {
-        const imageFiles = droppedFiles.filter(d => d.type === 'image')
-        const csvFiles = droppedFiles.filter(d => d.type === 'csv')
         if (imageFiles.length > 0) {
           const form = new FormData()
           imageFiles.forEach(d => form.append('files', d.file))
           const token = getAccessToken()
-          const params = new URLSearchParams({ symbol: effectiveSymbol })
+          const params = new URLSearchParams({ symbol: effectiveSymbol || 'AUTO' })
           if (extraContext.trim()) params.set('extra_context', extraContext.trim())
           const resp = await fetch(`/api/ai/chart-analysis/image?${params}`, {
             method: 'POST',
@@ -874,8 +1046,10 @@ export function AiChartPage() {
           })
           const data = await resp.json()
           if (!resp.ok) throw new Error(data.detail ?? `서버 오류 ${resp.status}`)
-          // 다종목 응답: {multi:true, results:[...]} → 순차 렌더
-          if (data && data.multi && Array.isArray(data.results)) {
+          // 모드별 라우팅: stock / multi_stock / market_data / unrecognized
+          if (data?.mode === 'market_data' || data?.mode === 'unrecognized') {
+            setDocResult({ mode: data.mode, extraction: data.extraction ?? {} })
+          } else if (data?.multi && Array.isArray(data.results)) {
             setMultiResults(data.results as AnalysisResponse[])
           } else {
             setResult(data as AnalysisResponse)
@@ -1285,6 +1459,9 @@ export function AiChartPage() {
         <div>
           {loading ? (
             <LoadingSkeleton />
+          ) : docResult ? (
+            <DocView mode={docResult.mode} ex={docResult.extraction}
+              onOpenReport={(code, name) => setReportModal({ code, name })} />
           ) : multiResults ? (
             <>
               <div className="panel glass" style={{ marginBottom: 12, padding: '10px 14px',
@@ -1357,6 +1534,10 @@ export function AiChartPage() {
           )}
         </div>
       </div>
+      {reportModal && (
+        <StockReportModal code={reportModal.code} name={reportModal.name}
+          onClose={() => setReportModal(null)} />
+      )}
     </main>
   )
 }

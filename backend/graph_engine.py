@@ -93,6 +93,17 @@ def build_graph(force: bool = False) -> dict:
         rows = s.execute(
             select(models.AiAnalysisCache).order_by(models.AiAnalysisCache.analyzed_at.desc())
         ).scalars().all()
+        # '관종 신입' 3일 뱃지: admin(user_id=1) 워치리스트 편입 3일 이내 종목
+        from datetime import timedelta as _td
+        cutoff = datetime.now() - _td(days=3)
+        new_codes = {
+            str(c) for c in s.execute(
+                select(models.Watchlist.stock_code).where(
+                    models.Watchlist.user_id == 1,
+                    models.Watchlist.created_at >= cutoff,
+                )
+            ).scalars().all()
+        }
     finally:
         s.close()
 
@@ -134,6 +145,7 @@ def build_graph(force: bool = False) -> dict:
             "aligned": aligned,       # EMA 정배열 여부
             "alignStr": align_str,    # 정배열 상승 강도 0~1
             "isEtf": r.stock_code in etf_holdings or bool(pj.get("etfHoldings")),
+            "isNew": str(r.stock_code) in new_codes,  # 관종 신입 (편입 3일 이내)
         })
         if len(ser) >= 40:
             series[r.stock_code] = [float(x) for x in ser]

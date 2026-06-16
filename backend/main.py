@@ -5307,31 +5307,30 @@ async def ai_chart_analysis_image(
     else:
         vision_model = model
 
-    # ── 다종목 지시 감지: 추가 정보에 '각각/여러 종목/개별/종목별/따로' 등이 있으면
-    #    이미지를 종목별로 분류해 순차 분석 (지시문 트리거 — 평소엔 단일 분석, 비용 0) ──
-    _MULTI_KW = ("각각", "여러 종목", "여러종목", "개별", "종목별", "따로", "각 종목", "종목마다", "multi")
-    multi_intent = bool(extra_context) and any(k in extra_context for k in _MULTI_KW) and len(image_files) >= 2
-
+    # ── 텍스트 추출 우선 인식 → 콘텐츠 종류별 라우팅 ──
+    #    단일종목 차트만 종목 리포트를 만든다. 시장데이터 표·미인식은 가짜 종목 리포트를
+    #    절대 만들지 않고(데이터 정확성), 추출 내용/의도 응답 또는 '미인식 보고'를 반환한다.
     try:
-        if multi_intent:
-            bundle = _chart_analysis.analyze_chart_images_multi(
-                symbol=symbol.strip(), image_files=image_files, api_key=api_key,
-                model=vision_model, provider=provider, extra_context=extra_context,
-            )
-            results_list = [r for r in bundle.get("results", []) if isinstance(r, dict)]
-            is_multi = bool(bundle.get("multi"))
-        else:
-            results_list = [_chart_analysis.analyze_chart_images(
-                symbol=symbol.strip(), image_files=image_files, api_key=api_key,
-                model=vision_model, provider=provider, extra_context=extra_context,
-            )]
-            is_multi = False
+        bundle = _chart_analysis.analyze_chart_images_smart(
+            symbol=symbol.strip(), image_files=image_files, api_key=api_key,
+            model=vision_model, provider=provider, extra_context=extra_context,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"이미지 분석 중 오류 발생: {exc}") from exc
+
+    rmode = bundle.get("mode", "unrecognized")
+
+    # 단일종목 / 다종목 차트만 검증·캐시 후처리 대상
+    if rmode == "stock":
+        results_list = [bundle["result"]]
+    elif rmode == "multi_stock":
+        results_list = [r for r in bundle.get("results", []) if isinstance(r, dict)]
+    else:
+        results_list = []  # market_data / unrecognized → 종목 리포트 없음
 
     def _postprocess(result: dict) -> None:
         """결과별: 종목 정체성 KRX 검증 → 검증분만 캐시 저장 + 종목명/코드 주입.
@@ -5417,9 +5416,25 @@ async def ai_chart_analysis_image(
         if isinstance(res, dict) and not res.get("error"):
             _postprocess(res)
 
-    if is_multi:
-        return {"multi": True, "results": results_list}
-    return results_list[0]
+    extraction = _enrich_extraction(bundle.get("extraction") or {})
+    # 시장데이터/미인식 이미지도 교차검증 증거로는 보관 (종목 캐시 저장은 안 함)
+    if rmode in ("market_data", "unrecognized") and _crossval_intake is not None:
+        try:
+            for (fname, raw_bytes) in image_files:
+                _crossval_intake.save_image(f"DOC_{symbol.strip()}", fname, raw_bytes, extra_context=extra_context)
+        except Exception:
+            pass
+
+    if rmode == "stock":
+        # 하위호환: 단일종목은 기존 형태 + mode 태그
+        out = dict(results_list[0])
+        out["mode"] = "stock"
+        out["extraction"] = extraction
+        return out
+    if rmode == "multi_stock":
+        return {"mode": "multi_stock", "multi": True, "results": results_list, "extraction": extraction}
+    # market_data / unrecognized → 종목 리포트 없이 추출 내용만
+    return {"mode": rmode, "extraction": extraction}
 
 
 # ─── 교차검증 창구 API (적재 코퍼스 현황 · 언어학습 발전 가능성) ────────────────
@@ -6325,6 +6340,167 @@ def _fdr_lookup(query: str) -> tuple[str, str] | None:
         return str(row["Code"]).zfill(6), str(row["Name"])
     except Exception:
         return None
+
+
+def _enrich_extraction(extraction: dict) -> dict:
+    """추출 결과의 종목/섹터에 코드·관심종목여부·정식섹터 플래그를 부여.
+
+    - stocks[i]: code(실제 KRX), inWatchlist(관심종목 편입 여부) 추가
+    - sectors[i]: known(정식 섹터 분류 여부) 추가
+    - entities: 자유텍스트(extracted_summary) 링크화용 평면 목록
+    """
+    if not isinstance(extraction, dict):
+        return extraction
+    try:
+        import sector_rotation
+        canon_sectors = set(sector_rotation.SECTORS.keys())
+    except Exception:
+        canon_sectors = set()
+
+    # 관심종목 코드 + 이름→코드 맵(DB) 1회 로드
+    wl_codes: set[str] = set()
+    db_name2code: dict[str, str] = {}
+    if apollo_db is not None and models is not None:
+        try:
+            s: Session = apollo_db.get_session_factory()()
+            try:
+                wl_codes = {str(c) for c in s.execute(
+                    select(models.Watchlist.stock_code).where(models.Watchlist.user_id == 1)
+                ).scalars().all()}
+                for code, nm in s.execute(select(models.Stock.code, models.Stock.name)).all():
+                    if nm:
+                        db_name2code[str(nm)] = str(code)
+            finally:
+                s.close()
+        except Exception:
+            pass
+
+    # FDR 전체 KRX 이름→코드 (DB에 없는 종목 보강) — 1회 로드
+    fdr_name2code: dict[str, str] = {}
+    try:
+        import FinanceDataReader as fdr
+        df = fdr.StockListing("KRX")
+        for _, r in df[["Code", "Name"]].iterrows():
+            fdr_name2code[str(r["Name"])] = str(r["Code"]).zfill(6)
+    except Exception:
+        pass
+
+    def resolve(nm: str | None) -> str | None:
+        if not nm:
+            return None
+        nm = _clean_stock_name(nm) or nm
+        return db_name2code.get(nm) or fdr_name2code.get(nm)
+
+    entities: list[dict] = []
+    for st in extraction.get("stocks") or []:
+        if not isinstance(st, dict):
+            continue
+        code = resolve(st.get("name"))
+        st["code"] = code
+        st["inWatchlist"] = bool(code and code in wl_codes)
+        if st.get("name"):
+            entities.append({"type": "stock", "name": _clean_stock_name(st["name"]) or st["name"],
+                             "code": code, "inWatchlist": st["inWatchlist"]})
+    for sec in extraction.get("sectors") or []:
+        if not isinstance(sec, dict):
+            continue
+        known = sec.get("sector") in canon_sectors
+        sec["known"] = known
+        if known:
+            entities.append({"type": "sector", "name": sec["sector"], "known": True})
+    extraction["entities"] = entities
+    extraction["canonicalSectors"] = sorted(canon_sectors)
+    return extraction
+
+
+@app.post("/api/ai/extract/induct")
+def ai_extract_induct(body: dict = Body(default={}), _current_user=Depends(require_admin)):
+    """추출된 신규 종목을 [제외원칙 필터 → 관심종목 편입 → 엔진/LLM 리포트] 파이프라인에 투입.
+
+    body: {"stocks": ["대우건설", "SK오션플랜트", ...] 또는 [{"name":..,"code":..}]}
+    각 종목: 코드해석 → exclusion_engine.gate → 통과 시 stocks/watchlist 편입 →
+            백그라운드 stock_compass.analyze_stock + graph 재생성.
+    반환: 종목별 status (added | exists | excluded | unknown).
+    """
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB module not available")
+    raw = body.get("stocks") or []
+    items: list[str] = []
+    for it in raw:
+        if isinstance(it, dict):
+            items.append(str(it.get("name") or it.get("code") or "").strip())
+        else:
+            items.append(str(it).strip())
+    items = [x for x in items if x]
+    if not items:
+        raise HTTPException(status_code=400, detail="stocks required")
+
+    results: list[dict] = []
+    to_analyze: list[str] = []
+    with apollo_db.session_scope() as session:
+        import exclusion_engine
+        for q in items:
+            # 코드/이름 해석 (DB 정확 → 부분 → FDR)
+            row = session.execute(
+                select(models.Stock).where((models.Stock.code == q) | (models.Stock.name == q))
+            ).scalar_one_or_none()
+            if row is None:
+                row = session.execute(
+                    select(models.Stock).where(models.Stock.name.contains(q))
+                ).scalars().first()
+            if row is not None:
+                code, name = str(row.code), str(row.name)
+            else:
+                fdr_result = _fdr_lookup(q)
+                if fdr_result is None:
+                    results.append({"query": q, "status": "unknown"})
+                    continue
+                code, name = fdr_result
+                if session.execute(select(models.Stock).where(models.Stock.code == code)).scalar_one_or_none() is None:
+                    session.add(models.Stock(code=code, name=name))
+
+            # 이미 관심종목?
+            exists = session.execute(
+                select(models.Watchlist.id).where(
+                    models.Watchlist.user_id == 1, models.Watchlist.stock_code == code)
+            ).first()
+            if exists:
+                results.append({"query": q, "code": code, "name": name, "status": "exists"})
+                continue
+
+            # 제외원칙 필터 (편입 전 1회)
+            try:
+                exclusion_engine.gate(session, code, name)
+            except Exception:
+                results.append({"query": q, "code": code, "name": name, "status": "excluded"})
+                continue
+
+            # 편입 (watchlist.created_at = now → '관종 신입' 3일 뱃지 기준)
+            session.add(models.Watchlist(user_id=1, stock_code=code))
+            results.append({"query": q, "code": code, "name": name, "status": "added"})
+            to_analyze.append(code)
+
+    # 편입 통과분만 백그라운드 분석 + 그래프 재생성
+    def _run(codes: list[str]):
+        import stock_compass
+        for c in codes:
+            try:
+                stock_compass.analyze_stock(c, with_ai=True)
+            except Exception as exc:
+                import logging
+                logging.getLogger("induct").warning("induct analyze failed %s: %s", c, exc)
+        try:
+            import graph_engine
+            graph_engine.build_graph(force=True)
+        except Exception:
+            pass
+
+    if to_analyze:
+        threading.Thread(target=_run, args=(to_analyze,), daemon=True).start()
+
+    return {"ok": True, "results": results,
+            "added": sum(1 for r in results if r["status"] == "added"),
+            "analyzing": len(to_analyze)}
 
 
 @app.post("/api/public/queue-analysis")

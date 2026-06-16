@@ -1098,3 +1098,133 @@ def analyze_chart_images_multi(
             results.append({"symbol": sym, "error": str(exc), "ai_result": None,
                             "analyzed_at": datetime.now(timezone.utc).isoformat()})
     return {"multi": True, "results": results, "groups": groups}
+
+
+# ---------------------------------------------------------------------------
+# 텍스트 추출 우선 인식 — 이미지가 단일종목 차트인지 / 다종목 차트인지 /
+# 시장데이터 표(외인·기관·사모펀드 매수, 시황)인지 먼저 식별하고 의도를 추론
+# ---------------------------------------------------------------------------
+
+_EXTRACT_PROMPT = """\
+너는 업로드된 이미지(들)의 '텍스트와 내용을 먼저 정확히 추출'한 뒤 종류를 판별하는 OCR+분류 AI다.
+추측 금지 — 이미지에 실제로 보이는 것만 보고한다. 종목코드는 화면에 6자리가 명확히 보일 때만 적는다.
+
+content_type 판별:
+- "single_stock_chart": 한 종목의 가격 차트(캔들) 하나 또는 같은 종목의 여러 타임프레임
+- "multi_stock_charts": 서로 다른 종목의 가격 차트가 섞임
+- "market_data": 종목 가격 차트가 아니라 '표/순위/리스트' (외국인·기관·사모펀드 순매수 상위, 시황 요약, 섹터별 종목 등)
+- "unknown": 위 어디에도 해당 안 되거나 내용을 읽을 수 없음
+
+반드시 아래 JSON만 반환:
+{
+  "content_type": "single_stock_chart|multi_stock_charts|market_data|unknown",
+  "confidence": 0~100,
+  "extracted_summary": "이미지에서 실제로 읽은 핵심 내용 3~6문장 (표/수치/종목명 위주, 추측 없이)",
+  "stocks": [{"name": "종목명", "code_in_image": "6자리 또는 null", "sector": "추정 섹터 또는 null", "context": "어떤 표/맥락에서 등장했는지 (예: 외국인 순매수 1위)"}],
+  "sectors": [{"sector": "섹터명", "theme": "테마", "stocks": ["종목명들"]}],
+  "single_stock": {"name": "단일종목 차트일 때 종목명, 아니면 null", "code_in_image": "6자리 또는 null"},
+  "user_intent": "추가 정보(사용자 지시)에서 추론한 요청의 방향 — 무엇을 원하는가",
+  "intent_response": "그 요청에 대한 수행 결과/답변 (예: 섹터 분류 결과, 관심종목 후보 목록). 지시 없으면 핵심 요약"
+}
+"""
+
+
+def extract_and_classify(
+    *,
+    image_files: list[tuple[str, bytes]],
+    api_key: str,
+    model: str,
+    provider: str,
+    extra_context: str | None = None,
+    timeout_seconds: float = 90.0,
+) -> dict[str, Any]:
+    """1회 비전 호출: 텍스트 추출 + content_type 분류 + 의도 추론. 실패 시 unknown."""
+    intro = _EXTRACT_PROMPT
+    if extra_context:
+        intro += f"\n\n[추가 정보 — 사용자 지시]\n{extra_context}"
+    intro += f"\n\n이미지 수: {len(image_files)}"
+    try:
+        if provider == "gemini":
+            gurl = (f"https://generativelanguage.googleapis.com/v1beta"
+                    f"/models/{model}:generateContent?key={api_key}")
+            parts: list[dict[str, Any]] = [{"text": intro}]
+            for idx, (fname, img) in enumerate(image_files):
+                durl = _image_bytes_to_data_url(img, fname)
+                parts.append({"text": f"[이미지 {idx}]"})
+                parts.append({"inlineData": {
+                    "mimeType": durl.split(";")[0].split("data:")[1],
+                    "data": durl.split(";base64,")[1]}})
+            payload = {"contents": [{"role": "user", "parts": parts}],
+                       "generationConfig": {"responseMimeType": "application/json", "temperature": 0.1}}
+            resp = httpx.post(gurl, json=payload, timeout=timeout_seconds)
+            resp.raise_for_status()
+            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        else:
+            base = "https://api.groq.com/openai/v1" if provider == "groq" else "https://api.openai.com/v1"
+            content: list[dict[str, Any]] = [{"type": "text", "text": intro}]
+            for idx, (fname, img) in enumerate(image_files):
+                content.append({"type": "text", "text": f"[이미지 {idx}]"})
+                content.append({"type": "image_url",
+                                "image_url": {"url": _image_bytes_to_data_url(img, fname), "detail": "high"}})
+            payload = {"model": model, "messages": [{"role": "user", "content": content}],
+                       "temperature": 0.1, "response_format": {"type": "json_object"}}
+            resp = httpx.post(f"{base}/chat/completions", json=payload,
+                              headers={"Authorization": f"Bearer {api_key}"}, timeout=timeout_seconds)
+            resp.raise_for_status()
+            raw = resp.json()["choices"][0]["message"]["content"]
+        data = json.loads(_clean_json_response(raw))
+        if not isinstance(data, dict) or "content_type" not in data:
+            raise ValueError("malformed")
+        return data
+    except Exception as exc:  # noqa: BLE001
+        return {"content_type": "unknown", "confidence": 0,
+                "extracted_summary": f"이미지 인식 실패: {exc}",
+                "stocks": [], "sectors": [], "single_stock": {"name": None, "code_in_image": None},
+                "user_intent": extra_context or "", "intent_response": None,
+                "error": str(exc)}
+
+
+def analyze_chart_images_smart(
+    *,
+    symbol: str,
+    image_files: list[tuple[str, bytes]],
+    api_key: str,
+    model: str = "gpt-4o",
+    provider: str = "openai",
+    extra_context: str | None = None,
+    timeout_seconds: float = 90.0,
+) -> dict[str, Any]:
+    """텍스트 추출 우선 인식 → 콘텐츠 종류별 라우팅.
+
+    반환 mode:
+      - "stock":        단일종목 차트 → 심층 단일 리포트 1건 ({result, extraction})
+      - "multi_stock":  여러 종목 차트 → 종목별 순차 리포트 ({results, extraction})
+      - "market_data":  시장데이터 표 → 추출/섹터/의도 응답만 (가짜 종목 리포트 없음)
+      - "unrecognized": 인식 실패 → 미인식 보고 (리포트 없음)
+    """
+    ext = extract_and_classify(
+        image_files=image_files, api_key=api_key, model=model,
+        provider=provider, extra_context=extra_context, timeout_seconds=timeout_seconds,
+    )
+    ctype = ext.get("content_type", "unknown")
+
+    if ctype == "single_stock_chart" and (ext.get("single_stock") or {}).get("name"):
+        result = analyze_chart_images(
+            symbol=symbol, image_files=image_files, api_key=api_key,
+            model=model, provider=provider, extra_context=extra_context,
+            timeout_seconds=timeout_seconds,
+        )
+        return {"mode": "stock", "result": result, "extraction": ext}
+
+    if ctype == "multi_stock_charts":
+        bundle = analyze_chart_images_multi(
+            symbol=symbol, image_files=image_files, api_key=api_key,
+            model=model, provider=provider, extra_context=extra_context,
+            timeout_seconds=timeout_seconds,
+        )
+        return {"mode": "multi_stock", "results": bundle.get("results", []), "extraction": ext}
+
+    if ctype == "market_data":
+        return {"mode": "market_data", "extraction": ext}
+
+    return {"mode": "unrecognized", "extraction": ext}
