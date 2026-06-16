@@ -36,6 +36,7 @@ SECTORS: Dict[str, List[str]] = {
     "바이오":      ["207940", "068270", "196170", "326030"],  # 삼성바이오로직스, 셀트리온, 알테오젠, SK바이오팜
     "2차전지":     ["373220", "051910", "247540", "003670"],  # LG에너지솔루션, LG화학, 에코프로비엠, 포스코퓨처엠
     "화학":        ["096770", "009830", "010060"],             # SK이노베이션, 한화솔루션, OCI홀딩스
+    "경기소비재":  ["000720", "047040", "097950", "005300", "139480", "352820"],  # 현대건설,대우건설,CJ제일제당,롯데칠성,이마트,하이브
 }
 
 # 종목 코드 → 한국어 이름 (네이버 금융 기준 실명)
@@ -50,6 +51,8 @@ CODE_NAMES: Dict[str, str] = {
     "207940": "삼성바이오로직스", "068270": "셀트리온", "196170": "알테오젠",     "326030": "SK바이오팜",
     "373220": "LG에너지솔루션", "051910": "LG화학",     "247540": "에코프로비엠", "003670": "포스코퓨처엠",
     "096770": "SK이노베이션", "009830": "한화솔루션",   "010060": "OCI홀딩스",
+    "000720": "현대건설",     "047040": "대우건설",     "097950": "CJ제일제당",   "005300": "롯데칠성",
+    "139480": "이마트",       "352820": "하이브",
 }
 
 # 섹터별 주도주(시총 대장) / 소부장·동종 구분 — 주도주 = 시총 상위 2개
@@ -64,6 +67,7 @@ SECTOR_ROLES: Dict[str, Dict[str, List[str]]] = {
     "바이오":      {"주도주": ["207940", "068270"], "소부장": ["196170", "326030"]},
     "2차전지":     {"주도주": ["373220", "051910"], "소부장": ["247540", "003670"]},
     "화학":        {"주도주": ["096770", "009830"], "소부장": ["010060"]},
+    "경기소비재":  {"주도주": ["000720", "097950"], "소부장": ["139480", "352820"]},
 }
 
 # 섹터별 현재 시장 트렌드 테마 (주기적 갱신 예정)
@@ -78,6 +82,7 @@ SECTOR_TRENDS: Dict[str, Dict] = {
     "바이오":      {"tags": ["ADC항체약물", "비만치료제", "AI신약"],        "theme": "글로벌 바이오텍 확장"},
     "2차전지":     {"tags": ["ESS전환", "전기차조정", "소재다변화"],        "theme": "ESS·에너지저장 전환 모색"},
     "화학":        {"tags": ["정유스프레드", "태양광소재", "친환경전환"],   "theme": "화학 업황 턴어라운드 대기"},
+    "경기소비재":  {"tags": ["건설수주", "내수회복", "K엔터·콘텐츠"],        "theme": "내수·소비 회복 + 건설 턴어라운드"},
 }
 
 WEIGHTS = {
@@ -539,6 +544,7 @@ def _get_pv_scores() -> Dict[str, Dict[str, float]]:
         raw_mom: Dict[str, float] = {}
         raw_vol: Dict[str, float] = {}
         sector_top3: Dict[str, list] = {}
+        sector_all: Dict[str, list] = {}
         code_close_series: Dict[str, List[float]] = {}
 
         for sector, codes in SECTORS.items():
@@ -579,11 +585,15 @@ def _get_pv_scores() -> Dict[str, Dict[str, float]]:
             raw_mom[sector] = sum(moms) / max(len(moms), 1) if moms else 0.0
             raw_vol[sector] = sum(vols) / max(len(vols), 1) if vols else 0.0
 
-            # 14일 수익률 상위 3종목
-            top3 = sorted(code_14d.items(), key=lambda x: x[1], reverse=True)[:3]
+            # 14일 수익률 정렬 — 상위 3(leadStocks) + 전 종목(stocks)
+            ranked = sorted(code_14d.items(), key=lambda x: x[1], reverse=True)
             sector_top3[sector] = [
                 {"code": c, "name": CODE_NAMES.get(c, c), "change14d": v}
-                for c, v in top3
+                for c, v in ranked[:3]
+            ]
+            sector_all[sector] = [
+                {"code": c, "name": CODE_NAMES.get(c, c), "change14d": v}
+                for c, v in ranked
             ]
 
         mom_norm = _normalize(raw_mom)
@@ -644,6 +654,7 @@ def _get_pv_scores() -> Dict[str, Dict[str, float]]:
                 "momentum_pct":      round(raw_mom.get(sector, 0.0), 2),
                 "volume_surge_pct":  round(raw_vol.get(sector, 0.0), 2),
                 "top_stocks":        sector_top3.get(sector, []),
+                "all_stocks":        sector_all.get(sector, []),
                 "dominance":         sector_dominance.get(sector),
             }
             for sector in SECTORS
@@ -809,6 +820,12 @@ def compute_sector_rotation(force: bool = False) -> dict:
                 {**ls, "changeToday": code_intraday.get(str(ls.get("code")), 0.0)}
                 for ls in pv.get("top_stocks", [])
             ],
+            "allStocks":      [
+                {**ls, "changeToday": code_intraday.get(str(ls.get("code")), 0.0)}
+                for ls in pv.get("all_stocks", [])
+            ],
+            # 헤더 스파크라인용 — 섹터 평균 정규화 가격(최근 ~30봉)
+            "sparkline":      (pv.get("dominance") or {}).get("prices") or [],
             "dominance":      pv.get("dominance"),
         })
 
