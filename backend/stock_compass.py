@@ -102,7 +102,12 @@ def _stock_sector(code: str) -> Optional[str]:
     try:
         p = Path(__file__).resolve().parent / "sector_classification.json"
         data = json.loads(p.read_text(encoding="utf-8"))
-        return data.get(code)
+        sec = data.get(code)
+        try:
+            import sector_rotation as _sr
+            return _sr.canonical_sector(sec) or sec
+        except Exception:
+            return sec
     except Exception:
         return None
 

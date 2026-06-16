@@ -1504,6 +1504,15 @@ def _load_sector_map() -> dict:
     return _SECTOR_MAP_CACHE
 
 
+def _canon_sector(sector: str | None) -> str | None:
+    """섹터명 정규화 — 자동차·로봇 AI·2차전지 등 → 모빌리티 (전 시스템 공유 기준)."""
+    try:
+        import sector_rotation as _sr
+        return _sr.canonical_sector(sector)
+    except Exception:
+        return sector
+
+
 def _icon_from_map(*, name: str | None, sector: str | None) -> str:
     cfg = _load_watchlist_icon_map()
     stock_map = cfg.get("stocks") if isinstance(cfg.get("stocks"), dict) else {}
@@ -1815,7 +1824,7 @@ def get_watchlist(current_user=Depends(get_current_user)):
             except Exception:
                 price, change_rate = 0, 0.0
             score = _get_latest_score_total(db, stock_code)
-            sector = _load_sector_map().get(stock_code) or _extract_sector(raw_tags)
+            sector = _canon_sector(_load_sector_map().get(stock_code) or _extract_sector(raw_tags))
             ld = leaders_map.get(str(stock_code))
             is_etf = exclusion_engine.is_etf(str(stock_code), str(name or ""))
             item = {
@@ -6632,6 +6641,185 @@ async def public_chart_analysis_image(
     # 시장데이터/미인식: 신규 분석 1건으로 차감
     remaining = _charge_fresh(f"doc_{rate['calls']}")
     return {"mode": rmode, "extraction": extraction, "rateRemaining": remaining}
+
+
+_SEARCH_SYSTEM_PROMPT = """당신은 MOON STOCK의 한국 주식 분석 대화 도우미다. 사용자와 자연스럽게 한국어로 대화한다.
+
+규칙:
+1. 제공된 [종목 데이터]가 있으면 그 수치(시그널·점수·목표가·손절가·모멘텀·확률)를 근거로 답한다. 없는 수치는 지어내지 않는다.
+2. 종목 데이터가 없으면 일반적인 관점에서 간결히 답하고, "정밀 분석은 차트 이미지를 올리거나 관심종목에 추가하면 가능하다"고 안내한다.
+3. 투자 권유가 아니라 정보 제공임을 자연스럽게 유지. 단정적 매수/매도 지시는 피하고 근거와 리스크를 함께 제시.
+4. 답변은 3~6문장으로 간결하게. 표 대신 대화체. 사용자가 추가로 물으면 이어서 대화한다.
+5. 한국어만 사용. 영어 단어 혼용 금지."""
+
+
+def _resolve_stock_in_text(text: str) -> Optional[tuple[str, str]]:
+    """자유 텍스트에서 종목명/코드를 찾아 (code, name). DB 우선, 6자리코드, 부분일치."""
+    if apollo_db is None or models is None:
+        return None
+    t = (text or "").strip()
+    if not t:
+        return None
+    try:
+        s: Session = apollo_db.get_session_factory()()
+        try:
+            import re as _re
+            m = _re.search(r"\b(\d{6})\b", t)
+            if m:
+                row = s.execute(select(models.Stock).where(models.Stock.code == m.group(1))).scalar_one_or_none()
+                if row:
+                    return str(row.code), str(row.name)
+            # 종목명 부분일치 — 텍스트에 포함된 가장 긴 종목명
+            rows = s.execute(select(models.Stock.code, models.Stock.name)).all()
+            hit = None
+            for code, nm in rows:
+                if nm and nm in t and (hit is None or len(nm) > len(hit[1])):
+                    hit = (str(code), str(nm))
+            return hit
+        finally:
+            s.close()
+    except Exception:
+        return None
+
+
+@app.post("/api/public/ai-search")
+def public_ai_search(request: Request, body: dict = Body(default={})):
+    """공개 자연어 대화형 검색 — 종목 데이터 기반 + LLM 대화. 게스트 게이트 + IP 일할 제한."""
+    try:
+        import market_compass
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="분석 모듈 미가용") from exc
+    query = str(body.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="검색어를 입력하세요.")
+    if not (str(body.get("guest_name") or "").strip() and str(body.get("guest_phone") or "").strip()):
+        raise HTTPException(status_code=403, detail="이름과 전화번호가 필요합니다 (게스트 입장 후 이용).")
+
+    ip = (request.client.host if request.client else "?") or "?"
+    rate = _public_rate_state(ip)
+    rate.setdefault("chat", 0)
+    if rate["chat"] >= 30:
+        raise HTTPException(status_code=429, detail="오늘 대화 한도(30회)를 모두 사용했습니다. 내일 다시 이용하세요.")
+    rate["chat"] += 1
+
+    # 종목 데이터 그라운딩 (캐시 리포트 요약)
+    grounding = ""
+    resolved = _resolve_stock_in_text(query)
+    if resolved and apollo_db is not None and models is not None:
+        code, name = resolved
+        try:
+            s: Session = apollo_db.get_session_factory()()
+            try:
+                row = s.execute(select(models.AiAnalysisCache).where(
+                    models.AiAnalysisCache.stock_code == code)).scalar_one_or_none()
+            finally:
+                s.close()
+            if row and isinstance(row.result_json, dict):
+                pj = row.result_json
+                comp = pj.get("composite", {}) or {}
+                tg = pj.get("targets", {}) or {}
+                st = pj.get("stock", {}) or {}
+                grounding = (
+                    f"\n\n[종목 데이터] {name}({code})\n"
+                    f"- 섹터: {st.get('sector')}\n"
+                    f"- 시그널: {row.signal} / 종합점수: {comp.get('score')} ({comp.get('grade')})\n"
+                    f"- 현재가: {st.get('currentPrice')} / 평균목표가: {tg.get('avgTarget')} (상승여력 {tg.get('avgTargetUpside')}%)\n"
+                    f"- 손익비: {comp.get('riskReward')}\n"
+                )
+            elif resolved:
+                grounding = f"\n\n[종목 데이터] {name}({code}) — 아직 MOON STOCK 분석 리포트가 없는 종목."
+        except Exception:
+            pass
+
+    # 대화 이력 + 그라운딩 → 단일 프롬프트
+    history = body.get("history") or []
+    convo_lines = []
+    for h in history[-6:]:
+        role = "사용자" if h.get("role") == "user" else "도우미"
+        convo_lines.append(f"{role}: {h.get('content', '')}")
+    convo = "\n".join(convo_lines)
+    user_content = (
+        (f"이전 대화:\n{convo}\n\n" if convo else "")
+        + f"사용자 질문: {query}"
+        + grounding
+    )
+
+    saved = market_compass._SYSTEM_PROMPT
+    try:
+        market_compass._SYSTEM_PROMPT = _SEARCH_SYSTEM_PROMPT
+        answer, provider = market_compass._call_llm(user_content)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"검색 실패: {exc}") from exc
+    finally:
+        market_compass._SYSTEM_PROMPT = saved
+
+    return {"answer": answer, "provider": provider,
+            "resolvedStock": ({"code": resolved[0], "name": resolved[1]} if resolved else None),
+            "chatRemaining": 30 - rate["chat"]}
+
+
+@app.post("/api/admin/sectors/mobility-induct")
+def admin_mobility_induct(body: dict = Body(default={}), _current_user=Depends(require_admin)):
+    """모빌리티 섹터 구성종목 중 관심종목에 없는 것을 1시간 뒤 자동 편입.
+
+    1시간 후: 코드해석 → exclusion_engine.gate → stocks/watchlist 편입 →
+              stock_compass.analyze_stock(리포트) → graph 재생성.
+    body.delaySeconds 로 지연 조정 가능(기본 3600). body.now=true면 즉시.
+    """
+    if apollo_db is None or models is None or _sector_rotation is None:
+        raise HTTPException(status_code=500, detail="모듈 미가용")
+    delay = 0 if body.get("now") else int(body.get("delaySeconds", 3600))
+    codes = list(_sector_rotation.SECTORS.get("모빌리티", []))
+
+    # 관심종목에 없는 것만 대상
+    with apollo_db.session_scope() as s:
+        have = {str(c) for c in s.execute(
+            select(models.Watchlist.stock_code).where(models.Watchlist.user_id == 1)
+        ).scalars().all()}
+    pending = [c for c in codes if c not in have]
+
+    def _do(target: list[str]):
+        import stock_compass, exclusion_engine
+        analyzed: list[str] = []
+        for code in target:
+            try:
+                with apollo_db.session_scope() as session:
+                    name = _sector_rotation.CODE_NAMES.get(code, code)
+                    if session.execute(select(models.Stock).where(models.Stock.code == code)).scalar_one_or_none() is None:
+                        session.add(models.Stock(code=code, name=name))
+                    if session.execute(select(models.Watchlist.id).where(
+                            models.Watchlist.user_id == 1, models.Watchlist.stock_code == code)).first():
+                        continue
+                    try:
+                        exclusion_engine.gate(session, code, name)
+                    except Exception:
+                        continue
+                    session.add(models.Watchlist(user_id=1, stock_code=code))
+                analyzed.append(code)
+            except Exception as exc:
+                import logging
+                logging.getLogger("mobility-induct").warning("induct prep failed %s: %s", code, exc)
+        for code in analyzed:
+            try:
+                stock_compass.analyze_stock(code, with_ai=True)
+            except Exception as exc:
+                import logging
+                logging.getLogger("mobility-induct").warning("analyze failed %s: %s", code, exc)
+        try:
+            import graph_engine
+            graph_engine.build_graph(force=True)
+        except Exception:
+            pass
+
+    if pending:
+        if delay <= 0:
+            threading.Thread(target=_do, args=(pending,), daemon=True).start()
+        else:
+            threading.Timer(delay, _do, args=(pending,)).start()
+
+    return {"ok": True, "scheduledInSeconds": delay,
+            "pending": [{"code": c, "name": _sector_rotation.CODE_NAMES.get(c, c)} for c in pending],
+            "alreadyHave": len(have & set(codes))}
 
 
 @app.post("/api/public/queue-analysis")

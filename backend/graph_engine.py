@@ -34,8 +34,7 @@ TOP_K_EDGES = 4  # 노드당 최강 엣지 수
 SENSITIVITY: dict[str, dict[str, float]] = {
     "반도체":      {"krw": +0.5, "oil": 0.0, "rate": -0.6, "nasdaq": +1.0},
     "AI 생태계":   {"krw": 0.0, "oil": 0.0, "rate": -0.8, "nasdaq": +1.0},
-    "로봇 AI":     {"krw": +0.3, "oil": 0.0, "rate": -0.6, "nasdaq": +0.6},
-    "2차전지":     {"krw": +0.3, "oil": 0.0, "rate": -0.5, "nasdaq": +0.3},
+    "모빌리티":    {"krw": +0.3, "oil": 0.0, "rate": -0.55, "nasdaq": +0.5},  # 자동차+로봇+2차전지 통합
     "바이오":      {"krw": 0.0, "oil": 0.0, "rate": -0.7, "nasdaq": +0.3},
     "조선":        {"krw": +1.0, "oil": +0.5, "rate": 0.0, "nasdaq": 0.0},
     "방산":        {"krw": +0.8, "oil": +0.2, "rate": +0.2, "nasdaq": 0.0},
@@ -117,6 +116,11 @@ def build_graph(force: bool = False) -> dict:
             etf_holdings[r.stock_code] = pj["etfHoldings"]
         ser = (pj.get("series") or {}).get("closes") or []
         sector = st.get("sector") or ("ETF" if str(r.stock_code)[0].isalpha() or (r.stock_name or "").startswith("KODEX") else "기타")
+        try:
+            import sector_rotation as _sr
+            sector = _sr.canonical_sector(sector) or sector
+        except Exception:
+            pass
         price = float(st.get("currentPrice") or (ser[-1] if ser else 0) or 0)
         shares = fundamentals_cache.get_shares(str(r.stock_code))
         cap = price * shares if (price > 0 and shares > 0) else 0.0

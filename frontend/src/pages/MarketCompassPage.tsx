@@ -312,10 +312,25 @@ function Row({ f, m, cellBg }: { f: string; m: KrSectorMatrix; cellBg: (c: Matri
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
+const MARKET_CACHE_KEY = 'moonstock.marketCompass.v1'
+const CALC_EST_SEC = 45  // 통상 계산 시간(초) — 카운트다운 추정 기준
+
 export function MarketCompassPage() {
-  const [market, setMarket] = useState<MarketData | null>(null)
+  // 마지막 표출 결과를 즉시 프리뷰 (빈 화면 방지)
+  const [market, setMarket] = useState<MarketData | null>(() => {
+    try { const r = localStorage.getItem(MARKET_CACHE_KEY); return r ? (JSON.parse(r) as MarketData) : null } catch { return null }
+  })
   const [mLoading, setMLoading] = useState(false)
   const [mErr, setMErr] = useState<string | null>(null)
+  const [calcSec, setCalcSec] = useState(0)  // 계산 경과초 (카운트다운용)
+
+  // 계산 중 1초 틱 — 남은 시간 줄어드는 시각 효과
+  useEffect(() => {
+    if (!mLoading) { setCalcSec(0); return }
+    setCalcSec(0)
+    const t = setInterval(() => setCalcSec(s => s + 1), 1000)
+    return () => clearInterval(t)
+  }, [mLoading])
 
   const [code, setCode] = useState('')
   const [stock, setStock] = useState<StockData | null>(null)
@@ -326,7 +341,10 @@ export function MarketCompassPage() {
     setMLoading(true)
     setMErr(null)
     fetchJson<MarketData>(`/api/admin/market-compass${force ? '?force=1' : ''}`)
-      .then(setMarket)
+      .then(d => {
+        setMarket(d)
+        try { localStorage.setItem(MARKET_CACHE_KEY, JSON.stringify(d)) } catch { /* storage full */ }
+      })
       .catch(e => setMErr(e instanceof Error ? e.message : String(e)))
       .finally(() => setMLoading(false))
   }, [])
@@ -378,7 +396,36 @@ export function MarketCompassPage() {
 
       {/* ── 시장 차원 (1~7단계) ─────────────────────────────── */}
       {mErr && <p style={{ color: '#f87171' }}>시장 분석 실패: {mErr}</p>}
-      {mLoading && !market && <p style={{ color: '#94a3b8' }}>시장 데이터 계산 중… (최대 1분)</p>}
+
+      {/* 계산 중 — 남은 시간 줄어드는 카운트다운 바 */}
+      {mLoading && (() => {
+        const remain = Math.max(0, CALC_EST_SEC - calcSec)
+        const pct = Math.max(4, 100 - (calcSec / CALC_EST_SEC) * 100)  // 남은 시간 = 줄어드는 막대
+        return (
+          <div style={{ ...panel, borderColor: 'rgba(96,165,250,0.35)', display: 'flex', alignItems: 'center', gap: 14 }}>
+            <div style={{ flexShrink: 0, fontSize: 13, color: '#93c5fd', fontWeight: 700, minWidth: 92 }}>
+              {remain > 0 ? `약 ${remain}초 남음` : '마무리 중…'}
+            </div>
+            <div style={{ flex: 1, height: 10, borderRadius: 99, background: 'rgba(255,255,255,0.07)', overflow: 'hidden' }}>
+              <div style={{
+                width: `${pct}%`, height: '100%', borderRadius: 99,
+                background: 'linear-gradient(90deg,#60a5fa,#34d399)',
+                transition: 'width 1s linear',
+              }} />
+            </div>
+            <span style={{ flexShrink: 0, fontSize: 12, color: '#64748b' }}>
+              {market ? '최신 데이터로 갱신 중' : '시장 데이터 계산 중'}
+            </span>
+          </div>
+        )
+      })()}
+
+      {/* 캐시 프리뷰 안내 — 갱신 중 이전 결과를 먼저 보여줌 */}
+      {mLoading && market && (
+        <p style={{ fontSize: 12, color: '#fbbf24', margin: '0 0 12px' }}>
+          ⏱ {market.asOf} 기준 <b>직전 결과</b>를 먼저 표시 중 — 새 데이터가 준비되면 자동 교체됩니다.
+        </p>
+      )}
 
       {market && (
         <>

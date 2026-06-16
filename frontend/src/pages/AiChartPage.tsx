@@ -835,7 +835,32 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
   const [multiResults, setMultiResults] = useState<AnalysisResponse[] | null>(null)
   const [docResult, setDocResult] = useState<{ mode: string; extraction: Extraction } | null>(null)
   const [reportModal, setReportModal] = useState<{ code: string; name: string } | null>(null)
+  const [searchChat, setSearchChat] = useState<{ role: 'user' | 'assistant'; content: string; stock?: { code: string; name: string } | null }[]>([])
+  const [searchLoading, setSearchLoading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const runSearch = useCallback(async (q: string) => {
+    if (!q.trim() || searchLoading) return
+    const g = getGuest()
+    const history = searchChat.map(m => ({ role: m.role, content: m.content }))
+    setSearchChat(prev => [...prev, { role: 'user', content: q }])
+    setSymbol('')
+    setSearchLoading(true)
+    try {
+      const resp = await fetch('/api/public/ai-search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q, history, guest_name: g?.name ?? '', guest_phone: g?.phone ?? '' }),
+      })
+      const d = await resp.json()
+      if (!resp.ok) throw new Error(d.detail ?? `오류 ${resp.status}`)
+      setSearchChat(prev => [...prev, { role: 'assistant', content: d.answer ?? '(응답 없음)', stock: d.resolvedStock }])
+    } catch (e) {
+      setSearchChat(prev => [...prev, { role: 'assistant', content: `검색 실패: ${e instanceof Error ? e.message : String(e)}` }])
+    } finally {
+      setSearchLoading(false)
+    }
+  }, [searchChat, searchLoading])
   const [showKeyPanel, setShowKeyPanel] = useState(false)
   const [keyProvider, setKeyProvider] = useState<'gemini' | 'groq' | 'openai'>('gemini')
   const [apiKeyInput, setApiKeyInput] = useState('')
@@ -1406,17 +1431,27 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
                   </div>
                 ) : (
                   <label>
-                    종목명 / 코드 <span className="hint">(선택 — 파일명에서 자동 감지)</span>
+                    {publicMode ? '검색' : '종목명 / 코드'}
+                    <span className="hint">{publicMode ? ' (종목명·질문 입력 — 대화형 검색)' : ' (선택 — 파일명에서 자동 감지)'}</span>
                     <input value={symbol}
                       onChange={e => setSymbol(e.target.value)}
-                      placeholder="예: 삼성전기, 009150, AAPL" />
+                      onKeyDown={e => { if (publicMode && e.key === 'Enter' && symbol.trim()) { e.preventDefault(); runSearch(symbol.trim()) } }}
+                      placeholder={publicMode ? '예: 삼성전자 어때?  /  방산 섹터 전망' : '예: 삼성전기, 009150, AAPL'} />
                   </label>
                 )}
-                <label>
-                  추가 정보 <span className="hint">(선택)</span>
-                  <input value={extraContext} onChange={e => setExtraContext(e.target.value)}
-                    placeholder="예: 평단 180만원 보유 중" />
-                </label>
+                {!publicMode && (
+                  <label>
+                    추가 정보 <span className="hint">(선택)</span>
+                    <input value={extraContext} onChange={e => setExtraContext(e.target.value)}
+                      placeholder="예: 평단 180만원 보유 중" />
+                  </label>
+                )}
+                {publicMode && (
+                  <button type="button" className="ai-export-btn" disabled={searchLoading || !symbol.trim()}
+                    onClick={() => runSearch(symbol.trim())}>
+                    {searchLoading ? '검색 중…' : '🔍 검색'}
+                  </button>
+                )}
               </div>
 
               <div className="panel glass" style={{ padding: '10px 14px', fontSize: '0.8rem', color: 'var(--text-soft)', lineHeight: 1.7 }}>
@@ -1474,7 +1509,50 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
         </div>
 
         <div>
-          {loading ? (
+          {publicMode && searchChat.length > 0 ? (
+            <div className="ai-right">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {searchChat.map((m, i) => {
+                  const isUser = m.role === 'user'
+                  const len = m.content.length
+                  // 답변이 길수록 더 넓고 큰 폰트로 (공간 활용)
+                  const fs = isUser ? '0.95rem' : len > 360 ? '1.12rem' : len > 160 ? '1.06rem' : '1rem'
+                  const maxW = isUser ? '80%' : len > 220 ? '100%' : '92%'
+                  return (
+                  <div key={i} style={{ display: 'flex', justifyContent: isUser ? 'flex-end' : 'flex-start' }}>
+                    <div className="panel glass" style={{
+                      padding: isUser ? '11px 16px' : '16px 20px', maxWidth: maxW, lineHeight: 1.8, fontSize: fs,
+                      width: !isUser && len > 220 ? '100%' : undefined,
+                      background: isUser ? 'rgba(96,165,250,0.14)' : 'var(--color-background-secondary, rgba(255,255,255,0.04))',
+                      borderColor: isUser ? 'rgba(96,165,250,0.35)' : undefined,
+                    }}>
+                      {m.content}
+                      {m.stock && (
+                        <div style={{ marginTop: 8 }}>
+                          <button type="button" className="ai-export-btn"
+                            onClick={() => setReportModal({ code: m.stock!.code, name: m.stock!.name })}>
+                            📄 {m.stock.name} 리포트 보기
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  )
+                })}
+                {searchLoading && (
+                  <div className="panel glass" style={{ padding: '10px 14px', fontSize: '0.85rem', color: 'var(--text-soft)', alignSelf: 'flex-start' }}>답변 작성 중…</div>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                <input value={symbol} onChange={e => setSymbol(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' && symbol.trim()) { e.preventDefault(); runSearch(symbol.trim()) } }}
+                  placeholder="이어서 질문…" style={{ flex: 1 }} />
+                <button type="button" className="ai-export-btn" disabled={searchLoading || !symbol.trim()}
+                  onClick={() => runSearch(symbol.trim())}>전송</button>
+                <button type="button" className="ai-export-btn" onClick={() => setSearchChat([])}>새 대화</button>
+              </div>
+            </div>
+          ) : loading ? (
             <LoadingSkeleton />
           ) : docResult ? (
             <DocView mode={docResult.mode} ex={docResult.extraction} publicMode={publicMode}
