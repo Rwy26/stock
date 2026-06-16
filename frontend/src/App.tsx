@@ -66,6 +66,7 @@ export default function App() {
           <Route path="sector" element={<SectorRotationPage publicMode />} />
           <Route path="watchlist" element={<WatchlistPage publicMode />} />
           <Route path="ai-history" element={<PublicAiHistoryPage />} />
+          <Route path="ai-chart" element={<AiChartPage publicMode />} />
         </Route>
 
         <Route path="login" element={<LoginPage />} />

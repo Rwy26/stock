@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { fetchJson } from '../lib/api'
 import { getAccessToken } from '../lib/auth'
+import { getGuest } from '../lib/publicApi'
 import { StockReportModal } from '../components/StockReportModal'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -478,8 +479,8 @@ function linkifyEntities(
 }
 
 // 시장데이터 표 · 미인식 결과 — 단일종목 리포트(관망/목표가) 대신 추출 내용·의도 응답만 표시
-function DocView({ mode, ex, onOpenReport }: {
-  mode: string; ex: Extraction; onOpenReport: (code: string, name: string) => void
+function DocView({ mode, ex, onOpenReport, publicMode }: {
+  mode: string; ex: Extraction; onOpenReport: (code: string, name: string) => void; publicMode?: boolean
 }) {
   const navigate = useNavigate()
   const isUnrec = mode === 'unrecognized'
@@ -544,7 +545,7 @@ function DocView({ mode, ex, onOpenReport }: {
         </Section>
       )}
 
-      {newStocks.length > 0 && (
+      {newStocks.length > 0 && !publicMode && (
         <Section title="➕ 신규 종목 관심종목 편입">
           <p className="hint" style={{ marginBottom: 8 }}>
             관심종목에 없는 {newStocks.length}개 종목: {newStocks.map(s => s.name).join(', ')}
@@ -818,7 +819,7 @@ function ResultView({ data, onExport }: { data: AnalysisResponse; onExport?: () 
 
 // ─── Main Page ───────────────────────────────────────────────────────────────
 
-export function AiChartPage() {
+export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {}) {
   const [mode, setMode] = useState<Mode>('drop')
   const [droppedFiles, setDroppedFiles] = useState<DroppedFile[]>([])
   const [isDragOver, setIsDragOver] = useState(false)
@@ -1027,6 +1028,10 @@ export function AiChartPage() {
       }
       const imageFiles = droppedFiles.filter(d => d.type === 'image')
       const csvFiles = droppedFiles.filter(d => d.type === 'csv')
+      // 공개 모드는 이미지 분석만 지원 (CSV·적재 등 관리자 기능 제외)
+      if (publicMode && csvFiles.length > 0) {
+        setError('공개 분석은 차트 이미지만 지원합니다 (CSV는 관리자 전용)'); return
+      }
       // CSV는 종목 식별자가 반드시 필요. 이미지는 콘텐츠 인식으로 진행 가능.
       if (!effectiveSymbol && csvFiles.length > 0 && imageFiles.length === 0) {
         setError('CSV는 종목명 또는 종목코드를 입력하세요 (파일명에서 자동 감지 실패)'); return
@@ -1036,14 +1041,24 @@ export function AiChartPage() {
         if (imageFiles.length > 0) {
           const form = new FormData()
           imageFiles.forEach(d => form.append('files', d.file))
-          const token = getAccessToken()
-          const params = new URLSearchParams({ symbol: effectiveSymbol || 'AUTO' })
-          if (extraContext.trim()) params.set('extra_context', extraContext.trim())
-          const resp = await fetch(`/api/ai/chart-analysis/image?${params}`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}` },
-            body: form,
-          })
+          let resp: Response
+          if (publicMode) {
+            const g = getGuest()
+            const params = new URLSearchParams({
+              guest_name: g?.name ?? '', guest_phone: g?.phone ?? '',
+            })
+            if (extraContext.trim()) params.set('extra_context', extraContext.trim())
+            resp = await fetch(`/api/public/chart-analysis/image?${params}`, { method: 'POST', body: form })
+          } else {
+            const token = getAccessToken()
+            const params = new URLSearchParams({ symbol: effectiveSymbol || 'AUTO' })
+            if (extraContext.trim()) params.set('extra_context', extraContext.trim())
+            resp = await fetch(`/api/ai/chart-analysis/image?${params}`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}` },
+              body: form,
+            })
+          }
           const data = await resp.json()
           if (!resp.ok) throw new Error(data.detail ?? `서버 오류 ${resp.status}`)
           // 모드별 라우팅: stock / multi_stock / market_data / unrecognized
@@ -1132,9 +1147,10 @@ export function AiChartPage() {
       <header className="topbar glass">
         <div>
           <p className="top-label">AI CHART ANALYSIS</p>
-          <h2>AI 종목 분석</h2>
+          <h2>AI 분석</h2>
           <p className="subtle">차트 이미지 · CSV를 드롭하거나 종목코드로 즉시 AI 분석</p>
         </div>
+        {!publicMode && (<>
         <button type="button" className="ai-key-settings-btn" onClick={() => { setShowKeyPanel(v => !v); setKeyStatus('idle'); setKeyMsg('') }}
           title="AI API 키 설정">
           🔑 API 키 설정
@@ -1153,6 +1169,7 @@ export function AiChartPage() {
           title="관심종목 중 데이터 부족 종목 작업 요구">
           {workRunning ? '⏳ 조회 중...' : '📋 작업 요구'}
         </button>
+        </>)}
       </header>
 
       {diagSteps !== null && (
@@ -1460,7 +1477,7 @@ export function AiChartPage() {
           {loading ? (
             <LoadingSkeleton />
           ) : docResult ? (
-            <DocView mode={docResult.mode} ex={docResult.extraction}
+            <DocView mode={docResult.mode} ex={docResult.extraction} publicMode={publicMode}
               onOpenReport={(code, name) => setReportModal({ code, name })} />
           ) : multiResults ? (
             <>

@@ -6,7 +6,8 @@ import { clearGuest, getGuest, publicFetch, setGuest, type Guest } from '../lib/
 const publicMenu = [
   { to: '/public/watchlist', end: false, label: '⭐ 관심 종목' },
   { to: '/public/sector', end: false, label: '🧭 섹터 나침반' },
-  { to: '/public/ai-history', end: false, label: '📊 AI 분석' },
+  { to: '/public/ai-history', end: false, label: '📊 AI 분석 지도' },
+  { to: '/public/ai-chart', end: false, label: '🤖 AI 분석' },
 ] as const
 
 const inputStyle: CSSProperties = {

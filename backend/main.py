@@ -6503,6 +6503,137 @@ def ai_extract_induct(body: dict = Body(default={}), _current_user=Depends(requi
             "analyzing": len(to_analyze)}
 
 
+# 공개 분석 일할 제한: "신규 종목"만 카운트. 분석 완료된 기존 관심종목은 읽기전용이라 무제한.
+_PUBLIC_NEW_LIMIT = 5      # IP당 하루 신규 종목 분석 한도
+_PUBLIC_HARD_CEILING = 50  # 악용 방지 절대 상한 (기존종목 조회 포함 전체 호출/일)
+# ip -> {"date": str, "calls": int, "fresh": set[str]}  (fresh = 신규 종목 코드/토큰 집합)
+_PUBLIC_RATE: dict[str, dict] = {}
+
+
+def _public_rate_state(ip: str) -> dict:
+    today = datetime.now().strftime("%Y-%m-%d")
+    st = _PUBLIC_RATE.get(ip)
+    if not st or st.get("date") != today:
+        st = {"date": today, "calls": 0, "fresh": set()}
+        _PUBLIC_RATE[ip] = st
+    return st
+
+
+@app.post("/api/public/chart-analysis/image")
+async def public_chart_analysis_image(
+    request: Request,
+    guest_name: str = "",
+    guest_phone: str = "",
+    extra_context: str | None = None,
+    files: list[UploadFile] = FastAPIFile(...),
+):
+    """공개(게스트) 차트 이미지 AI 분석 — 이름+전화 게이트 + IP 일할 제한.
+
+    관리자 엔드포인트와 동일한 텍스트추출 우선 인식 파이프라인을 쓰되,
+    ai_analysis_cache 저장·관심종목 편입 등 관리자 부수효과는 수행하지 않는다(읽기 위주).
+    """
+    if _chart_analysis is None:
+        raise HTTPException(status_code=503, detail="chart_analysis module not available")
+    if not (guest_name.strip() and guest_phone.strip()):
+        raise HTTPException(status_code=403, detail="이름과 전화번호가 필요합니다 (게스트 입장 후 이용).")
+
+    ip = (request.client.host if request.client else "?") or "?"
+    rate = _public_rate_state(ip)
+    # 악용 방지 절대 상한 (기존종목 조회 포함). 신규 한도는 분석 후 판정.
+    if rate["calls"] >= _PUBLIC_HARD_CEILING:
+        raise HTTPException(status_code=429, detail="오늘 이용 한도를 초과했습니다. 내일 다시 이용하세요.")
+    rate["calls"] += 1
+
+    provider, api_key, model = _resolve_ai_provider()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="AI 분석 일시 중단 (관리자 설정 필요).")
+
+    if not files or len(files) > 6:
+        raise HTTPException(status_code=400, detail="이미지는 1~6개까지 업로드 가능합니다.")
+    ALLOWED = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    MAXSZ = 10 * 1024 * 1024
+    image_files: list[tuple[str, bytes]] = []
+    for up in files:
+        fn = (up.filename or "chart.png").lower()
+        ext = "." + fn.rsplit(".", 1)[-1] if "." in fn else ""
+        if ext not in ALLOWED:
+            raise HTTPException(status_code=400, detail=f"지원하지 않는 형식: {ext}")
+        raw = await up.read(MAXSZ + 1)
+        if len(raw) > MAXSZ:
+            raise HTTPException(status_code=413, detail=f"{up.filename}: 10MB 초과")
+        image_files.append((up.filename or "chart.png", raw))
+
+    vision_model = "gpt-4o" if (provider == "openai" and model == "gpt-4o-mini") else model
+    try:
+        bundle = _chart_analysis.analyze_chart_images_smart(
+            symbol="AUTO", image_files=image_files, api_key=api_key,
+            model=vision_model, provider=provider, extra_context=extra_context,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"분석 실패: {exc}") from exc
+
+    # 방문 기록 (lead capture)
+    try:
+        if apollo_db is not None and models is not None:
+            with apollo_db.session_scope() as s:
+                s.add(models.PublicAiRequest(
+                    name=_clean_public_text(guest_name), phone=_clean_public_text(guest_phone),
+                    stock_query=f"[이미지분석] {(extra_context or '')[:80]}"))
+    except Exception:
+        pass
+
+    rmode = bundle.get("mode", "unrecognized")
+    extraction = _enrich_extraction(bundle.get("extraction") or {})
+
+    # 관심종목(분석 완료) 코드 집합 — 기존종목 조회는 읽기전용이라 신규 한도 미차감
+    wl_codes: set[str] = set()
+    try:
+        if apollo_db is not None and models is not None:
+            with apollo_db.session_scope() as s:
+                wl_codes = {str(c) for c in s.execute(
+                    select(models.Watchlist.stock_code).where(models.Watchlist.user_id == 1)
+                ).scalars().all()}
+    except Exception:
+        pass
+
+    def _charge_fresh(token: str) -> int:
+        """신규 종목/분석이면 일할 한도 차감. 한도 초과 시 429. 반환: 남은 신규 횟수."""
+        if token not in rate["fresh"]:
+            if len(rate["fresh"]) >= _PUBLIC_NEW_LIMIT:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"오늘 신규 종목 분석 {_PUBLIC_NEW_LIMIT}개를 모두 사용했습니다. "
+                           "기존 관심종목 조회는 계속 가능합니다. 신규 분석은 내일 다시 이용하세요.")
+            rate["fresh"].add(token)
+        return _PUBLIC_NEW_LIMIT - len(rate["fresh"])
+
+    # 단일종목: 종목명 검증만 (캐시 저장 없음)
+    if rmode == "stock":
+        res = dict(bundle.get("result") or {})
+        air = res.get("ai_result") or {}
+        vcode, vname, verified = _verify_krx_identity(
+            provided_code="AUTO", ai_name=air.get("symbol"), ai_code_in_chart=air.get("code_in_chart"))
+        res["codeVerified"] = verified
+        res["stock_name"] = vname
+        if verified:
+            res["symbol"] = vcode
+        # 기존 관심종목이면 무제한(읽기전용), 신규 종목이면 일할 한도 차감
+        is_existing = bool(verified and vcode in wl_codes)
+        remaining = (_PUBLIC_NEW_LIMIT - len(rate["fresh"])) if is_existing else _charge_fresh(vcode or "UNVERIFIED")
+        res["mode"] = "stock"
+        res["isExisting"] = is_existing
+        res["extraction"] = extraction
+        res["rateRemaining"] = remaining
+        return res
+    if rmode == "multi_stock":
+        remaining = _charge_fresh(f"multi_{rate['calls']}")
+        return {"mode": "multi_stock", "multi": True,
+                "results": bundle.get("results", []), "extraction": extraction, "rateRemaining": remaining}
+    # 시장데이터/미인식: 신규 분석 1건으로 차감
+    remaining = _charge_fresh(f"doc_{rate['calls']}")
+    return {"mode": rmode, "extraction": extraction, "rateRemaining": remaining}
+
+
 @app.post("/api/public/queue-analysis")
 def public_queue_analysis(body: dict = Body(default={})):
     """공개 페이지 분석 요청 → DB/FDR 종목 검색 → admin 워치리스트 편입 → 백그라운드 AI 분석."""
