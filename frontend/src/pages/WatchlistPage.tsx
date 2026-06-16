@@ -212,6 +212,74 @@ function abbreviateKoreanName(name: string, max = 4): string {
   return cutLoanword(merged).slice(0, max)
 }
 
+// 섹터 로테이션 점수 → 헤더 강조색 (강세 녹 → 유입 청 → 중립 황 → 약세 적)
+function sectorHeatColor(score: number): string {
+  if (score < 0) return 'rgba(255,255,255,0.5)'   // 점수 없음
+  if (score >= 75) return '#34d399'
+  if (score >= 55) return '#60a5fa'
+  if (score >= 40) return '#fbbf24'
+  return '#f87171'
+}
+function sectorHeatBg(score: number): string {
+  if (score < 0) return 'rgba(10,15,24,0.84)'
+  if (score >= 75) return 'rgba(16,80,65,0.86)'
+  if (score >= 55) return 'rgba(12,68,124,0.86)'
+  if (score >= 40) return 'rgba(99,72,11,0.84)'
+  return 'rgba(80,30,30,0.84)'
+}
+
+// 섹터 추세 형태 판정 — 2구간(중기 모멘텀 → 당일)으로 궤적 모양 결정
+type TrendShape = 'strongUp' | 'up' | 'upStall' | 'upDown' | 'downUp' | 'down' | 'strongDown' | 'flat' | 'none'
+function computeTrendShape(rot: { mom: number; today: number } | undefined, avgChange: number): TrendShape {
+  // 나침반 데이터 있으면 중기(mom)+당일(today) 2구간, 없으면 당일 평균 1구간
+  if (!rot) {
+    if (avgChange >= 1.5) return 'strongUp'
+    if (avgChange >= 0.3) return 'up'
+    if (avgChange <= -1.5) return 'strongDown'
+    if (avgChange <= -0.3) return 'down'
+    return 'flat'
+  }
+  const m = rot.mom, t = rot.today
+  const mUp = m >= 0.3, mDn = m <= -0.3
+  const tUp = t >= 0.3, tFlat = Math.abs(t) < 0.3, tDn = t <= -0.3
+  if (mUp && tUp) return (m >= 3 && t >= 1) ? 'strongUp' : 'up'
+  if (mUp && tFlat) return 'upStall'
+  if (mUp && tDn) return 'upDown'
+  if (mDn && tUp) return 'downUp'
+  if (mDn && tDn) return (m <= -3 && t <= -1) ? 'strongDown' : 'down'
+  if (mDn && tFlat) return 'down'
+  return 'flat'
+}
+
+// 추세 궤적 글리프 (작은 SVG: 꺾은선 + 끝 화살표)
+const TREND_DEF: Record<TrendShape, { pts: string; head: 'ur' | 'r' | 'dr'; ex: number; ey: number; color: string }> = {
+  strongUp:   { pts: '2,12 21,2',        head: 'ur', ex: 21, ey: 2,  color: '#34d399' },
+  up:         { pts: '2,10 21,4',        head: 'ur', ex: 21, ey: 4,  color: '#34d399' },
+  upStall:    { pts: '2,10 11,4 21,4',   head: 'r',  ex: 21, ey: 4,  color: '#fbbf24' },
+  upDown:     { pts: '2,10 11,3 21,10',  head: 'dr', ex: 21, ey: 10, color: '#fb923c' },
+  downUp:     { pts: '2,4 11,11 21,5',   head: 'ur', ex: 21, ey: 5,  color: '#60a5fa' },
+  down:       { pts: '2,4 21,10',        head: 'dr', ex: 21, ey: 10, color: '#f87171' },
+  strongDown: { pts: '2,2 21,12',        head: 'dr', ex: 21, ey: 12, color: '#f87171' },
+  flat:       { pts: '2,7 21,7',         head: 'r',  ex: 21, ey: 7,  color: 'rgba(255,255,255,0.55)' },
+  none:       { pts: '', head: 'r', ex: 0, ey: 0, color: 'transparent' },
+}
+function TrendGlyph({ shape }: { shape: TrendShape }) {
+  if (shape === 'none') return null
+  const d = TREND_DEF[shape]
+  const { ex, ey } = d
+  // 화살촉 삼각형 (끝 방향별)
+  const head =
+    d.head === 'ur' ? `${ex},${ey} ${ex - 5.5},${ey + 1} ${ex - 1},${ey + 5.5}` :
+    d.head === 'dr' ? `${ex},${ey} ${ex - 5.5},${ey - 1} ${ex - 1},${ey - 5.5}` :
+    `${ex},${ey} ${ex - 5.5},${ey - 3} ${ex - 5.5},${ey + 3}`
+  return (
+    <svg width="24" height="14" viewBox="0 0 24 14" style={{ marginLeft: 4, flexShrink: 0, overflow: 'visible' }} aria-hidden="true">
+      <polyline points={d.pts} fill="none" stroke={d.color} strokeWidth="1.7" strokeLinejoin="round" strokeLinecap="round" />
+      <polygon points={head} fill={d.color} />
+    </svg>
+  )
+}
+
 function toKoreanSectorAbbr(sector: string): string {
   const s = (sector || '').trim()
   if (!s) return '기타'
@@ -323,6 +391,8 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
   const [dims, setDims]           = useState({ w: 900, h: 620 })
   const [etfQuotes, setEtfQuotes] = useState<Record<string, { price: number; changeRate: number }>>({})
   const [reportTarget, setReportTarget] = useState<{ code: string; name: string } | null>(null)
+  // 섹터 로테이션: 섹터명 → {점수, 순위, 라이프사이클, 중기모멘텀%, 당일%} (나침반 연동)
+  const [sectorRot, setSectorRot] = useState<Map<string, { score: number; rank: number; lifecycle: string; mom: number; today: number }>>(new Map())
 
   // ETF 태그 시세 (공개 엔드포인트, 서버측 60초 캐시)
   useEffect(() => {
@@ -335,6 +405,30 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
     }
     load()
     const t = setInterval(load, 60_000)
+    return () => { dead = true; clearInterval(t) }
+  }, [])
+
+  // 섹터 로테이션 점수·순위 (나침반과 동일 소스, 장중 15분 캐시)
+  useEffect(() => {
+    let dead = false
+    const load = () => {
+      fetch('/api/public/sector-rotation')
+        .then(r => r.json())
+        .then((d: { sectors?: { sector: string; score: number; lifecycle?: string; detail?: { momentumPct?: number; intradayPct?: number } }[] }) => {
+          if (dead) return
+          const m = new Map<string, { score: number; rank: number; lifecycle: string; mom: number; today: number }>()
+          ;(d.sectors ?? []).forEach((s, i) => {
+            m.set(s.sector, {
+              score: s.score, rank: i + 1, lifecycle: s.lifecycle ?? '',
+              mom: s.detail?.momentumPct ?? 0, today: s.detail?.intradayPct ?? 0,
+            })
+          })
+          setSectorRot(m)
+        })
+        .catch(() => {})
+    }
+    load()
+    const t = setInterval(load, 5 * 60_000)
     return () => { dead = true; clearInterval(t) }
   }, [])
 
@@ -441,7 +535,12 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
       const sectorCap = stocks.reduce((s, i) => s + rawCap(i), 0)
       const momentum = 1 + clamp(avgChange, -3, 3) * 0.10 + (clamp(avgScore, 0, 100) / 100) * 0.20
 
-      return { id: sec, sec, stocks, rankedStocks, sectorCap, momentum, avgChange, isDownSector }
+      // 섹터 로테이션 점수(나침반). 없으면 -1 → 정렬 시 뒤로.
+      const rot = sectorRot.get(sec)
+      return {
+        id: sec, sec, stocks, rankedStocks, sectorCap, momentum, avgChange, isDownSector,
+        rotScore: rot?.score ?? -1, rotRank: rot?.rank ?? 0, lifecycle: rot?.lifecycle ?? '',
+      }
     })
 
     // 전역 단조성 보장: 모든 종목을 단일 척도(관심종목 전체, 최대 시총=1.0)로 압축하고
@@ -457,6 +556,8 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
       const value = visibleStocks.reduce((sum, st) => sum + compress(rawCap(st), allCaps), 0)
       return { ...s, visibleStocks, value }
     })
+    // 로테이션 점수 내림차순 — 강한 섹터가 squarify 앞쪽(좌상단)에 배치됨
+    secs.sort((a, b) => b.rotScore - a.rotScore)
 
     const secRects: TRect[] = squarify(
       secs.map(s => ({ id: s.id, value: s.value })),
@@ -479,10 +580,11 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
         ...sr, sec: sd.sec,
         totalCount: sd.stocks.length,
         shownCount: sd.visibleStocks.length,
+        rotScore: sd.rotScore, rotRank: sd.rotRank, lifecycle: sd.lifecycle, avgChange: sd.avgChange,
         stocks: tiles.map(r => ({ ...r, item: stockMap.get(r.id)! })).filter(r => !!r.item),
       }
     })
-  }, [items, dims])
+  }, [items, dims, sectorRot])
 
   const handleDelete = useCallback((code: string) => {
     setBusyCode(code)
@@ -659,19 +761,37 @@ export function WatchlistPage({ publicMode = false }: { publicMode?: boolean } =
               overflow: 'hidden',
             }}
           >
-            {/* Sector header */}
+            {/* Sector header — 로테이션 점수에 따라 좌측 색 띠 + 순위·점수 표기 */}
             <div
               style={{
                 position: 'absolute', inset: '0 0 auto 0', height: SEC_H,
                 display: 'flex', alignItems: 'center', padding: '0 7px',
-                background: 'rgba(10,15,24,0.84)',
+                background: sectorHeatBg(sec.rotScore),
+                borderLeft: sec.rotScore >= 0 ? `3px solid ${sectorHeatColor(sec.rotScore)}` : 'none',
                 zIndex: 2, pointerEvents: 'none',
                 fontSize: '0.62rem', fontWeight: 800,
-                letterSpacing: '0.04em', color: 'rgba(255,255,255,0.72)',
+                letterSpacing: '0.04em', color: 'rgba(255,255,255,0.78)',
                 whiteSpace: 'nowrap', overflow: 'hidden',
               }}
             >
+              {sec.rotRank > 0 && (
+                <span style={{
+                  marginRight: 5, padding: '0 4px', borderRadius: 3,
+                  fontSize: '0.6rem', fontWeight: 800,
+                  color: sectorHeatColor(sec.rotScore),
+                  background: 'rgba(0,0,0,0.35)',
+                }}>#{sec.rotRank}</span>
+              )}
               {toKoreanSectorAbbr(sec.sec)}
+              <TrendGlyph shape={computeTrendShape(sectorRot.get(sec.sec), sec.avgChange)} />
+              {sec.rotScore >= 0 && (
+                <span style={{ marginLeft: 2, fontWeight: 800, color: sectorHeatColor(sec.rotScore) }}>
+                  {sec.rotScore.toFixed(1)}
+                </span>
+              )}
+              {sec.lifecycle && (
+                <span style={{ marginLeft: 4, opacity: 0.6, fontWeight: 400 }}>{sec.lifecycle}</span>
+              )}
               <span style={{ marginLeft: 5, opacity: 0.42, fontWeight: 400 }}>
                 {sec.shownCount}/{sec.totalCount}
               </span>
