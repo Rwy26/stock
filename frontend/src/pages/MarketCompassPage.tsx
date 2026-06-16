@@ -386,6 +386,11 @@ export function MarketCompassPage() {
         <div>
           <p className="top-label">Global Sentiment</p>
           <h2>📡 글로벌 투자심리 (AI 자금흐름 분석)</h2>
+          {market?.asOf && (
+            <p className="top-updated" style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>
+              마지막 업데이트 {market.asOf.replace('T', ' ')}{market.cached ? ' (캐시)' : ''}
+            </p>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn" type="button" disabled={mLoading} onClick={() => loadMarket(true)}>
