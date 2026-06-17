@@ -166,6 +166,11 @@ _SYSTEM_PROMPT = """당신은 월가 헤지펀드 PM, 글로벌 매크로 전략
    매칭 국면의 실제 20일 후 분포·당시 밸류에이션·경영진 어조 지표를 그대로 인용해
    현재 판단의 보조 근거(특히 한국 ~500봉에 없는 과열·붕괴 국면 경고)로 쓰되,
    "다른 시장·다른 시대의 유사 국면 — 참고용"임을 명시한다. 없으면 섹션 생략.
+6. signalTrackRecord 가 제공되면, 이 시그널 유형의 **과거 실현 적중률(bySignal.hitRate)과
+   표본수(sampleSize)** 에 맞춰 확신 수위를 조절한다. 적중률이 낮거나 lowConfidence=true
+   (표본 30 미만)이면 단정적 표현을 피하고 표본 부족·통계적 한계를 명시한다.
+   적중률을 본문에 인용할 때는 반드시 표본수를 함께 적는다(예: "이 신호 과거 적중률
+   58%(표본 41)"). signalTrackRecord 가 없으면 이 규칙은 생략.
 
 문체: 간결한 트레이딩 저널체 — 베테랑 트레이더가 자기 매매일지에 쓰듯 직설적으로.
 종목의 본질을 꿰뚫는 비유 1개 허용 (예: "서부 개척 시대에 청바지 파는 격",
@@ -403,6 +408,15 @@ def analyze_stock(code: str, with_ai: bool = True) -> dict:
     except Exception:
         pass
 
+    # 4단계 LLM 그라운딩 — 이 시그널 유형의 과거 실현 적중률 주입(표본 있을 때만)
+    try:
+        _grounding = _signal_grounding(_signal_from_score(composite.get("score") or 0),
+                                       float(composite.get("score") or 0))
+        if _grounding:
+            context["signalTrackRecord"] = _grounding
+    except Exception:
+        pass
+
     ai_report, provider = (None, "skipped")
     if with_ai:
         ai_report, provider = _call_stock_llm(context)
@@ -437,6 +451,65 @@ def _signal_from_score(score: float) -> str:
         "SELL" if score >= 40 else
         "STRONG_SELL"
     )
+
+
+_GROUNDING_MIN_SAMPLES = 30  # 미만이면 "신뢰 낮음" — AI가 과거 적중률에 기대지 말 것
+
+
+def _confidence_bucket(score: float) -> str:
+    return "70+" if score >= 70 else "50-70" if score >= 50 else "0-50"
+
+
+def _signal_grounding(signal: str, score: float) -> dict | None:
+    """과거 채점 실적(signal_outcomes)에서 이 시그널 유형의 적중률·표본수 산출.
+
+    4단계 LLM 그라운딩 — AI 프롬프트에 주입해 확신을 표본 빈도에 맞춰 절제시킨다.
+    채점 완료(scored_at NOT NULL)분만 집계. 표본 없으면 None(주입 생략 → 환각 방지).
+    적중률은 hit_1d(alpha 우선·없으면 raw, score_signals 기준) 기반.
+    """
+    from sqlalchemy import func, select
+
+    import db
+    import models
+
+    bucket = _confidence_bucket(score)
+    session = db.get_session_factory()()
+    try:
+        def _agg(*conds):
+            row = session.execute(
+                select(func.count(models.SignalOutcome.id),
+                       func.avg(func.if_(models.SignalOutcome.hit_1d, 1.0, 0.0)),
+                       func.avg(models.SignalOutcome.alpha_1d))
+                .where(models.SignalOutcome.scored_at.is_not(None), *conds)
+            ).one()
+            n = int(row[0] or 0)
+            return {
+                "sampleSize": n,
+                "hitRate": round(float(row[1]), 3) if n and row[1] is not None else None,
+                "avgAlpha1d": round(float(row[2]), 4) if n and row[2] is not None else None,
+                "lowConfidence": n < _GROUNDING_MIN_SAMPLES,
+            }
+
+        by_signal = _agg(models.SignalOutcome.signal == signal)
+        if by_signal["sampleSize"] == 0:
+            return None
+        return {
+            "signal": signal,
+            "confidenceBucket": bucket,
+            "bySignal": by_signal,
+            "byConfidenceBucket": _agg(models.SignalOutcome.confidence >= 70) if bucket == "70+"
+                else _agg(models.SignalOutcome.confidence >= 50, models.SignalOutcome.confidence < 70)
+                if bucket == "50-70"
+                else _agg(models.SignalOutcome.confidence < 50),
+            "minSamples": _GROUNDING_MIN_SAMPLES,
+            "note": ("이 시그널 유형의 과거 실현 적중률(표본 기반). "
+                     "표본 30 미만(lowConfidence=true)이면 통계적 신뢰가 낮으니 "
+                     "확신 표현을 절제하고 표본 부족을 명시할 것."),
+        }
+    except Exception:
+        return None
+    finally:
+        session.close()
 
 
 def _log_signal_outcome(result: dict) -> None:
