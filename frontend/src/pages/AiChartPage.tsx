@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { fetchJson } from '../lib/api'
 import { getAccessToken } from '../lib/auth'
@@ -480,6 +480,60 @@ function linkifyEntities(
     }
   })
   return out
+}
+
+// 멀티 에이전트 분석 파이프라인 — 검색 대기 중 단계별 진행을 시각화 (체감용)
+const AGENT_STAGES = [
+  { icon: '🏭', label: '산업 분석 Agent' },
+  { icon: '💰', label: '수급 분석 Agent' },
+  { icon: '📈', label: '차트 분석 Agent' },
+  { icon: '📰', label: '뉴스 분석 Agent' },
+  { icon: '🏦', label: '기관/외인 분석 Agent' },
+  { icon: '⚠️', label: '리스크 분석 Agent' },
+  { icon: '🎯', label: '종합 점수화' },
+  { icon: '📊', label: '시각 리포트 생성' },
+]
+
+function AgentPipeline() {
+  const [active, setActive] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => setActive(a => Math.min(a + 1, AGENT_STAGES.length - 1)), 650)
+    return () => clearInterval(t)
+  }, [])
+  return (
+    <div className="panel glass" style={{ padding: '14px 18px', alignSelf: 'stretch', width: '100%' }}>
+      <style>{`@keyframes agentPulse{0%,100%{box-shadow:0 0 0 0 rgba(96,165,250,.5)}50%{box-shadow:0 0 0 5px rgba(96,165,250,0)}}`}</style>
+      <div style={{ fontSize: '0.82rem', color: '#93c5fd', marginBottom: 12, fontWeight: 700 }}>🤖 멀티 에이전트 분석 진행 중…</div>
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {AGENT_STAGES.map((s, i) => {
+          const done = i < active
+          const cur = i === active
+          return (
+            <div key={i}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 11, opacity: i <= active ? 1 : 0.35, transition: 'opacity .3s' }}>
+                <span style={{
+                  width: 28, height: 28, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 14, flexShrink: 0,
+                  background: done ? 'rgba(52,211,153,0.18)' : cur ? 'rgba(96,165,250,0.22)' : 'rgba(255,255,255,0.05)',
+                  border: `1px solid ${done ? '#34d399' : cur ? '#60a5fa' : 'rgba(255,255,255,0.12)'}`,
+                  color: done ? '#34d399' : 'inherit',
+                  animation: cur ? 'agentPulse 1.1s ease-in-out infinite' : 'none',
+                }}>{done ? '✓' : s.icon}</span>
+                <span style={{ fontSize: '0.92rem', color: done ? 'rgba(241,245,249,0.65)' : cur ? '#f1f5f9' : 'var(--text-soft)', fontWeight: cur ? 700 : 400 }}>
+                  {s.label}
+                  {cur && <span style={{ marginLeft: 7, color: '#60a5fa', fontSize: '0.76rem' }}>분석 중…</span>}
+                  {done && <span style={{ marginLeft: 7, color: '#34d399', fontSize: '0.76rem' }}>완료</span>}
+                </span>
+              </div>
+              {i < AGENT_STAGES.length - 1 && (
+                <div style={{ marginLeft: 13, height: 14, borderLeft: `2px solid ${i < active ? '#34d399' : 'rgba(255,255,255,0.12)'}`, transition: 'border-color .3s' }} />
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
 }
 
 // 시장데이터 표 · 미인식 결과 — 단일종목 리포트(관망/목표가) 대신 추출 내용·의도 응답만 표시
@@ -1561,9 +1615,7 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
                   </div>
                   )
                 })}
-                {searchLoading && (
-                  <div className="panel glass" style={{ padding: '10px 14px', fontSize: '0.85rem', color: 'var(--text-soft)', alignSelf: 'flex-start' }}>답변 작성 중…</div>
-                )}
+                {searchLoading && <AgentPipeline />}
               </div>
               <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                 <input value={symbol} onChange={e => setSymbol(e.target.value)}

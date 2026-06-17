@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchJson } from '../lib/api'
 import { CompassReport } from '../components/CompassReport'
 
@@ -71,6 +71,7 @@ export function AiCachePage() {
   const [selected, setSelected] = useState<CacheDetailResult | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [filterSignal, setFilterSignal] = useState<string>('ALL')
+  const [query, setQuery] = useState('')
 
   const load = useCallback(() => {
     setLoading(true)
@@ -91,10 +92,33 @@ export function AiCachePage() {
       .finally(() => setDetailLoading(false))
   }
 
+  // 시그널 필터만 목록을 좁힘. 검색어는 행을 숨기지 않고 '매칭 행 강조+스크롤'로만 동작.
   const filtered = filterSignal === 'ALL' ? items : items.filter((i) => i.signal === filterSignal)
+  const q = query.trim().toLowerCase()
+  const isMatch = (i: CacheItem) =>
+    !!q && (String(i.stock_code).toLowerCase().includes(q) || String(i.stock_name ?? '').toLowerCase().includes(q))
+  const rowRefs = useRef<Record<string, HTMLTableRowElement | null>>({})
+
+  // 검색어 변경 → 첫 매칭 행으로 스크롤 (클릭은 사용자가 직접)
+  useEffect(() => {
+    if (!q) return
+    const first = filtered.find(isMatch)
+    if (first) {
+      const el = rowRefs.current[first.stock_code]
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, filterSignal])
 
   return (
     <>
+      <style>{`
+        @keyframes searchBlink {
+          0%, 100% { background: rgba(96,165,250,0.04); box-shadow: inset 3px 0 0 rgba(96,165,250,0); }
+          50%      { background: rgba(96,165,250,0.28); box-shadow: inset 3px 0 0 #60a5fa; }
+        }
+        tr.search-blink { animation: searchBlink 1s ease-in-out infinite; }
+      `}</style>
       <header className="topbar glass">
         <div>
           <p className="top-label">AI Analysis History</p>
@@ -104,10 +128,21 @@ export function AiCachePage() {
         <div className="status-pill">{items.length}개 종목</div>
       </header>
 
-      {/* 필터 */}
+      {/* 검색 + 필터 */}
       <section className="panel glass reveal" style={{ marginBottom: '0.8rem' }}>
-        <div className="panel-head"><h3>Signal 필터</h3></div>
-        <div className="filter-row" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', padding: '0.6rem 1rem' }}>
+        <div className="panel-head"><h3>종목 검색 · Signal 필터</h3></div>
+        <div style={{ padding: '0.6rem 1rem 0' }}>
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="🔍 종목명 또는 코드 검색 (예: 삼성전자, 005930)"
+            style={{
+              width: '100%', boxSizing: 'border-box', padding: '9px 12px', borderRadius: 8,
+              border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#f1f5f9',
+            }}
+          />
+        </div>
+        <div className="filter-row" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', padding: '0.6rem 1rem' }}>
           {['ALL', 'STRONG_BUY', 'BUY', 'HOLD', 'SELL', 'STRONG_SELL'].map((s) => (
             <button
               key={s}
@@ -117,6 +152,7 @@ export function AiCachePage() {
               {s === 'ALL' ? '전체' : SIGNAL_LABELS[s] ?? s}
             </button>
           ))}
+          <span style={{ marginLeft: 'auto', fontSize: '0.8rem', color: 'var(--muted)' }}>{filtered.length}건</span>
         </div>
       </section>
 
@@ -150,10 +186,13 @@ export function AiCachePage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((item, idx) => (
+              {filtered.map((item, idx) => {
+                const matched = isMatch(item)
+                return (
                 <tr
                   key={item.stock_code}
-                  className="rec-row clickable"
+                  ref={(el) => { rowRefs.current[item.stock_code] = el }}
+                  className={`rec-row clickable${matched ? ' search-blink' : ''}`}
                   style={{ cursor: 'pointer' }}
                   onClick={() => openDetail(item.stock_code)}
                 >
@@ -174,7 +213,8 @@ export function AiCachePage() {
                   </td>
                   <td className="subtle">{formatAt(item.analyzed_at)}</td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         </div>
