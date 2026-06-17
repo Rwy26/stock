@@ -2603,6 +2603,106 @@ def admin_scoring_status(_admin=Depends(require_admin)):
     }
 
 
+@app.get("/api/admin/signal-accuracy")
+def admin_signal_accuracy(_admin=Depends(require_admin)):
+    """AI 시그널 적중률 집계 (signal_outcomes — 채점 완료분 기준).
+
+    시그널별 · 확신도 구간(0-50/50-70/70+)별 · 섹터별 적중률 + 표본수.
+    표본 30 미만 그룹은 lowConfidence=true (잘못된 정보 방지 — 신뢰 낮음 명시).
+    """
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB 모듈 없음")
+
+    MIN_SAMPLE = 30
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        rows = db.execute(
+            select(
+                models.SignalOutcome.signal,
+                models.SignalOutcome.confidence,
+                models.SignalOutcome.sector,
+                models.SignalOutcome.hit_1d,
+                models.SignalOutcome.ret_1d,
+                models.SignalOutcome.alpha_1d,
+            ).where(models.SignalOutcome.scored_at.is_not(None))
+        ).all()
+    finally:
+        db.close()
+
+    total_pending = None
+    db2: Session = apollo_db.get_session_factory()()
+    try:
+        total_pending = db2.execute(
+            select(func.count(models.SignalOutcome.id))
+            .where(models.SignalOutcome.scored_at.is_(None))
+        ).scalar_one_or_none()
+    finally:
+        db2.close()
+
+    def _conf_bucket(c):
+        if c is None:
+            return "unknown"
+        if c < 50:
+            return "0-50"
+        if c < 70:
+            return "50-70"
+        return "70+"
+
+    # group_key -> {"n": int, "hits": int, "retSum": float, "retN": int,
+    #               "alphaSum": float, "alphaN": int}
+    def _new():
+        return {"n": 0, "hits": 0, "retSum": 0.0, "retN": 0, "alphaSum": 0.0, "alphaN": 0}
+
+    by_signal: dict = {}
+    by_conf: dict = {}
+    by_sector: dict = {}
+
+    def _acc(bucket: dict, key, hit, ret, alpha):
+        g = bucket.setdefault(key, _new())
+        g["n"] += 1
+        if hit:
+            g["hits"] += 1
+        if ret is not None:
+            g["retSum"] += float(ret)
+            g["retN"] += 1
+        if alpha is not None:
+            g["alphaSum"] += float(alpha)
+            g["alphaN"] += 1
+
+    for signal, confidence, sector, hit_1d, ret_1d, alpha_1d in rows:
+        _acc(by_signal, signal or "UNKNOWN", hit_1d, ret_1d, alpha_1d)
+        _acc(by_conf, _conf_bucket(confidence), hit_1d, ret_1d, alpha_1d)
+        _acc(by_sector, sector or "(미분류)", hit_1d, ret_1d, alpha_1d)
+
+    def _finalize(bucket: dict) -> list:
+        out = []
+        for key, g in bucket.items():
+            n = g["n"]
+            out.append({
+                "key": key,
+                "samples": n,
+                "hits": g["hits"],
+                "hitRate": round(g["hits"] / n, 4) if n else None,
+                "avgRet1d": round(g["retSum"] / g["retN"], 5) if g["retN"] else None,
+                "avgAlpha1d": round(g["alphaSum"] / g["alphaN"], 5) if g["alphaN"] else None,
+                "lowConfidence": n < MIN_SAMPLE,
+            })
+        out.sort(key=lambda x: -x["samples"])
+        return out
+
+    total_scored = len(rows)
+    return {
+        "available": True,
+        "minSample": MIN_SAMPLE,
+        "totalScored": total_scored,
+        "totalPending": int(total_pending or 0),
+        "overallLowConfidence": total_scored < MIN_SAMPLE,
+        "bySignal": _finalize(by_signal),
+        "byConfidence": _finalize(by_conf),
+        "bySector": _finalize(by_sector),
+    }
+
+
 @app.get("/api/admin/exclusions")
 def admin_list_exclusions(_admin=Depends(require_admin)):
     """거래 제외 종목 인덱스 전체 조회."""

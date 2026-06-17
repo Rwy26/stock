@@ -419,7 +419,76 @@ def analyze_stock(code: str, with_ai: bool = True) -> dict:
     except Exception:
         pass
 
+    # 시그널 적중 추적 — signal_outcomes 에 append-only 기록(ai_analysis_cache 와 별개,
+    # 영구 보존). 익일 채점(scripts/score_signals.py)이 다음 거래일 종가로 결과를 채운다.
+    try:
+        _log_signal_outcome(result)
+    except Exception:
+        pass
+
     return result
+
+
+def _signal_from_score(score: float) -> str:
+    return (
+        "STRONG_BUY" if score >= 80 else
+        "BUY" if score >= 70 else
+        "HOLD" if score >= 55 else
+        "SELL" if score >= 40 else
+        "STRONG_SELL"
+    )
+
+
+def _log_signal_outcome(result: dict) -> None:
+    """분석 1회당 signal_outcomes 1행 append (덮어쓰지 않음).
+
+    entry_close = 분석 결과 series.closes[-1] 또는 stock.currentPrice (룩어헤드 없음 —
+    분석 시점의 마지막 종가). predicted_at = utcnow(naive).
+    """
+    from datetime import datetime as _dt
+
+    import db
+    import models
+
+    st = result.get("stock", {}) or {}
+    comp = result.get("composite", {}) or {}
+    score = float(comp.get("score") or 0)
+    signal = _signal_from_score(score)
+
+    entry_close = None
+    series = result.get("series") or {}
+    closes = series.get("closes") if isinstance(series, dict) else None
+    if isinstance(closes, (list, tuple)) and closes:
+        try:
+            entry_close = float(closes[-1])
+        except (TypeError, ValueError):
+            entry_close = None
+    if entry_close is None and st.get("currentPrice") is not None:
+        try:
+            entry_close = float(st.get("currentPrice"))
+        except (TypeError, ValueError):
+            entry_close = None
+
+    # composite 5요소 점수 — 3단계 가중치 재학습 features (없으면 NULL)
+    parts = comp.get("parts") if isinstance(comp, dict) else None
+    features = dict(parts) if isinstance(parts, dict) and parts else None
+
+    session = db.get_session_factory()()
+    try:
+        session.add(models.SignalOutcome(
+            stock_code=st.get("code"),
+            stock_name=st.get("name"),
+            sector=st.get("sector"),
+            predicted_at=_dt.utcnow(),
+            signal=signal,
+            score=score,
+            confidence=score,
+            entry_close=entry_close,
+            features=features,
+        ))
+        session.commit()
+    finally:
+        session.close()
 
 
 def _save_history(result: dict) -> None:

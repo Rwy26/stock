@@ -598,3 +598,42 @@ class PredictionMarketDaily(Base):
     __table_args__ = (
         Index("uq_prediction_market_date_key", "trade_date", "target_key", unique=True),
     )
+
+
+class SignalOutcome(Base):
+    """AI 시그널 적중 추적 (append-only 예측 로그 + 익일 채점).
+
+    매 분석마다 1행 append (ai_analysis_cache 와 별개·영구 보존).
+    야간 채점(scripts/score_signals.py)이 다음 거래일 종가로 결과를 채운다.
+    signal: STRONG_BUY | BUY | HOLD | SELL | STRONG_SELL
+    hit_1d 판정: BUY/STRONG_BUY → (alpha 없으면 raw) ret > +0.003,
+                 SELL/STRONG_SELL → < -0.003, HOLD → |ret| <= 0.003.
+    룩어헤드 금지 — entry/next 종가는 predicted_at 이후 시점만 사용.
+    """
+
+    __tablename__ = "signal_outcomes"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    stock_code: Mapped[str] = mapped_column(String(20), index=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    sector: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    predicted_at: Mapped[datetime] = mapped_column(DateTime)  # utcnow(naive) 관행
+    signal: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)        # 종합 점수 0~100
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)   # 0~100 (현재 score 동일)
+    entry_close: Mapped[float | None] = mapped_column(Float, nullable=True)  # 분석 시점 기준 종가
+    next_close: Mapped[float | None] = mapped_column(Float, nullable=True)   # 다음 거래일 종가
+    ret_1d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ret_5d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    kospi_ret_1d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    alpha_1d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hit_1d: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    scored_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # composite 5요소 점수 {"섹터 강도":..,"MTF 정렬":..,"상승지속확률":..,"공매도 수급":..,"손익비":..}
+    # 3단계 가중치 재학습(scripts/retrain_weights.py)의 features. 구버전 행은 NULL.
+    features: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    __table_args__ = (
+        Index("ix_signal_outcomes_code_predicted", "stock_code", "predicted_at"),
+        Index("ix_signal_outcomes_scored_at", "scored_at"),
+    )
