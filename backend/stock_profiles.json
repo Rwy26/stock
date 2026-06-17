@@ -1,0 +1,17 @@
+{
+  "_comment": "종목별 산업·사업 프로필. 코드→{sector, industry, businesses}. 분석/검색 그라운딩에 사용. 수정은 이 파일만 편집.",
+  "034020": {
+    "name": "두산에너빌리티",
+    "sector": "전력 인프라",
+    "theme": "원전 설비 (SMR 포함)",
+    "industryGroup": "산업재 (Industrials)",
+    "industry": "기계 및 전기 장비 (Machinery and Electrical Equipment)",
+    "subIndustry": "특수 산업용 기계 (Specialty Industrial Machinery)",
+    "businesses": [
+      "에너지: 원자력 발전 설비(SMR 포함), 가스/스팀 터빈, 풍력 발전, 수소 에너지, 해수 담수화 플랜트",
+      "건설·인프라: 발전소 건설 및 산업 플랜트 구축",
+      "연료전지(두산퓨얼셀): 발전용 연료전지 시스템 공급 및 유지보수"
+    ],
+    "summary": "통합 에너지 솔루션 — 원전(SMR)·터빈·풍력·수소·연료전지를 아우르는 전력 인프라 핵심 기업"
+  }
+}

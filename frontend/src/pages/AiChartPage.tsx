@@ -83,6 +83,7 @@ interface AnalysisResponse {
   stock_name?: string
   codeVerified?: boolean
   identityNote?: string
+  learningSamples?: { sufficient: boolean; bars: number; multiTimeframe: boolean; request: string }
   images_count?: number
   ai_result: AiResult
   analyzed_at: string
@@ -124,9 +125,12 @@ function extractSymbolFromFilename(name: string): string {
   // 코드 위치 한정: 파일명 '시작' 또는 '_' 바로 뒤의 6자리만 코드로 인정.
   // (예: "009150_2026-05-30.png" → 009150) — 끝에 붙는 타임스탬프
   // "...외인 기관 매수 163259.png"(16:32:59)를 코드로 오인하지 않기 위함.
-  // 숫자만으로는 005930(00:59:30)처럼 코드/시각 구분 불가 → 위치로 판별.
   const code6 = name.match(/(?:^|_)(\d{6})(?:[_\-.]|$)/)
   if (code6) return code6[1]
+  // 한글 종목명: 파일 시작의 한글 토큰 (TF·해시 앞까지). 예: "두산에너빌러티 60_95484.csv" → "두산에너빌러티"
+  // 백엔드가 KRX/네이버로 코드·정식명 검증·교정함 (오타도 퍼지 매칭).
+  const kr = name.match(/^([가-힣][가-힣A-Za-z0-9&·]+)/)
+  if (kr) return kr[1]
   // AAPL_... 형태: 대문자 알파벳 2~5자
   const ticker = name.match(/^([A-Z]{2,5})[_\-\s,.]/)
   if (ticker) return ticker[1]
@@ -835,23 +839,30 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
   const [multiResults, setMultiResults] = useState<AnalysisResponse[] | null>(null)
   const [docResult, setDocResult] = useState<{ mode: string; extraction: Extraction } | null>(null)
   const [reportModal, setReportModal] = useState<{ code: string; name: string } | null>(null)
-  const [searchChat, setSearchChat] = useState<{ role: 'user' | 'assistant'; content: string; stock?: { code: string; name: string } | null }[]>([])
+  const [searchChat, setSearchChat] = useState<{ role: 'user' | 'assistant'; content: string; stock?: { code: string; name: string; inWatchlist?: boolean; hasReport?: boolean } | null }[]>([])
   const [searchLoading, setSearchLoading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const runSearch = useCallback(async (q: string) => {
     if (!q.trim() || searchLoading) return
-    const g = getGuest()
     const history = searchChat.map(m => ({ role: m.role, content: m.content }))
     setSearchChat(prev => [...prev, { role: 'user', content: q }])
     setSymbol('')
     setSearchLoading(true)
     try {
-      const resp = await fetch('/api/public/ai-search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: q, history, guest_name: g?.name ?? '', guest_phone: g?.phone ?? '' }),
-      })
+      let resp: Response
+      if (publicMode) {
+        const g = getGuest()
+        resp = await fetch('/api/public/ai-search', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: q, history, guest_name: g?.name ?? '', guest_phone: g?.phone ?? '' }),
+        })
+      } else {
+        resp = await fetch('/api/admin/ai-search', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getAccessToken()}` },
+          body: JSON.stringify({ query: q, history }),
+        })
+      }
       const d = await resp.json()
       if (!resp.ok) throw new Error(d.detail ?? `오류 ${resp.status}`)
       setSearchChat(prev => [...prev, { role: 'assistant', content: d.answer ?? '(응답 없음)', stock: d.resolvedStock }])
@@ -860,7 +871,7 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
     } finally {
       setSearchLoading(false)
     }
-  }, [searchChat, searchLoading])
+  }, [searchChat, searchLoading, publicMode])
   const [showKeyPanel, setShowKeyPanel] = useState(false)
   const [keyProvider, setKeyProvider] = useState<'gemini' | 'groq' | 'openai'>('gemini')
   const [apiKeyInput, setApiKeyInput] = useState('')
@@ -1042,7 +1053,11 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
     setError(null); setResult(null); setMultiResults(null); setDocResult(null); setCsvBatchNote(null)
 
     if (mode === 'drop') {
-      if (droppedFiles.length === 0) { setError('파일을 1개 이상 업로드하세요'); return }
+      // 파일 없이 텍스트만 입력 → 자연어 대화형 검색 (질문 자체부터 분석)
+      if (droppedFiles.length === 0) {
+        if (symbol.trim()) { runSearch(symbol.trim()); return }
+        setError('파일을 업로드하거나 검색어를 입력하세요'); return
+      }
       // symbol이 비어있으면 파일명에서 자동 추출 시도 (실패해도 진행 — 백엔드가 콘텐츠 인식)
       let effectiveSymbol = symbol.trim()
       if (!effectiveSymbol) {
@@ -1431,22 +1446,23 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
                   </div>
                 ) : (
                   <label>
-                    {publicMode ? '검색' : '종목명 / 코드'}
-                    <span className="hint">{publicMode ? ' (종목명·질문 입력 — 대화형 검색)' : ' (선택 — 파일명에서 자동 감지)'}</span>
+                    검색
+                    <span className="hint"> (종목명·질문 입력 — 대화형 검색 · 파일 올리면 차트 분석)</span>
                     <input value={symbol}
                       onChange={e => setSymbol(e.target.value)}
-                      onKeyDown={e => { if (publicMode && e.key === 'Enter' && symbol.trim()) { e.preventDefault(); runSearch(symbol.trim()) } }}
-                      placeholder={publicMode ? '예: 삼성전자 어때?  /  방산 섹터 전망' : '예: 삼성전기, 009150, AAPL'} />
+                      onKeyDown={e => { if (e.key === 'Enter' && symbol.trim() && !hasFiles) { e.preventDefault(); runSearch(symbol.trim()) } }}
+                      placeholder="예: 삼성전자 어때?  /  방산 섹터 전망  /  009150" />
                   </label>
                 )}
-                {!publicMode && (
+                {/* 추가 정보 — 차트 파일을 올렸을 때만 (이미지 분석 맥락). 순수 검색 화면은 깔끔하게 */}
+                {!publicMode && hasFiles && (
                   <label>
-                    추가 정보 <span className="hint">(선택)</span>
+                    추가 정보 <span className="hint">(선택 — 이미지 분석 지시. 예: 각각 분석 / 평단 180만원 보유)</span>
                     <input value={extraContext} onChange={e => setExtraContext(e.target.value)}
                       placeholder="예: 평단 180만원 보유 중" />
                   </label>
                 )}
-                {publicMode && (
+                {!hasFiles && (
                   <button type="button" className="ai-export-btn" disabled={searchLoading || !symbol.trim()}
                     onClick={() => runSearch(symbol.trim())}>
                     {searchLoading ? '검색 중…' : '🔍 검색'}
@@ -1509,7 +1525,7 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
         </div>
 
         <div>
-          {publicMode && searchChat.length > 0 ? (
+          {searchChat.length > 0 ? (
             <div className="ai-right">
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {searchChat.map((m, i) => {
@@ -1529,10 +1545,16 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
                       {m.content}
                       {m.stock && (
                         <div style={{ marginTop: 8 }}>
-                          <button type="button" className="ai-export-btn"
-                            onClick={() => setReportModal({ code: m.stock!.code, name: m.stock!.name })}>
-                            📄 {m.stock.name} 리포트 보기
-                          </button>
+                          {m.stock.hasReport ? (
+                            <button type="button" className="ai-export-btn"
+                              onClick={() => setReportModal({ code: m.stock!.code, name: m.stock!.name })}>
+                              📄 {m.stock.name} 리포트 보기
+                            </button>
+                          ) : (
+                            <span style={{ fontSize: '0.82rem', color: '#fbbf24' }}>
+                              ⏳ {m.stock.name} — {m.stock.inWatchlist ? '리포트 준비 중' : '관심종목 미편입 · 분석 준비 중'}
+                            </span>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1594,6 +1616,11 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
                       {result.analysis_basis.reference_signals?.smartmoney_zone && <div>· {result.analysis_basis.reference_signals.smartmoney_zone}</div>}
                     </div>
                   )}
+                </div>
+              )}
+              {result.learningSamples && !result.learningSamples.sufficient && (
+                <div className="panel glass" style={{ marginBottom: 12, padding: '10px 14px', fontSize: '0.82rem', lineHeight: 1.6, borderColor: 'rgba(251,191,36,0.4)', background: 'rgba(251,191,36,0.08)', color: '#fbbf24' }}>
+                  📚 학습 샘플 요청 — {result.learningSamples.request}
                 </div>
               )}
               <ResultView data={result} onExport={() => exportOnePager()} />

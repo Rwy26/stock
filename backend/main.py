@@ -1504,6 +1504,24 @@ def _load_sector_map() -> dict:
     return _SECTOR_MAP_CACHE
 
 
+_STOCK_PROFILE_PATH = REPO_ROOT / "backend" / "stock_profiles.json"
+_STOCK_PROFILE_CACHE: dict | None = None
+
+
+def _stock_profile(code: str) -> dict | None:
+    """종목 산업·사업 프로필 (stock_profiles.json). 분석/검색 그라운딩용."""
+    global _STOCK_PROFILE_CACHE
+    if _STOCK_PROFILE_CACHE is None:
+        try:
+            with _STOCK_PROFILE_PATH.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            _STOCK_PROFILE_CACHE = {k: v for k, v in data.items() if not str(k).startswith("_")}
+        except Exception:
+            _STOCK_PROFILE_CACHE = {}
+    p = _STOCK_PROFILE_CACHE.get(code)
+    return p if isinstance(p, dict) else None
+
+
 def _canon_sector(sector: str | None) -> str | None:
     """섹터명 정규화 — 자동차·로봇 AI·2차전지 등 → 모빌리티 (전 시스템 공유 기준)."""
     try:
@@ -5646,6 +5664,39 @@ def ai_crossval_analyze(symbol: str, _current_user=Depends(require_admin)):
         "mtf_used": focus.get("mtf_used", False),
         "reference_signals": focus.get("reference_signals", {}),
     }
+
+    # ── 학습 샘플 충분성 — 부족하면 추가 업로드 요청 (TV 이미지·CSV 코퍼스 학습용) ──
+    bars = int(focus.get("bars") or 0)
+    mtf = bool(focus.get("mtf_used"))
+    needs = []
+    if not mtf:
+        needs.append("다른 타임프레임(일봉·4H·1H) CSV")
+    if bars < 300:
+        needs.append("더 긴 기간(300봉 이상) 데이터")
+    result["learningSamples"] = {
+        "sufficient": not needs,
+        "bars": bars, "multiTimeframe": mtf,
+        "request": (("이 종목의 학습 샘플이 부족합니다 — " + " · ".join(needs) + "를 추가 업로드하면 분석 정확도가 올라갑니다.")
+                    if needs else "이 종목은 멀티 타임프레임·충분한 기간 샘플을 확보했습니다."),
+    }
+
+    # ── 종목 정체성 KRX 검증 (CSV는 파일명 유래 식별자라 가짜 숫자 차단·종목명 확정) ──
+    if isinstance(result, dict):
+        ai_name = (result.get("ai_result") or {}).get("symbol") if isinstance(result.get("ai_result"), dict) else None
+        vcode, vname, verified = _verify_krx_identity(provided_code=sym, ai_name=ai_name or sym)
+        if not verified:
+            fz = _resolve_krx_fuzzy(ai_name or sym)   # 오타 대응 퍼지 (두산에너빌러티→두산에너빌리티)
+            if fz:
+                vcode, vname, verified = fz[0], fz[1], True
+        result["codeVerified"] = verified
+        result["stock_name"] = vname or _clean_stock_name(sym) or sym
+        if verified:
+            result["symbol"] = vcode
+            # ── DB 이식: 검증된 종목이면 ai_analysis_cache에 저장 → 모든 MOON STOCK 공통 적용 ──
+            _save_vision_cache(vcode, vname, result, image_hashes=None)
+        else:
+            result["identityNote"] = (
+                f"종목 식별 미검증 — 입력 '{sym}'을(를) KRX 상장목록에서 확정하지 못했습니다. 종목명을 직접 확인하세요.")
     return result
 
 
@@ -6337,6 +6388,95 @@ def _verify_krx_identity(
     return None, name, False
 
 
+_FDR_NAME_MAP_CACHE: dict[str, str] | None = None
+
+
+def _fdr_name_map() -> dict[str, str]:
+    """FDR 전체 KRX 이름→코드 맵 (프로세스 1회 캐시). 자연어 종목 인식용."""
+    global _FDR_NAME_MAP_CACHE
+    if _FDR_NAME_MAP_CACHE is None:
+        m: dict[str, str] = {}
+        try:
+            import FinanceDataReader as fdr
+            df = fdr.StockListing("KRX")
+            for _, r in df[["Code", "Name"]].iterrows():
+                nm = str(r["Name"]).strip()
+                if nm and len(nm) >= 2:
+                    m[nm] = str(r["Code"]).zfill(6)
+        except Exception:
+            pass
+        _FDR_NAME_MAP_CACHE = m
+    return _FDR_NAME_MAP_CACHE
+
+
+def _resolve_krx_fuzzy(name: str | None) -> tuple[str, str] | None:
+    """종목명을 KRX 상장목록으로 퍼지 해석 (오타 1~2자 허용) → (code, name). 없으면 None.
+
+    예: '두산에너빌러티'(오타) → '두산에너빌리티'(034020). 접두 일치 → 후보 중 길이 근접.
+    """
+    nm = _clean_stock_name(name)
+    if not nm or len(nm) < 2:
+        return None
+    fmap = _fdr_name_map()  # name -> code
+    if nm in fmap:
+        return fmap[nm], nm
+    key = nm[: max(3, len(nm) - 2)]   # 끝 1~2자 오타 허용
+    cands = [(n, c) for n, c in fmap.items() if n.startswith(key)]
+    if not cands:
+        cands = [(n, c) for n, c in fmap.items() if key in n]
+    if not cands:
+        return None
+    cands.sort(key=lambda x: abs(len(x[0]) - len(nm)))  # 길이 가장 근접한 후보
+    return cands[0][1], cands[0][0]
+
+
+_VISION_SIGNAL_MAP = {"매수": "BUY", "강력매수": "STRONG_BUY", "매도": "SELL",
+                      "강력매도": "STRONG_SELL", "관망": "HOLD"}
+
+
+def _save_vision_cache(code: str, name: str | None, result: dict, image_hashes=None) -> None:
+    """차트(이미지/CSV) AI 분석 결과를 ai_analysis_cache에 저장 — 전 MOON STOCK 공통 노출.
+
+    vision/CSV 결과는 ai_result 구조 → signal·confidence를 추출해 표준 캐시 컬럼에 매핑.
+    """
+    if apollo_db is None or models is None or not code:
+        return
+    try:
+        air = result.get("ai_result") or {}
+        sig = _VISION_SIGNAL_MAP.get(str(air.get("signal", "")).strip(), None)
+        conf = air.get("confidence")
+        upsid = air.get("rise_probability")
+        db_c: Session = apollo_db.get_session_factory()()
+        try:
+            existing = db_c.execute(select(models.AiAnalysisCache).where(
+                models.AiAnalysisCache.stock_code == code)).scalar_one_or_none()
+            now_utc = datetime.utcnow()
+            payload = dict(result)
+            payload["source"] = "chart-vision"
+            if existing is None:
+                db_c.add(models.AiAnalysisCache(
+                    stock_code=code, stock_name=name, analyzed_at=now_utc, signal=sig,
+                    confidence=float(conf) if conf is not None else None,
+                    upside_probability=float(upsid) if upsid is not None else None,
+                    result_json=payload, image_hashes=image_hashes))
+            else:
+                existing.stock_name = name or existing.stock_name
+                existing.analyzed_at = now_utc
+                existing.signal = sig or existing.signal
+                if conf is not None:
+                    existing.confidence = float(conf)
+                if upsid is not None:
+                    existing.upside_probability = float(upsid)
+                existing.result_json = payload
+                if image_hashes:
+                    existing.image_hashes = image_hashes
+            db_c.commit()
+        finally:
+            db_c.close()
+    except Exception:
+        pass
+
+
 def _fdr_lookup(query: str) -> tuple[str, str] | None:
     """FinanceDataReader로 종목명 부분 매칭 → (code, name). 없으면 None."""
     try:
@@ -6669,24 +6809,115 @@ def _resolve_stock_in_text(text: str) -> Optional[tuple[str, str]]:
                 row = s.execute(select(models.Stock).where(models.Stock.code == m.group(1))).scalar_one_or_none()
                 if row:
                     return str(row.code), str(row.name)
-            # 종목명 부분일치 — 텍스트에 포함된 가장 긴 종목명
+            # 종목명 부분일치 — 텍스트에 포함된 가장 긴 종목명 (DB 우선)
             rows = s.execute(select(models.Stock.code, models.Stock.name)).all()
             hit = None
             for code, nm in rows:
                 if nm and nm in t and (hit is None or len(nm) > len(hit[1])):
                     hit = (str(code), str(nm))
-            return hit
+            if hit:
+                return hit
         finally:
             s.close()
+        # DB 미스 → FDR 전체 KRX 목록에서 텍스트에 포함된 가장 긴 종목명 (관심종목 외 종목도 인식)
+        fmap = _fdr_name_map()
+        fhit = None
+        for nm, code in fmap.items():
+            if nm and nm in t and (fhit is None or len(nm) > len(fhit[1])):
+                fhit = (code, nm)
+        return fhit
     except Exception:
         return None
 
 
+def _ai_search_core(query: str, history: list) -> dict:
+    """자연어 검색 공용 코어 — 종목 해석 + 관심종목/리포트 상태 + LLM 대화. (게이트·제한은 호출부)."""
+    import market_compass
+
+    # 종목 해석 + 관심종목 존재/리포트 유무
+    resolved = _resolve_stock_in_text(query)
+    in_watchlist = False
+    has_report = False
+    grounding = ""
+    if resolved and apollo_db is not None and models is not None:
+        code, name = resolved
+        try:
+            s: Session = apollo_db.get_session_factory()()
+            try:
+                in_watchlist = bool(s.execute(select(models.Watchlist.id).where(
+                    models.Watchlist.user_id == 1, models.Watchlist.stock_code == code)).first())
+                row = s.execute(select(models.AiAnalysisCache).where(
+                    models.AiAnalysisCache.stock_code == code)).scalar_one_or_none()
+            finally:
+                s.close()
+            pj = row.result_json if (row and isinstance(row.result_json, dict)) else None
+            if pj and pj.get("aiReport"):
+                # 12단계 표준 리포트
+                has_report = True
+                comp = pj.get("composite", {}) or {}
+                tg = pj.get("targets", {}) or {}
+                st = pj.get("stock", {}) or {}
+                grounding = (
+                    f"\n\n[종목 데이터] {name}({code}) — 리포트 있음\n"
+                    f"- 섹터: {st.get('sector')}\n"
+                    f"- 시그널: {row.signal} / 종합점수: {comp.get('score')} ({comp.get('grade')})\n"
+                    f"- 현재가: {st.get('currentPrice')} / 평균목표가: {tg.get('avgTarget')} (상승여력 {tg.get('avgTargetUpside')}%)\n"
+                    f"- 손익비: {comp.get('riskReward')}\n"
+                    "→ 이 데이터를 근거로 답하고, 상세는 리포트로 안내."
+                )
+            elif pj and pj.get("ai_result"):
+                # 차트(이미지/CSV) AI 분석 리포트
+                has_report = True
+                air = pj.get("ai_result") or {}
+                grounding = (
+                    f"\n\n[종목 데이터] {name}({code}) — 차트 AI 분석 리포트 있음\n"
+                    f"- 시그널: {air.get('signal')} / 확신도: {air.get('confidence')}%\n"
+                    f"- 추세: {air.get('trend')} / 상승확률: {air.get('rise_probability')}%\n"
+                    f"- 요약: {(air.get('summary') or '')[:160]}\n"
+                    "→ 이 데이터를 근거로 답하고, 상세는 리포트로 안내."
+                )
+            elif in_watchlist:
+                grounding = f"\n\n[종목 데이터] {name}({code}) — 관심종목이나 리포트 준비 중. '분석 준비 중'이라고 안내."
+            else:
+                grounding = f"\n\n[종목 데이터] {name}({code}) — 관심종목 미편입. '아직 준비되지 않은 종목 — 분석 준비 중'이라고 안내."
+            # 산업·사업 프로필 주입 (있으면) — 리포트 없어도 사업 내용은 정확히 답하도록
+            prof = _stock_profile(code)
+            if prof:
+                grounding += (
+                    f"\n[산업·사업] 섹터 {prof.get('sector')}({prof.get('theme')}) · "
+                    f"{prof.get('industryGroup')} > {prof.get('industry')} > {prof.get('subIndustry')}\n"
+                    f"- 사업: {' / '.join(prof.get('businesses', []))}\n"
+                    f"- 한줄: {prof.get('summary')}"
+                )
+        except Exception:
+            pass
+
+    convo_lines = []
+    for h in (history or [])[-6:]:
+        role = "사용자" if h.get("role") == "user" else "도우미"
+        convo_lines.append(f"{role}: {h.get('content', '')}")
+    convo = "\n".join(convo_lines)
+    user_content = ((f"이전 대화:\n{convo}\n\n" if convo else "") + f"사용자 질문: {query}" + grounding)
+
+    saved = market_compass._SYSTEM_PROMPT
+    try:
+        market_compass._SYSTEM_PROMPT = _SEARCH_SYSTEM_PROMPT
+        answer, provider = market_compass._call_llm(user_content)
+    finally:
+        market_compass._SYSTEM_PROMPT = saved
+
+    return {
+        "answer": answer, "provider": provider,
+        "resolvedStock": ({"code": resolved[0], "name": resolved[1],
+                           "inWatchlist": in_watchlist, "hasReport": has_report} if resolved else None),
+    }
+
+
 @app.post("/api/public/ai-search")
 def public_ai_search(request: Request, body: dict = Body(default={})):
-    """공개 자연어 대화형 검색 — 종목 데이터 기반 + LLM 대화. 게스트 게이트 + IP 일할 제한."""
+    """공개 자연어 대화형 검색 — 게스트 게이트 + IP 일할 제한."""
     try:
-        import market_compass
+        import market_compass  # noqa: F401
     except Exception as exc:
         raise HTTPException(status_code=503, detail="분석 모듈 미가용") from exc
     query = str(body.get("query") or "").strip()
@@ -6694,68 +6925,34 @@ def public_ai_search(request: Request, body: dict = Body(default={})):
         raise HTTPException(status_code=400, detail="검색어를 입력하세요.")
     if not (str(body.get("guest_name") or "").strip() and str(body.get("guest_phone") or "").strip()):
         raise HTTPException(status_code=403, detail="이름과 전화번호가 필요합니다 (게스트 입장 후 이용).")
-
     ip = (request.client.host if request.client else "?") or "?"
     rate = _public_rate_state(ip)
     rate.setdefault("chat", 0)
     if rate["chat"] >= 30:
         raise HTTPException(status_code=429, detail="오늘 대화 한도(30회)를 모두 사용했습니다. 내일 다시 이용하세요.")
     rate["chat"] += 1
-
-    # 종목 데이터 그라운딩 (캐시 리포트 요약)
-    grounding = ""
-    resolved = _resolve_stock_in_text(query)
-    if resolved and apollo_db is not None and models is not None:
-        code, name = resolved
-        try:
-            s: Session = apollo_db.get_session_factory()()
-            try:
-                row = s.execute(select(models.AiAnalysisCache).where(
-                    models.AiAnalysisCache.stock_code == code)).scalar_one_or_none()
-            finally:
-                s.close()
-            if row and isinstance(row.result_json, dict):
-                pj = row.result_json
-                comp = pj.get("composite", {}) or {}
-                tg = pj.get("targets", {}) or {}
-                st = pj.get("stock", {}) or {}
-                grounding = (
-                    f"\n\n[종목 데이터] {name}({code})\n"
-                    f"- 섹터: {st.get('sector')}\n"
-                    f"- 시그널: {row.signal} / 종합점수: {comp.get('score')} ({comp.get('grade')})\n"
-                    f"- 현재가: {st.get('currentPrice')} / 평균목표가: {tg.get('avgTarget')} (상승여력 {tg.get('avgTargetUpside')}%)\n"
-                    f"- 손익비: {comp.get('riskReward')}\n"
-                )
-            elif resolved:
-                grounding = f"\n\n[종목 데이터] {name}({code}) — 아직 MOON STOCK 분석 리포트가 없는 종목."
-        except Exception:
-            pass
-
-    # 대화 이력 + 그라운딩 → 단일 프롬프트
-    history = body.get("history") or []
-    convo_lines = []
-    for h in history[-6:]:
-        role = "사용자" if h.get("role") == "user" else "도우미"
-        convo_lines.append(f"{role}: {h.get('content', '')}")
-    convo = "\n".join(convo_lines)
-    user_content = (
-        (f"이전 대화:\n{convo}\n\n" if convo else "")
-        + f"사용자 질문: {query}"
-        + grounding
-    )
-
-    saved = market_compass._SYSTEM_PROMPT
     try:
-        market_compass._SYSTEM_PROMPT = _SEARCH_SYSTEM_PROMPT
-        answer, provider = market_compass._call_llm(user_content)
+        out = _ai_search_core(query, body.get("history") or [])
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"검색 실패: {exc}") from exc
-    finally:
-        market_compass._SYSTEM_PROMPT = saved
+    out["chatRemaining"] = 30 - rate["chat"]
+    return out
 
-    return {"answer": answer, "provider": provider,
-            "resolvedStock": ({"code": resolved[0], "name": resolved[1]} if resolved else None),
-            "chatRemaining": 30 - rate["chat"]}
+
+@app.post("/api/admin/ai-search")
+def admin_ai_search(body: dict = Body(default={}), _current_user=Depends(require_admin)):
+    """관리자 자연어 대화형 검색 — 게이트·제한 없음. 종목명 등장 시 관심종목/리포트 상태 동반."""
+    try:
+        import market_compass  # noqa: F401
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="분석 모듈 미가용") from exc
+    query = str(body.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="검색어를 입력하세요.")
+    try:
+        return _ai_search_core(query, body.get("history") or [])
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"검색 실패: {exc}") from exc
 
 
 @app.post("/api/admin/sectors/mobility-induct")

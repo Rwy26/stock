@@ -372,6 +372,15 @@ def analyze_stock(code: str, with_ai: bool = True) -> dict:
         "composite": composite,
     }
 
+    # 산업·사업 프로필 주입 (stock_profiles.json) — 테마 촉매·한줄 테제 정확도 향상
+    try:
+        _pp = Path(__file__).resolve().parent / "stock_profiles.json"
+        _prof = json.loads(_pp.read_text(encoding="utf-8")).get(code)
+        if isinstance(_prof, dict):
+            context["businessProfile"] = _prof
+    except Exception:
+        pass
+
     # ETF 구성종목 — ETF로 판별되면 상위 10개 주입
     stock_name = targets.get("name", code)
     if _is_etf(code, stock_name or ""):
