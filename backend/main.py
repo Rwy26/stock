@@ -6884,14 +6884,144 @@ def _resolve_stock_in_text(text: str) -> Optional[tuple[str, str]]:
         return None
 
 
-def _ai_search_core(query: str, history: list) -> dict:
+def _news_volume(code: str) -> dict | None:
+    """최근 1일 뉴스량 vs 지난 9일 일평균 — 많음(up)/적음(down)/보통(flat) 방향."""
+    if apollo_db is None or models is None or not code:
+        return None
+    try:
+        from datetime import timedelta as _td
+        from sqlalchemy import func as _f
+        now = datetime.now()
+        d1, d10 = now - _td(days=1), now - _td(days=10)
+        s = apollo_db.get_session_factory()()
+        try:
+            recent = s.execute(select(_f.count()).select_from(models.NewsArticle).where(
+                models.NewsArticle.stock_code == code, models.NewsArticle.published_at >= d1)).scalar() or 0
+            prior = s.execute(select(_f.count()).select_from(models.NewsArticle).where(
+                models.NewsArticle.stock_code == code,
+                models.NewsArticle.published_at >= d10, models.NewsArticle.published_at < d1)).scalar() or 0
+        finally:
+            s.close()
+        avg9 = prior / 9.0
+        if avg9 <= 0:
+            dirn = "up" if recent > 0 else "flat"
+            label = f"최근 {recent}건 (평소 뉴스 적음)" if recent else "뉴스 적음"
+        else:
+            ratio = recent / avg9
+            dirn = "up" if ratio >= 1.3 else "down" if ratio <= 0.7 else "flat"
+            label = f"최근 {recent}건 / 9일평균 {avg9:.1f}건"
+        return {"recent": int(recent), "avg9d": round(avg9, 1), "dir": dirn, "label": label}
+    except Exception:
+        return None
+
+
+def _suggest_stocks(q: str, limit: int = 6) -> list[dict]:
+    """검색어로 종목 후보 랭킹 — 정확>접두>이름에 포함>질문에 포함. (확인-먼저 흐름용)."""
+    q = (q or "").strip()
+    if not q:
+        return []
+    ql = q.lower()
+    pool: dict[str, str] = {}   # name -> code
+    if apollo_db is not None and models is not None:
+        try:
+            s: Session = apollo_db.get_session_factory()()
+            try:
+                for code, nm in s.execute(select(models.Stock.code, models.Stock.name)).all():
+                    if nm:
+                        pool[str(nm)] = str(code)
+            finally:
+                s.close()
+        except Exception:
+            pass
+    try:
+        for nm, code in _fdr_name_map().items():
+            pool.setdefault(nm, code)
+    except Exception:
+        pass
+
+    scored: list[tuple] = []
+    for nm, code in pool.items():
+        nl = nm.lower()
+        if q.isdigit() and len(q) == 6 and code.zfill(6) == q.zfill(6):
+            score = 0
+        elif nl == ql:
+            score = 0
+        elif nl.startswith(ql):
+            score = 1
+        elif ql in nl:          # '하이닉스' in 'SK하이닉스' → 우선
+            score = 2
+        elif nl in ql:          # '이닉스' in '하이닉스' → 후순위
+            score = 4
+        else:
+            continue
+        scored.append((score, abs(len(nm) - len(q)), code, nm))
+    scored.sort()
+
+    wl_codes: set[str] = set()
+    cache_codes: set[str] = set()
+    if apollo_db is not None and models is not None:
+        try:
+            s2: Session = apollo_db.get_session_factory()()
+            try:
+                wl_codes = {str(c) for c in s2.execute(
+                    select(models.Watchlist.stock_code).where(models.Watchlist.user_id == 1)).scalars().all()}
+                cache_codes = {str(c) for c in s2.execute(
+                    select(models.AiAnalysisCache.stock_code)).scalars().all()}
+            finally:
+                s2.close()
+        except Exception:
+            pass
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for _, _, code, nm in scored:
+        if code in seen:
+            continue
+        seen.add(code)
+        out.append({"code": code, "name": nm,
+                    "inWatchlist": code in wl_codes, "hasReport": code in cache_codes})
+        if len(out) >= limit:
+            break
+    return out
+
+
+@app.get("/api/public/stock-suggest")
+def public_stock_suggest(q: str = ""):
+    """검색어 → 종목 후보 목록 (확인용, LLM 미호출·게이트 없음)."""
+    return {"candidates": _suggest_stocks(q)}
+
+
+def _ai_search_core(query: str, history: list, forced_code: str | None = None) -> dict:
     """자연어 검색 공용 코어 — 종목 해석 + 관심종목/리포트 상태 + LLM 대화. (게이트·제한은 호출부)."""
     import market_compass
 
-    # 종목 해석 + 관심종목 존재/리포트 유무
-    resolved = _resolve_stock_in_text(query)
+    # 종목 해석 — 확인된 코드(forced_code) 우선, 없으면 텍스트에서 추정
+    resolved = None
+    if forced_code and str(forced_code).strip():
+        fc = str(forced_code).strip()
+        nm = None
+        try:
+            if apollo_db is not None and models is not None:
+                s0 = apollo_db.get_session_factory()()
+                try:
+                    r0 = s0.execute(select(models.Stock).where(models.Stock.code == fc)).scalar_one_or_none()
+                    if r0:
+                        nm = r0.name
+                finally:
+                    s0.close()
+        except Exception:
+            pass
+        if not nm:
+            for n2, c2 in _fdr_name_map().items():
+                if c2 == fc:
+                    nm = n2
+                    break
+        resolved = (fc, nm or fc)
+    else:
+        resolved = _resolve_stock_in_text(query)
     in_watchlist = False
     has_report = False
+    agent_summary = None
     grounding = ""
     if resolved and apollo_db is not None and models is not None:
         code, name = resolved
@@ -6919,6 +7049,31 @@ def _ai_search_core(query: str, history: list) -> dict:
                     f"- 손익비: {comp.get('riskReward')}\n"
                     "→ 이 데이터를 근거로 답하고, 상세는 리포트로 안내."
                 )
+                # ── 에이전트별 대표값 (체크 대신 숫자·방향 화살표) ──
+                sig = str(row.signal or "")
+                sig_dir = "up" if sig in ("STRONG_BUY", "BUY") else "down" if sig in ("SELL", "STRONG_SELL") else "flat"
+                ss = pj.get("shortSelling") or {}
+                ss_trend = ss.get("trend")
+                ss_dir = "up" if (isinstance(ss_trend, (int, float)) and ss_trend > 0.2) else "down" if (isinstance(ss_trend, (int, float)) and ss_trend < -0.2) else "flat"
+                rr = comp.get("riskReward")
+                sec_score = st.get("sectorScore")
+                upside = tg.get("avgTargetUpside")
+                mtf_sum = ((pj.get("mtf") or {}).get("alignment") or {}).get("summary")
+                def _v(x, suf=""):
+                    return (f"{x}{suf}" if x is not None else "—")
+                agent_summary = [
+                    {"label": "산업 분석", "value": _v(st.get("sector")) + (f" {sec_score}점" if sec_score is not None else ""),
+                     "dir": "up" if (isinstance(sec_score, (int, float)) and sec_score >= 55) else "down" if (isinstance(sec_score, (int, float)) and sec_score < 45) else "flat"},
+                    {"label": "수급 분석", "value": _v(ss.get("interpretation") or ("공매도 추세 " + str(ss_trend)) if ss else "—"), "dir": ss_dir},
+                    {"label": "차트 분석", "value": _v(mtf_sum or {"STRONG_BUY": "강세", "BUY": "매수우위", "HOLD": "중립", "SELL": "매도우위", "STRONG_SELL": "약세"}.get(sig, sig)), "dir": sig_dir},
+                    ({"label": "뉴스 분석", "value": _nv["label"], "dir": _nv["dir"]} if (_nv := _news_volume(code)) else {"label": "뉴스 분석", "value": "—", "dir": "flat"}),
+                    {"label": "기관/외인", "value": _v(ss.get("interpretation")) if ss else "참고", "dir": ss_dir},
+                    {"label": "리스크 분석", "value": (f"손익비 {rr}" if rr is not None else "—"),
+                     "dir": "up" if (isinstance(rr, (int, float)) and rr >= 2) else "down" if (isinstance(rr, (int, float)) and rr < 1) else "flat"},
+                    {"label": "종합 점수화", "value": _v(comp.get("score"), "점") + (f" ({comp.get('grade')})" if comp.get("grade") else ""), "dir": sig_dir},
+                    {"label": "시각 리포트", "value": (f"상승여력 {'+' if (isinstance(upside,(int,float)) and upside>=0) else ''}{upside}%" if upside is not None else "리포트"),
+                     "dir": "up" if (isinstance(upside, (int, float)) and upside >= 0) else "down" if (isinstance(upside, (int, float)) and upside < 0) else "flat"},
+                ]
             elif pj and pj.get("ai_result"):
                 # 차트(이미지/CSV) AI 분석 리포트
                 has_report = True
@@ -6973,6 +7128,7 @@ def _ai_search_core(query: str, history: list) -> dict:
         "answer": answer, "provider": provider,
         "resolvedStock": ({"code": resolved[0], "name": resolved[1],
                            "inWatchlist": in_watchlist, "hasReport": has_report} if resolved else None),
+        "agentSummary": agent_summary,
     }
 
 
@@ -7002,7 +7158,7 @@ def public_ai_search(request: Request, body: dict = Body(default={})):
         pass
 
     try:
-        return _ai_search_core(query, body.get("history") or [])
+        return _ai_search_core(query, body.get("history") or [], forced_code=body.get("code"))
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"검색 실패: {exc}") from exc
 
@@ -7018,7 +7174,7 @@ def admin_ai_search(body: dict = Body(default={}), _current_user=Depends(require
     if not query:
         raise HTTPException(status_code=400, detail="검색어를 입력하세요.")
     try:
-        return _ai_search_core(query, body.get("history") or [])
+        return _ai_search_core(query, body.get("history") or [], forced_code=body.get("code"))
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"검색 실패: {exc}") from exc
 

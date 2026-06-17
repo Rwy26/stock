@@ -129,16 +129,21 @@ def _composite_score(sector_score: Optional[float], mtf: dict, targets: dict) ->
     short = targets.get("shortSelling") or {}
     parts["공매도 수급"] = float(short.get("score", 50.0)) if "error" not in short else 50.0
 
-    # 손익비: (평균목표 상승폭) / (기술적 손절 하락폭) — 2.0 이상이면 만점
+    # 손익비: (평균목표 상승폭) / (손절 하락폭) — 2.0 이상이면 만점.
+    # 위험 기준 손절은 '구조 손절'(상승구조 무효 레벨) 우선 — 너무 가까운 기술적 손절(-1%)로
+    # R/R이 비현실적으로 부풀려지는 것을 방지. 구조>수급>기술적 순 폴백.
     cur = targets.get("currentPrice") or 0
     avg_t = targets.get("avgTarget")
-    tech = (targets.get("stops", {}).get("기술적 손절") or {}).get("price")
+    _stops = targets.get("stops", {}) or {}
+    stop_px = ((_stops.get("구조 손절") or {}).get("price")
+               or (_stops.get("수급 손절") or {}).get("price")
+               or (_stops.get("기술적 손절") or {}).get("price"))
     rr_score = 50.0
     rr = None
-    if cur and avg_t and tech and cur > tech:
+    if cur and avg_t and stop_px and cur > stop_px:
         up = avg_t / cur - 1
-        dn = 1 - tech / cur
-        if dn > 0:
+        dn = 1 - stop_px / cur
+        if dn >= 0.01:   # 손절폭 1% 미만이면 R/R 무의미 → 산출 보류(중립)
             rr = round(up / dn, 2)
             rr_score = round(min(rr / 2.0, 1.0) * 100, 1)
     parts["손익비"] = rr_score

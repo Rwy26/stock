@@ -497,7 +497,7 @@ const AGENT_STAGES = [
 function AgentPipeline() {
   const [active, setActive] = useState(0)
   useEffect(() => {
-    const t = setInterval(() => setActive(a => Math.min(a + 1, AGENT_STAGES.length - 1)), 650)
+    const t = setInterval(() => setActive(a => Math.min(a + 1, AGENT_STAGES.length - 1)), 1200)
     return () => clearInterval(t)
   }, [])
   return (
@@ -893,39 +893,83 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
   const [multiResults, setMultiResults] = useState<AnalysisResponse[] | null>(null)
   const [docResult, setDocResult] = useState<{ mode: string; extraction: Extraction } | null>(null)
   const [reportModal, setReportModal] = useState<{ code: string; name: string } | null>(null)
-  const [searchChat, setSearchChat] = useState<{ role: 'user' | 'assistant'; content: string; stock?: { code: string; name: string; inWatchlist?: boolean; hasReport?: boolean } | null }[]>([])
+  type ChatCand = { code: string; name: string; inWatchlist?: boolean; hasReport?: boolean }
+  const [searchChat, setSearchChat] = useState<{ role: 'user' | 'assistant'; content: string; stock?: ChatCand | null; agents?: { label: string; value: string; dir: string }[] | null; candidates?: ChatCand[] | null }[]>([])
   const [searchLoading, setSearchLoading] = useState(false)
+  const [searchPhase, setSearchPhase] = useState<'idle' | 'suggest' | 'analyze'>('idle')
+  const abortRef = useRef<AbortController | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const runSearch = useCallback(async (q: string) => {
+  // 1단계: 질문 → 종목 후보 확인 ("○○를 찾으시나요?")
+  const runSuggest = useCallback(async (q: string) => {
     if (!q.trim() || searchLoading) return
-    const history = searchChat.map(m => ({ role: m.role, content: m.content }))
     setSearchChat(prev => [...prev, { role: 'user', content: q }])
     setSymbol('')
-    setSearchLoading(true)
+    setSearchPhase('suggest'); setSearchLoading(true)
+    try {
+      const resp = await fetch(`/api/public/stock-suggest?q=${encodeURIComponent(q.trim())}`)
+      const d = await resp.json()
+      const cands: ChatCand[] = d.candidates ?? []
+      if (cands.length > 0) {
+        const top = cands[0]
+        setSearchChat(prev => [...prev, {
+          role: 'assistant',
+          content: cands.length === 1
+            ? `'${top.name}(${top.code})'를 찾으시나요? 맞으면 아래 버튼을 눌러 분석을 시작하세요.`
+            : `'${q.trim()}'로 검색된 종목입니다. 분석할 종목을 선택하세요.`,
+          candidates: cands,
+        }])
+      } else {
+        setSearchChat(prev => [...prev, {
+          role: 'assistant',
+          content: `'${q.trim()}'에 해당하는 종목을 찾지 못했습니다. 정확한 종목명이나 코드로 다시 입력해 주세요. 예: SK하이닉스 · 삼성전자 · 005930`,
+        }])
+      }
+    } catch (e) {
+      setSearchChat(prev => [...prev, { role: 'assistant', content: `검색 실패: ${e instanceof Error ? e.message : String(e)}` }])
+    } finally {
+      setSearchLoading(false); setSearchPhase('idle')
+    }
+  }, [searchLoading])
+
+  // 2단계: 확인된 종목 분석 (취소 가능)
+  const runSearch = useCallback(async (code: string, name: string) => {
+    if (searchLoading) return
+    const history = searchChat.map(m => ({ role: m.role, content: m.content }))
+    setSearchChat(prev => [...prev, { role: 'user', content: `${name} 분석` }])
+    setSearchPhase('analyze'); setSearchLoading(true)
+    const ac = new AbortController()
+    abortRef.current = ac
     try {
       let resp: Response
+      const payload: Record<string, unknown> = { query: `${name} 분석`, code, history }
       if (publicMode) {
         const g = getGuest()
+        payload.guest_name = g?.name ?? ''; payload.guest_phone = g?.phone ?? ''
         resp = await fetch('/api/public/ai-search', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: q, history, guest_name: g?.name ?? '', guest_phone: g?.phone ?? '' }),
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: ac.signal,
         })
       } else {
         resp = await fetch('/api/admin/ai-search', {
           method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getAccessToken()}` },
-          body: JSON.stringify({ query: q, history }),
+          body: JSON.stringify(payload), signal: ac.signal,
         })
       }
       const d = await resp.json()
       if (!resp.ok) throw new Error(d.detail ?? `오류 ${resp.status}`)
-      setSearchChat(prev => [...prev, { role: 'assistant', content: d.answer ?? '(응답 없음)', stock: d.resolvedStock }])
+      setSearchChat(prev => [...prev, { role: 'assistant', content: d.answer ?? '(응답 없음)', stock: d.resolvedStock, agents: d.agentSummary }])
     } catch (e) {
-      setSearchChat(prev => [...prev, { role: 'assistant', content: `검색 실패: ${e instanceof Error ? e.message : String(e)}` }])
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        setSearchChat(prev => [...prev, { role: 'assistant', content: '검색을 취소했습니다.' }])
+      } else {
+        setSearchChat(prev => [...prev, { role: 'assistant', content: `검색 실패: ${e instanceof Error ? e.message : String(e)}` }])
+      }
     } finally {
-      setSearchLoading(false)
+      setSearchLoading(false); setSearchPhase('idle'); abortRef.current = null
     }
   }, [searchChat, searchLoading, publicMode])
+
+  const cancelSearch = useCallback(() => { abortRef.current?.abort() }, [])
   const [showKeyPanel, setShowKeyPanel] = useState(false)
   const [keyProvider, setKeyProvider] = useState<'gemini' | 'groq' | 'openai'>('gemini')
   const [apiKeyInput, setApiKeyInput] = useState('')
@@ -1109,7 +1153,7 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
     if (mode === 'drop') {
       // 파일 없이 텍스트만 입력 → 자연어 대화형 검색 (질문 자체부터 분석)
       if (droppedFiles.length === 0) {
-        if (symbol.trim()) { runSearch(symbol.trim()); return }
+        if (symbol.trim()) { runSuggest(symbol.trim()); return }
         setError('파일을 업로드하거나 검색어를 입력하세요'); return
       }
       // symbol이 비어있으면 파일명에서 자동 추출 시도 (실패해도 진행 — 백엔드가 콘텐츠 인식)
@@ -1504,7 +1548,7 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
                     <span className="hint"> (종목명·질문 입력 — 대화형 검색 · 파일 올리면 차트 분석)</span>
                     <input value={symbol}
                       onChange={e => setSymbol(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter' && symbol.trim() && !hasFiles) { e.preventDefault(); runSearch(symbol.trim()) } }}
+                      onKeyDown={e => { if (e.key === 'Enter' && symbol.trim() && !hasFiles) { e.preventDefault(); runSuggest(symbol.trim()) } }}
                       placeholder="예: 삼성전자 어때?  /  방산 섹터 전망  /  009150" />
                   </label>
                 )}
@@ -1518,7 +1562,7 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
                 )}
                 {!hasFiles && (
                   <button type="button" className="ai-export-btn" disabled={searchLoading || !symbol.trim()}
-                    onClick={() => runSearch(symbol.trim())}>
+                    onClick={() => runSuggest(symbol.trim())}>
                     {searchLoading ? '검색 중…' : '🔍 검색'}
                   </button>
                 )}
@@ -1597,6 +1641,33 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
                       borderColor: isUser ? 'rgba(96,165,250,0.35)' : undefined,
                     }}>
                       {m.content}
+                      {m.candidates && m.candidates.length > 0 && (
+                        <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                          {m.candidates.map((c) => (
+                            <button key={c.code} type="button" className="ai-export-btn" disabled={searchLoading}
+                              onClick={() => runSearch(c.code, c.name)}
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                              {c.name} <span style={{ color: 'var(--text-soft)', fontSize: '0.74rem' }}>{c.code}</span>
+                              {c.hasReport && <span style={{ color: '#34d399', fontSize: '0.7rem' }}>●</span>}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {m.agents && m.agents.length > 0 && (
+                        <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 6 }}>
+                          {m.agents.map((a, k) => {
+                            const c = a.dir === 'up' ? '#34d399' : a.dir === 'down' ? '#f87171' : '#94a3b8'
+                            const arrow = a.dir === 'up' ? '▲' : a.dir === 'down' ? '▼' : '→'
+                            return (
+                              <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: 'rgba(255,255,255,0.04)', border: `1px solid ${c}33` }}>
+                                <span style={{ color: c, fontSize: '0.8rem', flexShrink: 0 }}>{arrow}</span>
+                                <span style={{ fontSize: '0.74rem', color: 'var(--text-soft)', flexShrink: 0 }}>{a.label}</span>
+                                <span style={{ fontSize: '0.8rem', color: '#f1f5f9', fontWeight: 600, marginLeft: 'auto', textAlign: 'right' }}>{a.value}</span>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
                       {m.stock && (
                         <div style={{ marginTop: 8 }}>
                           {m.stock.hasReport ? (
@@ -1615,14 +1686,25 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
                   </div>
                   )
                 })}
-                {searchLoading && <AgentPipeline />}
+                {searchLoading && searchPhase === 'suggest' && (
+                  <div className="panel glass" style={{ padding: '10px 14px', fontSize: '0.85rem', color: 'var(--text-soft)', alignSelf: 'flex-start' }}>종목 확인 중…</div>
+                )}
+                {searchLoading && searchPhase === 'analyze' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <AgentPipeline />
+                    <button type="button" className="ai-export-btn" onClick={cancelSearch}
+                      style={{ alignSelf: 'flex-start', color: '#f87171', borderColor: 'rgba(248,113,113,0.4)' }}>
+                      ✕ 검색 취소
+                    </button>
+                  </div>
+                )}
               </div>
               <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                 <input value={symbol} onChange={e => setSymbol(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter' && symbol.trim()) { e.preventDefault(); runSearch(symbol.trim()) } }}
+                  onKeyDown={e => { if (e.key === 'Enter' && symbol.trim()) { e.preventDefault(); runSuggest(symbol.trim()) } }}
                   placeholder="이어서 질문…" style={{ flex: 1 }} />
                 <button type="button" className="ai-export-btn" disabled={searchLoading || !symbol.trim()}
-                  onClick={() => runSearch(symbol.trim())}>전송</button>
+                  onClick={() => runSuggest(symbol.trim())}>전송</button>
                 <button type="button" className="ai-export-btn" onClick={() => setSearchChat([])}>새 대화</button>
               </div>
             </div>
