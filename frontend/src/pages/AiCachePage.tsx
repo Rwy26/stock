@@ -55,7 +55,10 @@ const SIGNAL_CLASSES: Record<string, string> = {
 function formatAt(iso?: string | null) {
   if (!iso) return '–'
   try {
-    return new Date(iso).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    // analyzed_at는 UTC(naive)로 저장됨 — 타임존 표기 없으면 'Z'를 붙여 UTC로 해석 후 KST 변환
+    const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(iso)
+    const d = new Date(hasTz ? iso : iso + 'Z')
+    return d.toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
   } catch { return iso }
 }
 
