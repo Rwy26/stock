@@ -600,6 +600,78 @@ class PredictionMarketDaily(Base):
     )
 
 
+class UsStock(Base):
+    """KR 섹터 선행 US 종목 유니버스 — us-leaders 도메인 마스터.
+
+    한국 반도체/AI 섹터에 선행하는 미국 종목(NVDA·MU·GOOGL 등)·반도체 지수(SOXX/SMH/^IXIC).
+    KR daily_prices(stocks.code)와 **완전 분리**된 별도 도메인이라 stocks FK 를 두지 않는다
+    (us-leaders-lead-lag 설계). 유니버스 확장은 us_lead.US_UNIVERSE(단일 소스) →
+    scripts/us_leaders_sync.py 가 이 테이블로 UPSERT 시드한다(하드코딩 지양).
+    kr_sector_lead = 이 종목이 1차로 선행하는 KR 섹터(표시용). 다대다 선행 관계는
+    us_kr_lead_link 에 둔다. active=False 면 수집·집계에서 제외.
+    """
+
+    __tablename__ = "us_stocks"
+
+    ticker: Mapped[str] = mapped_column(String(20), primary_key=True)   # yfinance 심볼 (^IXIC 등 포함)
+    name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    kr_sector_lead: Mapped[str | None] = mapped_column(String(40), nullable=True)  # 1차 선행 KR 섹터
+    weight: Mapped[float] = mapped_column(Float, default=1.0)           # 섹터 lead score 가중
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class UsDailyPrice(Base):
+    """US 선행종목 일별 OHLCV — KR daily_prices 와 분리된 별도 시계열.
+
+    소스: yfinance 단일소스(scripts/us_leaders_sync.py, 최근 3개월 UPSERT). KR siseJson 교차검증
+    대상이 아니라 종가 sanity check(전일 대비 ±50% 초과 경고)만 둔다.
+    overnight_return_pct = (close - prev_close)/prev_close*100 — 직전 거래일 종가 대비 당일 종가
+    변화율(미 정규장 결과). KR 익일 개장이 반응하는 '밤사이' 신호로 us_lead 가중평균에 사용.
+    (ticker, trading_date) UPSERT.
+    """
+
+    __tablename__ = "us_daily_prices"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(20), index=True)
+    trading_date: Mapped[date] = mapped_column(Date, index=True)
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_price: Mapped[float] = mapped_column(Float)
+    volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    overnight_return_pct: Mapped[float | None] = mapped_column(Float, nullable=True)  # 전일종가 대비 당일종가 %
+
+    __table_args__ = (
+        Index("uq_us_daily_prices_ticker_date", "ticker", "trading_date", unique=True),
+    )
+
+
+class UsKrLeadLink(Base):
+    """US 종목 → KR 섹터 선행 관계 (다대다) — us_lead 섹터 집계의 멤버십 테이블.
+
+    한 US 종목이 둘 이상의 KR 섹터를 선행할 수 있다(예: NVDA → 반도체 + AI). compute_us_lead 는
+    이 테이블로 섹터별 구성 종목을 모아 overnight_return_pct 가중평균 → 섹터 lead score 를 낸다.
+    lead_lag_days = US 종가가 KR 시장에 선행하는 거래일 수(기본 1, 야간→익일 개장).
+    corr = 후속 상관 분석으로 채울 자리(현재 NULL, 룩백 상관 잡 TODO).
+    시드: scripts/us_leaders_sync.py (us_lead.iter_lead_links). (us_ticker, kr_sector) UPSERT.
+    """
+
+    __tablename__ = "us_kr_lead_link"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    us_ticker: Mapped[str] = mapped_column(String(20), index=True)
+    kr_sector: Mapped[str] = mapped_column(String(40), index=True)
+    lead_lag_days: Mapped[int] = mapped_column(Integer, default=1)
+    corr: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    __table_args__ = (
+        Index("uq_us_kr_lead_link_ticker_sector", "us_ticker", "kr_sector", unique=True),
+    )
+
+
 class SignalOutcome(Base):
     """AI 시그널 적중 추적 (append-only 예측 로그 + 익일 채점).
 

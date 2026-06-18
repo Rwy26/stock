@@ -320,8 +320,84 @@ _SYSTEM_PROMPT = """당신은 월가 헤지펀드 PM, 글로벌 매크로 전략
 # 다음 주도 섹터 후보
 (레이어 점수의 방향성을 근거로 1~2개, 근거 명시)"""
 
+# 시한부 정책·선거 국면 지시문 (윈도우 내에서만 시스템 프롬프트에 1문장 추가 — 윈도우 밖 회귀 보장)
+_POLICY_DIRECTIVE = (
+    "정책·선거 국면: 컨텍스트의 policyRegime 신호(트럼프 정책행동·해당 예측시장 반응)를 "
+    "상위 가중해 해석하되, 제공된 수치만 근거로 쓸 것(환각 금지)."
+)
 
-def _call_llm(context_json: str) -> tuple[Optional[str], str]:
+# 정책 뉴스 토픽 키워드 (결정론 태깅 — LLM 미사용). news_collector 헤드라인에서 트럼프 정책행동 탐지.
+_POLICY_NEWS_KW = {
+    "관세": ["관세", "tariff", "무역전쟁", "수입세"],
+    "연준압박": ["파월", "연준", "fed", "연준의장", "금리 인하 압박", "해임"],
+    "셧다운": ["셧다운", "shutdown", "부채한도", "debt ceiling"],
+    "선거": ["중간선거", "midterm", "하원", "상원", "공화당", "민주당"],
+}
+
+# policyRegime 에 surface 할 정치·Fed 예측 타깃 (global_macro_feeds.POLICY_PREDICTION_TARGETS 중 실조회분)
+_POLICY_REGIME_KEYS = ["fed_cut_next", "fed_path_eoy", "us_gov_shutdown"]
+
+
+def _scan_policy_news(news_ctx: dict, limit: int = 12) -> list[dict]:
+    """뉴스 헤드라인에서 정책 토픽(관세·연준압박·셧다운·선거)을 결정론 태깅. 중복 제목 제거."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for sec in ((news_ctx or {}).get("sectors") or {}).values():
+        for h in sec.get("headlines", []):
+            title = h.get("title", "")
+            t = title.lower()
+            for topic, kws in _POLICY_NEWS_KW.items():
+                if any(k.lower() in t for k in kws):
+                    if title not in seen:
+                        seen.add(title)
+                        out.append({"topic": topic, "title": title})
+                    break
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _policy_regime(news_ctx: dict) -> dict:
+    """[시한부] policyRegime 블록 — 트럼프 정책행동(뉴스) + 정치·Fed 예측시장 반응(수치).
+
+    윈도우 내에서만 호출된다. 예측시장 수치는 global_macro(캐시) 의 원천 consensus 만 사용(환각 금지).
+    """
+    import global_macro
+    import global_macro_feeds as gmf
+
+    try:
+        g = global_macro.compute_global_macro()
+        preds = (g.get("inputs") or {}).get("prediction") or {}
+    except Exception:
+        preds = {}
+
+    markets: list[dict] = []
+    for key in _POLICY_REGIME_KEYS:
+        row = preds.get(key)
+        if not row:
+            continue
+        markets.append({
+            "key": key,
+            "label": row.get("label"),
+            "consensus": row.get("consensus"),
+            "polymarket": row.get("polymarket"),
+            "kalshi": row.get("kalshi"),
+            "nSources": row.get("n_sources"),
+            "weightMode": row.get("weight_mode"),
+            "feedsInto": row.get("feeds_into"),
+        })
+
+    return {
+        "active": True,
+        "windowUntil": gmf.ELECTION_WINDOW_UNTIL.isoformat(),
+        "note": ("미 중간선거(2026-11-03) 시한부 — 정치·Fed 예측시장 신호를 "
+                 "Polymarket 0.6/Kalshi 0.4로 상위 가중. 모든 수치는 엔진 산출 원천값."),
+        "predictionMarkets": markets,
+        "policyNews": _scan_policy_news(news_ctx),
+    }
+
+
+def _call_llm(context_json: str, policy_active: bool = False) -> tuple[Optional[str], str]:
     """Gemini > Groq > OpenAI 우선순위로 종합 리포트 생성. (리포트, 프로바이더) 반환.
 
     실패 시 다음 프로바이더로 폴백하고, 전부 실패하면 마지막 오류를 프로바이더 문자열에 담는다.
@@ -330,6 +406,8 @@ def _call_llm(context_json: str) -> tuple[Optional[str], str]:
         "다음은 실시간 계산된 시장 데이터다. 이 데이터만 근거로 분석 절차를 수행하라.\n\n"
         f"```json\n{context_json}\n```"
     )
+    # 윈도우 밖(policy_active=False)에서는 시스템 프롬프트가 기존과 완전히 동일 — 회귀 없음.
+    system_prompt = _SYSTEM_PROMPT + (("\n\n" + _POLICY_DIRECTIVE) if policy_active else "")
     errors: list[str] = []
 
     # Gemini (2.5-flash 는 thinking 토큰을 쓰므로 출력 한도를 넉넉히)
@@ -340,7 +418,7 @@ def _call_llm(context_json: str) -> tuple[Optional[str], str]:
             f"{settings.gemini_model}:generateContent?key={settings.gemini_api_key}"
         )
         body = {
-            "systemInstruction": {"parts": [{"text": _SYSTEM_PROMPT}]},
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": user_msg}]}],
             "generationConfig": {"temperature": 0.3, "maxOutputTokens": 16384},
         }
@@ -376,7 +454,7 @@ def _call_llm(context_json: str) -> tuple[Optional[str], str]:
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_msg},
             ],
             "temperature": 0.3,
@@ -466,9 +544,16 @@ def compute_market_compass(force: bool = False, with_ai: bool = True) -> dict:
         ],
     }
 
+    # [시한부] 정책·선거 국면 블록 — 윈도우 내에서만 주입. 밖(2026-11-04+)에선 키 자체가 없음(회귀).
+    import global_macro_feeds as gmf
+    policy_active = gmf.election_window_active()
+    if policy_active:
+        context["policyRegime"] = _policy_regime(news_ctx)
+
     ai_report, provider = (None, "skipped")
     if with_ai:
-        ai_report, provider = _call_llm(json.dumps(context, ensure_ascii=False))
+        ai_report, provider = _call_llm(json.dumps(context, ensure_ascii=False),
+                                        policy_active=policy_active)
 
     result = {
         **context,

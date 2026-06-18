@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
@@ -42,6 +43,35 @@ METACULUS_BASE = "https://www.metaculus.com/api2"
 
 # 예측시장 가중치 (스펙 §2.2, 고정). 결측 시 가용분으로 재정규화는 global_macro 측에서 수행.
 PREDICTION_WEIGHTS = {"polymarket": 0.4, "kalshi": 0.4, "metaculus": 0.2}
+
+# ---------------------------------------------------------------------------
+# 시한부 정책·선거 국면 가중 (미 중간선거 2026-11-03 까지)
+#   ※ 날짜 하드코딩 단일 소스 — 다른 모듈은 election_window_active()/ELECTION_WINDOW_UNTIL 만 참조.
+#   윈도우 동안 정치·Fed 성격 예측 타깃에 한해 Polymarket 0.6 / Kalshi 0.4 (Metaculus 제외)를
+#   적용한다. 윈도우 종료(2026-11-04+) 시 _weights_for 가 자동으로 기본 가중으로 복귀하므로
+#   별도 정리 작업이 필요 없다. 비정치 타깃은 항상 기본 PREDICTION_WEIGHTS 유지.
+# ---------------------------------------------------------------------------
+ELECTION_WINDOW_UNTIL = date(2026, 11, 3)
+
+# 정치·Fed 성격 타깃 (윈도우 동안 가중 오버라이드 대상). 선거 관련 타깃을 PREDICTION_TARGETS 에
+# 추가할 경우 그 key 도 여기에 등록하면 자동으로 오버라이드를 받는다.
+POLICY_PREDICTION_TARGETS = {"fed_cut_next", "fed_path_eoy", "us_gov_shutdown", "house_majority_dem"}
+
+# 윈도우 가중 (Metaculus 제외 — 정치·Fed 는 Polymarket 유동성이 압도적). 결측분 재정규화는
+# fetch_prediction_consensus 가 가용 소스만으로 동일 규칙으로 처리.
+POLICY_PREDICTION_WEIGHTS = {"polymarket": 0.6, "kalshi": 0.4}
+
+
+def election_window_active(today: Optional[date] = None) -> bool:
+    """오늘이 중간선거 시한부 윈도우(≤ ELECTION_WINDOW_UNTIL) 안인가."""
+    return (today or date.today()) <= ELECTION_WINDOW_UNTIL
+
+
+def _weights_for(target_key: str, today: Optional[date] = None) -> tuple[dict, str]:
+    """타깃별 예측시장 소스 가중 + 모드 라벨. 정치·Fed 타깃 & 윈도우 내 → 정책 가중."""
+    if target_key in POLICY_PREDICTION_TARGETS and election_window_active(today):
+        return POLICY_PREDICTION_WEIGHTS, "policy_window"
+    return PREDICTION_WEIGHTS, "default"
 
 # 추적 이벤트 6개 (스펙 §7.4). slug/ticker/id 는 실조회로 확정.
 #   kalshi: {"market": "<티커>"} 단일 시장 또는 {"series": "<시리즈>", "pick": ...} 자동선택.
@@ -245,11 +275,15 @@ def _metaculus_q2(qid: Optional[int]) -> Optional[float]:
         return None
 
 
-def fetch_prediction_consensus() -> dict[str, dict]:
+def fetch_prediction_consensus(today: Optional[date] = None) -> dict[str, dict]:
     """추적 이벤트 6개의 3소스 확률 + 재정규화 consensus.
 
-    반환: {key: {polymarket, kalshi, metaculus, consensus, n_sources, feeds_into, label}}.
+    반환: {key: {polymarket, kalshi, metaculus, consensus, n_sources, weight_mode, feeds_into, label}}.
     3소스 모두 결측 → consensus=None, n_sources=0 (점수엔진이 중립 50 폴백 + evidence 'pred:N/A').
+
+    weight_mode="policy_window" 인 정치·Fed 타깃은 시한부 윈도우 동안 Polymarket 0.6/Kalshi 0.4
+    (Metaculus 제외)로 가중되고, 그 외/윈도우 밖은 "default"(0.4/0.4/0.2). today 는 테스트용 주입.
+    가중에 포함되지 않는 소스(정책 윈도우의 Metaculus)는 consensus 산출에서 제외하되 원천값은 그대로 노출.
     """
     out: dict[str, dict] = {}
     for tgt in PREDICTION_TARGETS:
@@ -257,15 +291,18 @@ def fetch_prediction_consensus() -> dict[str, dict]:
         kal = _kalshi_yes_prob(tgt.get("kalshi"))
         meta = _metaculus_q2(tgt.get("metaculus_id"))
 
+        weights, weight_mode = _weights_for(tgt["key"], today)
         parts = {"polymarket": poly, "kalshi": kal, "metaculus": meta}
-        avail = {k: v for k, v in parts.items() if v is not None}
+        # 가중 맵에 든 소스 중 가용분만 사용 → 결측분 재정규화(기존 규칙 동일, 어떤 조합에서도 작동)
+        avail = {k: v for k, v in parts.items() if v is not None and k in weights}
         consensus = None
         if avail:
-            wsum = sum(PREDICTION_WEIGHTS[k] for k in avail)
-            consensus = round(sum(v * PREDICTION_WEIGHTS[k] for k, v in avail.items()) / wsum, 1)
+            wsum = sum(weights[k] for k in avail)
+            consensus = round(sum(v * weights[k] for k, v in avail.items()) / wsum, 1)
         out[tgt["key"]] = {
             "polymarket": poly, "kalshi": kal, "metaculus": meta,
             "consensus": consensus, "n_sources": len(avail),
+            "weight_mode": weight_mode,
             "feeds_into": tgt["feeds_into"], "label": tgt["label"],
         }
     return out
