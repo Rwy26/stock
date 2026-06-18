@@ -6217,6 +6217,21 @@ def public_sector_rotation():
         raise HTTPException(status_code=502, detail=f"섹터 나침반 계산 실패: {exc}") from exc
 
 
+@app.get("/api/public/macro-warm")
+def public_macro_warm():
+    """경량 공개 warm — 운영 백엔드(포트 8000) 인메모리 캐시를 강제 재계산해 데운다.
+
+    예약작업(post_close_macro.py)이 미 정규장 마감 직후 호출 → 화면 헤더 asOf 자동 갱신.
+    with_ai=False 고정이라 LLM 비용 0 · 민감정보 미노출(asOf 만 반환). read-only.
+    """
+    try:
+        import market_compass
+        result = market_compass.compute_market_compass(force=True, with_ai=False)
+        return {"asOf": result.get("asOf")}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"macro warm 실패: {exc}") from exc
+
+
 _PUBLIC_WATCHLIST_CACHE: dict = {"ts": 0.0, "items": None}
 _PUBLIC_WATCHLIST_TTL = 90.0  # seconds
 
