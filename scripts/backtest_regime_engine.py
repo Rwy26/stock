@@ -45,8 +45,15 @@ def first_passage_actual(bars, t):
     return None
 
 
-def sample_stock(bars, per_map, stride):
-    """한 종목의 여러 시점에서 (예측, 실제) 샘플 생성."""
+def sample_stock(bars, per_map, stride, lead_score=None, pit=None):
+    """한 종목의 여러 시점에서 (예측, 실제) 샘플 생성.
+
+    lead_score: 종목 섹터의 US 선행점수(현재값 상수). pit 미지정 시 사용.
+    pit: (us_sector, series, members) — 지정 시 각 시점 date 로 as-of lead score 계산
+         (진짜 point-in-time). 미래 참조 없음(US date < KR date).
+    """
+    import regime_analogs as ra
+    import us_lead
     n = len(bars)
     out = []
     # 평가 시점: 충분한 과거(>=150) + 충분한 미래(>=HORIZON) 확보 구간
@@ -65,12 +72,24 @@ def sample_stock(bars, per_map, stride):
             continue
         dims = len(p.get("dimensions", []))
         dc = p.get("dotcomAnalogs", {})
+        dc_up = dc.get("continueUpPct") if "error" not in dc else None
+        # US 조건화 후처리 (원본 dc 불변 — 별도 값만 계산)
+        dc_up_cond = None
+        ls = lead_score
+        if pit is not None:
+            us_sector, series, members = pit
+            ls = (us_lead.sector_lead_score_asof(us_sector, bars[t]["date"], series, members)
+                  if us_sector else None)
+        if dc_up is not None and "error" not in dc:
+            uc = ra.condition_on_us_lead(dict(dc), ls).get("usConditioned", {})
+            dc_up_cond = uc.get("conditionedUpPct")
         out.append({
             "t_idx": t, "date": bars[t]["date"], "dims": dims,
             "fp_actual": fp_actual, "dir_actual": dir_actual,
             "pred1_reach": pred1_reach, "pred1_up": pred1_up,
             "predN_reach": p.get("reachTargetPct"), "predN_up": p.get("continueUpPct"),
-            "pred_dc_up": dc.get("continueUpPct") if "error" not in dc else None,
+            "pred_dc_up": dc_up, "pred_dc_up_cond": dc_up_cond,
+            "lead_score": ls,
             "valDimUsed": p.get("valuationDim", {}).get("used", False),
         })
     return out
@@ -107,6 +126,8 @@ def calibration(preds, labels, bins=5):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--with-per", action="store_true", help="7차원(PER) 포함 — pykrx 조회")
+    ap.add_argument("--pit-lead", action="store_true",
+                    help="US 조건화를 시점별 as-of lead score 로 (진짜 point-in-time)")
     ap.add_argument("--stocks", type=int, default=60)
     ap.add_argument("--stride", type=int, default=10)
     ap.add_argument("--min-bars", type=int, default=300)
@@ -121,7 +142,14 @@ def main():
                        .group_by(models.DailyPrice.stock_code)).all()
     codes = [c for c, n in counts if n >= args.min_bars][: args.stocks]
     print(f"백테스트 종목 {len(codes)}개 / stride {args.stride} / "
-          f"{'7차원(PER)' if args.with_per else '6차원'} 모드")
+          f"{'7차원(PER)' if args.with_per else '6차원'} 모드"
+          f"{' / PIT lead' if args.pit_lead else ''}")
+
+    pit_series = pit_members = None
+    if args.pit_lead:
+        import us_lead
+        pit_series, pit_members = us_lead.load_pit_context()
+        print(f"  PIT lead 로드: 종목 {len(pit_series)}개 시계열, 섹터 {len(pit_members)}개")
 
     all_samples = []
     for k, code in enumerate(codes, 1):
@@ -135,8 +163,11 @@ def main():
         if args.with_per:
             per_map = te._fetch_per_series(code, bars[0]["date"], bars[-1]["date"])
             time.sleep(0.25)
+        # 종목 섹터 → US 선행점수 (현재값, 섹터별 상수) + PIT용 섹터명
+        us_sec, lead_score = te._us_lead_score_for_code(code)
+        pit = (us_sec, pit_series, pit_members) if args.pit_lead else None
         try:
-            all_samples.extend(sample_stock(bars, per_map, args.stride))
+            all_samples.extend(sample_stock(bars, per_map, args.stride, lead_score, pit))
         except Exception as exc:  # noqa: BLE001
             print(f"  {code} 스킵: {type(exc).__name__}")
         if k % 10 == 0:
@@ -174,7 +205,8 @@ def main():
     labels = [r["dir_actual"] for r in all_samples]
     up_base = sum(labels) / len(labels) * 100
     print(f"\n[B] 20일 방향 — 표본 {n} / 실제 상승률 {up_base:.1f}%")
-    for name, key in [("1차원", "pred1_up"), ("N차원", "predN_up"), ("닷컴대조", "pred_dc_up")]:
+    for name, key in [("1차원", "pred1_up"), ("N차원", "predN_up"),
+                      ("닷컴대조", "pred_dc_up"), ("닷컴+US조건화", "pred_dc_up_cond")]:
         preds = [r[key] for r in all_samples]
         a, np_, nn = auc(preds, labels)
         cov = sum(1 for p in preds if p is not None) / n * 100
@@ -182,6 +214,22 @@ def main():
             print(f"  {name}: AUC {a:.3f} | 커버리지 {cov:.0f}%")
         else:
             print(f"  {name}: 측정불가 (커버리지 {cov:.0f}%)")
+
+    # ── C) US 조건화 효과 (원본 vs 조건화, 공정 비교: 둘 다 있는 표본만) ──────────
+    cond_rows = [r for r in all_samples
+                 if r["pred_dc_up"] is not None and r["pred_dc_up_cond"] is not None]
+    adjusted = [r for r in cond_rows if r["pred_dc_up"] != r["pred_dc_up_cond"]]
+    print(f"\n[C] US 조건화 효과 — 비교 표본 {len(cond_rows)} "
+          f"(실제 조정 발생 {len(adjusted)}, 섹터 lead≠50)")
+    if cond_rows:
+        labs = [r["dir_actual"] for r in cond_rows]
+        a0, _, _ = auc([r["pred_dc_up"] for r in cond_rows], labs)
+        a1, _, _ = auc([r["pred_dc_up_cond"] for r in cond_rows], labs)
+        if a0 is not None and a1 is not None:
+            print(f"  원본 닷컴 AUC {a0:.4f} → US조건화 AUC {a1:.4f} (Δ {a1-a0:+.4f})")
+        from collections import Counter
+        ls = Counter(round(r["lead_score"]) for r in cond_rows if r["lead_score"] is not None)
+        print(f"  적용 lead score 분포: {dict(ls)} (50=중립·조정0)")
 
     print(f"\n결과 저장: {OUT / 'regime_backtest_samples.csv'}")
     print("주: AUC 0.5=무작위, >0.55=약한 판별력, >0.6=유의미. "

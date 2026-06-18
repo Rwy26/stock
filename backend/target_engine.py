@@ -415,6 +415,33 @@ def _similar_regime_prob(bars: list[dict], up_pct: float, dn_pct: float,
     }
 
 
+# KR 섹터(sector_classification.json) → US 선행 섹터(us_lead) 매핑.
+# us_lead 가 다루는 섹터만 키 — 나머지(모빌리티·방산 등)는 선행 데이터 없음 → None(no-op).
+_KR_TO_US_LEAD_SECTOR = {"반도체": "반도체", "AI 생태계": "AI"}
+
+
+def _us_lead_score_for_code(code: str) -> tuple[Optional[str], Optional[float]]:
+    """종목코드 → (US lead 섹터명, lead_score). 매핑·데이터 없으면 (섹터, None)."""
+    import json
+    from pathlib import Path
+
+    kr_sector = None
+    try:
+        p = Path(__file__).resolve().parent / "sector_classification.json"
+        m = json.loads(p.read_text(encoding="utf-8"))
+        kr_sector = m.get(code)
+    except Exception:
+        return None, None
+    us_sector = _KR_TO_US_LEAD_SECTOR.get(kr_sector or "")
+    if not us_sector:
+        return kr_sector, None
+    try:
+        import us_lead
+        return us_sector, us_lead.get_sector_lead_score(us_sector)
+    except Exception:
+        return us_sector, None
+
+
 def analyze_targets(code: str) -> dict:
     """9~11단계: 목표가 5종 + 손절가 3종 + 빈도 기반 확률."""
     import db
@@ -627,6 +654,16 @@ def analyze_targets(code: str) -> dict:
                 f"최근 {len(bars)}거래일 중 {sample_desc}의 빈도 "
                 f"(목표 +{up_pct*100:.1f}% vs 손절 -{dn_pct*100:.1f}%, 60일 한도)"
             )
+            # 닷컴 보조 표본 확률에 US 선행점수 조건화 (순수 후처리, 6D 매칭 불변).
+            # 종목 섹터 → US lead 섹터 매핑 후 lead_score 주입. 실패·무데이터는 no-op.
+            try:
+                import regime_analogs
+                dc = prob.get("dotcomAnalogs")
+                if dc and "error" not in dc:
+                    sector = _us_lead_score_for_code(code)
+                    regime_analogs.condition_on_us_lead(dc, sector[1], sector[0])
+            except Exception:
+                pass
     else:
         prob = {"error": "목표가 또는 손절가 산출 불가로 확률 계산 생략"}
 

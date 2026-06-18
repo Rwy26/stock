@@ -118,6 +118,36 @@ WEIGHTS = {
 GROWTH_SECTORS = {"반도체", "AI 생태계", "모빌리티", "바이오"}
 VALUE_SECTORS  = {"금융", "방산"}
 
+# ── US 선행 보정 (us-leaders-lead-lag) ──────────────────────────────────────
+# us_lead 의 섹터별 lead_score(0~100, 50=중립)를 '보조 보정'으로만 반영한다. 기존 8레이어
+# 가중(합=1.0)·출력 스키마는 그대로 두고, 점수에 작은 ±bias 만 더한다(보수적). US 데이터가
+# 없으면(get_lead_scores 미반환) bias=0 → 기존 동작과 완전 동일(회귀 없음).
+#   rotation 섹터 키 → us_lead 섹터 키 매핑. 매핑 없는 섹터는 US 보정 미적용.
+ROTATION_TO_US_LEAD_SECTOR: Dict[str, str] = {"반도체": "반도체", "AI 생태계": "AI"}
+US_LEAD_GAIN = 0.08   # (lead_score-50) 1점당 0.08점 → 최대 ±4점(lead 0/100)에서 캡
+US_LEAD_CAP = 4.0     # 보정 절대 상한(점)
+
+
+def _us_lead_scores() -> Dict[str, int]:
+    """us_lead.get_lead_scores() (rotation 섹터 키로 매핑). 실패/무데이터 시 빈 dict (fail-soft)."""
+    try:
+        import us_lead
+        raw = us_lead.get_lead_scores()
+    except Exception:
+        return {}
+    out: Dict[str, int] = {}
+    for rot_sec, us_sec in ROTATION_TO_US_LEAD_SECTOR.items():
+        if us_sec in raw:
+            out[rot_sec] = raw[us_sec]
+    return out
+
+
+def _us_lead_bias(lead_score: Optional[int]) -> float:
+    """lead_score(0~100) → 점수 보정 bias(점). None 이면 0(무영향)."""
+    if lead_score is None:
+        return 0.0
+    return round(max(-US_LEAD_CAP, min(US_LEAD_CAP, (lead_score - 50) * US_LEAD_GAIN)), 2)
+
 # ---------------------------------------------------------------------------
 # Cache (1시간 TTL, thread-safe)
 # ---------------------------------------------------------------------------
@@ -771,6 +801,8 @@ def compute_sector_rotation(force: bool = False) -> dict:
 
     intraday_score, intraday_pct, code_intraday = _intraday_scores()
 
+    us_lead_scores = _us_lead_scores()  # {rotation_sector: lead_score} (무데이터면 {})
+
     sectors_out = []
 
     for sector in SECTORS:
@@ -805,6 +837,12 @@ def compute_sector_rotation(force: bool = False) -> dict:
         )
         total = round(max(0.0, min(100.0, total)), 1)
 
+        # US 선행 보정 (보조) — 기존 가중합 위에 작은 ±bias. 무데이터면 us_lead=None·bias=0.
+        us_lead = us_lead_scores.get(sector)
+        us_bias = _us_lead_bias(us_lead)
+        if us_bias:
+            total = round(max(0.0, min(100.0, total + us_bias)), 1)
+
         lifecycle_label, lifecycle_stage = _lifecycle(total, f_score, i_score)
 
         sectors_out.append({
@@ -822,6 +860,7 @@ def compute_sector_rotation(force: bool = False) -> dict:
                 "volume":        vol_score,
                 "smart":         smart,
                 "intraday":      intr_score,
+                "usLead":        us_lead,        # US 선행점수(0~100) 또는 None(무데이터)
             },
             "detail": {
                 "foreignBil":      flow.get("foreign_raw", 0.0),
@@ -829,6 +868,8 @@ def compute_sector_rotation(force: bool = False) -> dict:
                 "momentumPct":     pv.get("momentum_pct", 0.0),
                 "volumeSurgePct":  pv.get("volume_surge_pct", 0.0),
                 "intradayPct":     intraday_pct.get(sector, 0.0),
+                "usLeadScore":     us_lead,      # US 선행점수(표시용)
+                "usLeadBias":      us_bias,      # 점수에 반영된 보정(점)
             },
             "codes": SECTORS[sector],
             "leadNames":      [CODE_NAMES.get(c, c) for c in SECTOR_ROLES.get(sector, {}).get("주도주", SECTORS[sector][:2])[:2]],

@@ -26,7 +26,7 @@ BACKEND = REPO / "backend"
 sys.path.insert(0, str(BACKEND))
 
 LOG = REPO / "logs" / "us-leaders-sync.log"
-PERIOD = "3mo"
+PERIOD = "3mo"  # 일일 스케줄 기본값 — CLI --period 로 일회성 백필 가능(예: 2y)
 SANITY_PCT = 50.0   # 전일 종가 대비 ±50% 초과 → 경고(분할/이상치 의심)
 
 
@@ -93,8 +93,8 @@ def _active_tickers() -> list[str]:
         ).scalars().all())
 
 
-def sync_prices(tickers: list[str]) -> int:
-    """yfinance 3mo OHLCV → us_daily_prices UPSERT. 적재 행수 반환."""
+def sync_prices(tickers: list[str], period: str = PERIOD) -> int:
+    """yfinance OHLCV(period) → us_daily_prices UPSERT. 적재 행수 반환."""
     import db
     import models
     from sqlalchemy import select
@@ -106,7 +106,7 @@ def sync_prices(tickers: list[str]) -> int:
         return 0
 
     try:
-        data = yf.download(tickers, period=PERIOD, progress=False,
+        data = yf.download(tickers, period=period, progress=False,
                            threads=True, auto_adjust=False, group_by="column")
     except Exception as exc:  # noqa: BLE001
         log(f"ERROR: yfinance download 실패 — {type(exc).__name__}: {exc}")
@@ -204,7 +204,12 @@ def sync_prices(tickers: list[str]) -> int:
 
 
 def main() -> int:
-    log("=== us-leaders-sync 시작 ===")
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--period", default=PERIOD,
+                    help="yfinance 기간(기본 3mo). 일회성 백필 예: 2y, 5y")
+    cli = ap.parse_args()
+    log(f"=== us-leaders-sync 시작 (period={cli.period}) ===")
     try:
         ensure_tables()
     except Exception as exc:  # noqa: BLE001
@@ -218,7 +223,7 @@ def main() -> int:
 
     tickers = _active_tickers()
     log(f"active 종목 {len(tickers)}개 수집 시작: {', '.join(tickers)}")
-    total = sync_prices(tickers)
+    total = sync_prices(tickers, period=cli.period)
     log(f"=== 완료: us_daily_prices {total}행 UPSERT ===")
     return 0 if total > 0 else 1
 

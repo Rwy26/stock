@@ -56,8 +56,10 @@ from sqlalchemy import select  # noqa: E402
 import db as apollo_db  # noqa: E402
 import models  # noqa: E402
 
-# composite 5요소 — _composite_score(parts) 키와 순서 일치
-FEATURES = ["섹터 강도", "MTF 정렬", "상승지속확률", "공매도 수급", "손익비"]
+# composite 5요소 — _composite_score(parts) 키와 순서 일치 (코어)
+CORE_FEATURES = ["섹터 강도", "MTF 정렬", "상승지속확률", "공매도 수급", "손익비"]
+# 코어 외 추가 피처(US선행 등)는 데이터에서 자동 발견 — _discover_features() 가 채움.
+FEATURES = list(CORE_FEATURES)
 NEUTRAL = 50.0          # 결측 요소 중립 대체값 (composite 기본값과 동일)
 DEFAULT_MIN_SAMPLES = 100
 TRAIN_FRAC = 0.7
@@ -79,10 +81,18 @@ def _fetch(session, tau: float):
         .where(models.SignalOutcome.features.is_not(None))
         .order_by(models.SignalOutcome.predicted_at.asc())
     ).all()
+    # 코어5 외 추가 숫자 피처(US선행 등) 자동 발견 → FEATURES 확장
+    global FEATURES
+    extras = set()
+    valid = [(f, a, r) for _p, f, a, r in rows if isinstance(f, dict)]
+    for feats, _a, _r in valid:
+        for k, v in feats.items():
+            if k not in CORE_FEATURES and isinstance(v, (int, float)):
+                extras.add(k)
+    FEATURES = list(CORE_FEATURES) + sorted(extras)
+
     X, y, used_alpha = [], [], 0
-    for _pred_at, feats, alpha, ret in rows:
-        if not isinstance(feats, dict):
-            continue
+    for feats, alpha, ret in valid:
         row = [float(feats.get(k, NEUTRAL)) for k in FEATURES]
         # target: alpha 우선, 없으면 raw ret
         base = alpha if alpha is not None else ret

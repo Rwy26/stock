@@ -309,7 +309,8 @@ def list_signals(db: Session, session_date: date | None = None) -> dict:
             .limit(1)
         ).scalar_one_or_none()
     if session_date is None:
-        return {"date": None, "items": [], "note": "갭 신호 데이터 없음"}
+        return {"date": None, "items": [], "usLeadContext": _us_lead_context(),
+                "note": "갭 신호 데이터 없음"}
 
     rows = db.execute(
         select(models.KrOpeningGapSignal, models.Stock.name)
@@ -340,8 +341,20 @@ def list_signals(db: Session, session_date: date | None = None) -> dict:
     return {
         "date": session_date.isoformat(),
         "items": items,
+        # US 선행 보조 컨텍스트(us-leaders-lead-lag): 밤사이 US 등락 → KR 섹터 시초가 갭 방향 힌트.
+        # 개별 갭 신호 행과 별개의 섹터 단위 참고 블록(행 스키마 불변). 무데이터면 sectors={}.
+        "usLeadContext": _us_lead_context(),
         "note": "시초가 갭 신호(스크리닝) — 매수추천 아님 · 촉매는 LLM 요약(미검증)",
     }
+
+
+def _us_lead_context() -> dict:
+    """us_lead.get_opening_gap_context() — US 야간 등락 → KR 섹터 갭 예상(보조). 실패 시 빈 블록."""
+    try:
+        import us_lead
+        return us_lead.get_opening_gap_context()
+    except Exception:
+        return {"asof": None, "sectors": {}, "note": "us_lead 미가용"}
 
 
 # ─── 내부 헬퍼 ────────────────────────────────────────────────────────────────

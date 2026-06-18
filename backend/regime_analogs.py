@@ -139,6 +139,47 @@ def _load() -> dict:
         return _cache
 
 
+# US 선행 조건화 — 보수적 가중. lead_score 0~100(50중립)이 양 극단일 때 ±5pt 한도.
+# backtest 로 AUC 개선이 확인되기 전까지 작게 유지 (regime-engine-backtest: 현재 예측우위 없음).
+US_COND_GAIN = 0.1  # delta = GAIN × (lead_score - 50) → 최대 ±5pt
+
+
+def condition_on_us_lead(analogs: dict, lead_score: Optional[float],
+                         sector: Optional[str] = None) -> dict:
+    """find_analogs() 결과의 forward 상승확률에 US 선행점수를 조건화하는 **순수 후처리**.
+
+    - 6D kNN 매칭·표본·phaseDistribution 등 원본은 **불변** (DIMS/닷컴 로직 무관).
+    - continueUpPct(원본)는 그대로 두고, usConditioned 블록을 별도로 추가(원본 보존).
+    - lead_score 없음/중립이면 no-op 표식만 남김 (조정 0).
+    데이터 정확성: 조정은 투명하게 분해(원본·델타·결과·근거) 노출.
+    """
+    if not analogs or "error" in analogs:
+        return analogs
+    base = analogs.get("continueUpPct")
+    if base is None:
+        return analogs
+    if lead_score is None:
+        analogs["usConditioned"] = {
+            "applied": False, "reason": "US 선행 데이터 없음(중립)",
+            "sector": sector, "originalUpPct": base, "conditionedUpPct": base,
+        }
+        return analogs
+    delta = round(US_COND_GAIN * (float(lead_score) - 50.0), 2)
+    cond = round(max(0.0, min(100.0, base + delta)), 1)
+    analogs["usConditioned"] = {
+        "applied": True,
+        "sector": sector,
+        "leadScore": float(lead_score),
+        "originalUpPct": base,
+        "delta": delta,
+        "conditionedUpPct": cond,
+        "gain": US_COND_GAIN,
+        "basis": (f"US 선행점수 {lead_score:.0f}(50중립) → 상방 {delta:+.1f}pt 조정 "
+                  f"(최대 ±5pt, 보수적). 원본 {base}% 보존, 6D 매칭 불변."),
+    }
+    return analogs
+
+
 def find_analogs(z_query: list[float], k: int = 20,
                  val_pctile: Optional[float] = None) -> dict:
     """한국 종목의 z-국면 벡터와 가장 가까운 닷컴 시점 k건의 실제 결과 빈도.

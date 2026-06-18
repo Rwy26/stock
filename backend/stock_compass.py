@@ -460,6 +460,22 @@ def _confidence_bucket(score: float) -> str:
     return "70+" if score >= 70 else "50-70" if score >= 50 else "0-50"
 
 
+# us_lead 섹터 키는 '반도체'·'AI' 뿐. KR 섹터 라벨('AI 생태계' 등)을 매핑.
+_US_LEAD_SECTOR_MAP = {"AI 생태계": "AI"}
+
+
+def _us_lead_for_sector(sector: str | None):
+    """KR 섹터의 US 선행 점수(0~100, 50중립). 반도체/AI만 비중립, 그 외·무데이터는 None."""
+    if not sector:
+        return None
+    try:
+        import us_lead
+    except Exception:
+        return None
+    key = _US_LEAD_SECTOR_MAP.get(sector, sector)
+    return us_lead.get_sector_lead_score(key)
+
+
 def _signal_grounding(signal: str, score: float) -> dict | None:
     """과거 채점 실적(signal_outcomes)에서 이 시그널 유형의 적중률·표본수 산출.
 
@@ -545,6 +561,17 @@ def _log_signal_outcome(result: dict) -> None:
     # composite 5요소 점수 — 3단계 가중치 재학습 features (없으면 NULL)
     parts = comp.get("parts") if isinstance(comp, dict) else None
     features = dict(parts) if isinstance(parts, dict) and parts else None
+
+    # US 선행 점수 (us-leaders-lead-lag) — 반도체/AI 섹터만 비중립. 데이터 없으면 미주입.
+    # composite.score 는 안 건드리고 features 에만 additive 로 기록(예측 기여도 별도 추적용).
+    try:
+        us_lead_score = _us_lead_for_sector(st.get("sector"))
+        if us_lead_score is not None:
+            if features is None:
+                features = {}
+            features["US선행"] = us_lead_score
+    except Exception:
+        pass
 
     session = db.get_session_factory()()
     try:

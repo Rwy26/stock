@@ -86,6 +86,38 @@ def _vkospi_context() -> dict:
     return out
 
 
+def _us_lead_context(force: bool = False) -> dict:
+    """US 선행 심리 (us-leaders-lead-lag) — 시장 나침반 보조 지표.
+
+    us_lead.compute_us_lead() 의 섹터별 lead_score·composite·evidence 를 그대로 싣는다
+    (결정론, LLM 미호출). 엔진 실패/무데이터면 {available:False} 또는 note 동반 — 본체는
+    정상 동작(회귀 없음). composite=섹터 lead_score 평균(0~100, 50=중립).
+    """
+    try:
+        import us_lead
+
+        u = us_lead.compute_us_lead(force=force)
+        scored = {s: v for s, v in u.get("sectors", {}).items() if v.get("n", 0) > 0}
+        return {
+            "available": bool(scored),
+            "composite": u.get("composite"),
+            "asof": u.get("asof"),
+            "sectors": {
+                s: {
+                    "leadScore": v["lead_score"],
+                    "avgOvernightPct": v.get("avg_overnight_pct"),
+                    "leadLagDays": v.get("lead_lag_days"),
+                    "topMovers": v.get("top_movers", []),
+                }
+                for s, v in scored.items()
+            },
+            "evidence": {s: u["evidence"].get(s) for s in scored},
+            "note": u.get("note"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "error": f"us_lead 실패: {type(exc).__name__}"}
+
+
 def _stage0_global_sentiment(force: bool = False) -> dict:
     """[0단계] 글로벌 투자심리 (스펙 §4.2) — 국내 regime 판정에 선행.
 
@@ -114,14 +146,26 @@ def _stage0_global_sentiment(force: bool = False) -> dict:
 
 
 def _stage1_market_regime(macro: dict, vkospi: dict, sectors: list[dict],
-                          global_sent: Optional[dict] = None) -> dict:
+                          global_sent: Optional[dict] = None,
+                          us_lead: Optional[dict] = None) -> dict:
     """[1단계] 시장 구조: 유동성/실적/정책/테마/위기 장세 판정 (규칙 기반 + 근거).
 
     global_sent(0단계)가 가용하면 글로벌 Risk-On/Off 를 보조 신호로 반영한다(과긍정/과부정 보정).
-    None 이면 기존 5개 국내 신호만으로 판정 — 회귀 없음.
+    us_lead(US 선행 심리)가 가용하면 composite(밤사이 반도체·AI 방향)를 보조 신호로 반영한다.
+    둘 다 None 이면 기존 5개 국내 신호만으로 판정 — 회귀 없음.
     """
     evidence: list[str] = []
     scores = {"유동성 장세": 0.0, "실적 장세": 0.0, "정책 장세": 0.0, "테마 장세": 0.0, "위기 장세": 0.0}
+
+    if us_lead and us_lead.get("available"):
+        comp = us_lead.get("composite")
+        if comp is not None:
+            if comp >= 60:
+                scores["테마 장세"] += 0.5
+                evidence.append(f"US 선행 {comp}/100 — 밤사이 반도체·AI 강세(KR 성장주 우호)")
+            elif comp <= 40:
+                scores["위기 장세"] += 0.5
+                evidence.append(f"US 선행 {comp}/100 — 밤사이 반도체·AI 약세(KR 개장 부담)")
 
     if global_sent and global_sent.get("available"):
         gs = global_sent.get("scores", {})
@@ -502,7 +546,8 @@ def compute_market_compass(force: bool = False, with_ai: bool = True) -> dict:
     vkospi = _vkospi_context()
 
     global_sent = _stage0_global_sentiment(force=force)
-    regime = _stage1_market_regime(macro, vkospi, sectors, global_sent)
+    us_lead_ctx = _us_lead_context(force=force)
+    regime = _stage1_market_regime(macro, vkospi, sectors, global_sent, us_lead_ctx)
     macro_map = _stage2_macro_map(
         macro, global_sent.get("scores") if global_sent.get("available") else None
     )
@@ -532,6 +577,7 @@ def compute_market_compass(force: bool = False, with_ai: bool = True) -> dict:
         "asOf": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "vkospi": vkospi,
         "globalSentiment": global_sent,
+        "usLead": us_lead_ctx,
         "regime": regime,
         "macroMap": macro_map,
         "rotationLadder": ladder,
