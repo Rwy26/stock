@@ -105,15 +105,31 @@ def sync_prices(tickers: list[str], period: str = PERIOD) -> int:
         log(f"ERROR: yfinance 미설치 — {type(exc).__name__} (pip install yfinance)")
         return 0
 
-    try:
-        data = yf.download(tickers, period=period, progress=False,
-                           threads=True, auto_adjust=False, group_by="column")
-    except Exception as exc:  # noqa: BLE001
-        log(f"ERROR: yfinance download 실패 — {type(exc).__name__}: {exc}")
-        return 0
+    # yfinance 빈 응답/실패는 일시적(특히 06:05 US 애프터아워)이라 재시도 가드.
+    import time
+    RETRIES = 3          # 총 시도 횟수
+    BACKOFF = (20, 60)   # 재시도 간 대기(초): 1차 실패→20s, 2차 실패→60s
+    data = None
+    for attempt in range(1, RETRIES + 1):
+        try:
+            data = yf.download(tickers, period=period, progress=False,
+                               threads=True, auto_adjust=False, group_by="column")
+        except Exception as exc:  # noqa: BLE001
+            log(f"WARN: yfinance download 실패 ({attempt}/{RETRIES}) — {type(exc).__name__}: {exc}")
+            data = None
+        if data is not None and not getattr(data, "empty", True):
+            if attempt > 1:
+                log(f"yfinance 응답 회복 (시도 {attempt}/{RETRIES})")
+            break
+        if data is not None:  # 빈 응답
+            log(f"WARN: yfinance 빈 응답 ({attempt}/{RETRIES})")
+        if attempt < RETRIES:
+            wait = BACKOFF[min(attempt - 1, len(BACKOFF) - 1)]
+            log(f"  {wait}초 후 재시도...")
+            time.sleep(wait)
 
     if data is None or getattr(data, "empty", True):
-        log("ERROR: yfinance 빈 응답 — 적재 없음")
+        log(f"ERROR: yfinance {RETRIES}회 시도 모두 빈 응답/실패 — 적재 없음 (기존 데이터 보존)")
         return 0
 
     multi = hasattr(data.columns, "levels") and data.columns.nlevels > 1
