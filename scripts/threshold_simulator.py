@@ -53,18 +53,20 @@ MIN_BUCKET = 30
 def _fetch(session):
     rows = session.execute(
         select(models.SignalOutcome.predicted_at, models.SignalOutcome.score,
-               models.SignalOutcome.alpha_1d, models.SignalOutcome.ret_1d)
+               models.SignalOutcome.alpha_1d, models.SignalOutcome.ret_1d,
+               models.SignalOutcome.regime)
         .where(models.SignalOutcome.scored_at.is_not(None))
         .order_by(models.SignalOutcome.predicted_at.asc())
     ).all()
     out = []
-    for _p, score, alpha, ret in rows:
+    for _p, score, alpha, ret, regime in rows:
         if score is None:
             continue
         basis = alpha if alpha is not None else ret
         if basis is None:
             continue
-        out.append({"score": float(score), "basis": float(basis)})
+        out.append({"score": float(score), "basis": float(basis),
+                    "regime": regime or "(미상)"})
     return out
 
 
@@ -193,11 +195,37 @@ def run_sweep(samples, frac):
     print("⚠️ holdout 개선이 in-sample 과 일관될 때만, 그리고 상승장 표본이 섞인 뒤에만 확정.")
 
 
+def run_by_regime(samples, frac):
+    """(B) 장세 조건부 — regime 별로 분할해 각각 현행 컷 평가 + 스윕.
+
+    regime 컬럼은 이 기능 도입 이후 예측부터 채워진다(구버전 행은 '(미상)').
+    각 장세 표본이 충분(≥min)할 때만 장세별 컷 산출이 의미를 갖는다.
+    """
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for x in samples:
+        groups[x["regime"]].append(x)
+    print("=" * 60)
+    print("  장세 조건부 임계값 — regime 별 분해 (B)")
+    print("=" * 60)
+    print("장세별 표본:", {k: len(v) for k, v in sorted(groups.items(), key=lambda i: -len(i[1]))})
+    for regime, grp in sorted(groups.items(), key=lambda i: -len(i[1])):
+        up, fl, dn = _regime_skew(grp)
+        print(f"\n──── {regime}  (n={len(grp)}, 상승{up}/보합{fl}/하락{dn}) ────")
+        if len(grp) < MIN_BUCKET:
+            print(f"  표본<{MIN_BUCKET} — 장세별 컷 산출 보류(현행 컷 평가만).")
+        _print_eval("현행 컷", evaluate(grp, CURRENT_CUTS))
+    print("\n" + "=" * 60)
+    print("⚠️ 장세별 컷 확정은 각 장세 표본 ≥30 + 상승/하락 양쪽 존재 시. "
+          "확정분만 backend/regime_thresholds.REGIME_CUTS 에 plug-in.")
+
+
 def main():
     ap = argparse.ArgumentParser(description="시그널 임계값 시뮬레이터")
     ap.add_argument("--cuts", type=str, default=None, help="콤마 4개: STRONG_BUY,BUY,HOLD,SELL 하한")
     ap.add_argument("--split", type=float, default=0.7, help="시간분할 train 비율(기본 0.7)")
     ap.add_argument("--sweep", action="store_true", help="HOLD 경계 격자 탐색")
+    ap.add_argument("--by-regime", action="store_true", help="(B) 장세별 분해 평가")
     ap.add_argument("--min-samples", type=int, default=30)
     args = ap.parse_args()
 
@@ -212,7 +240,9 @@ def main():
     if not samples:
         sys.exit(2)
 
-    if args.sweep:
+    if args.by_regime:
+        run_by_regime(samples, args.split)
+    elif args.sweep:
         run_sweep(samples, args.split)
     else:
         cuts = CURRENT_CUTS
