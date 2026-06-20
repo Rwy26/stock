@@ -443,14 +443,23 @@ def analyze_stock(code: str, with_ai: bool = True) -> dict:
     return result
 
 
-def _signal_from_score(score: float) -> str:
-    return (
-        "STRONG_BUY" if score >= 80 else
-        "BUY" if score >= 70 else
-        "HOLD" if score >= 55 else
-        "SELL" if score >= 40 else
-        "STRONG_SELL"
-    )
+def _signal_from_score(score: float, regime: str | None = None) -> str:
+    """점수→시그널. 장세 조건부(regime_thresholds) — regime=None/미설정이면 현행과 동일.
+
+    (B) 장세 조건부 임계값: regime별 컷은 regime_thresholds.REGIME_CUTS 단일 소스.
+    현재 모든 장세 = DEFAULT(80/70/55/40)라 동작 불변이며, 검증된 컷이 들어오면 자동 반영.
+    """
+    try:
+        import regime_thresholds
+        return regime_thresholds.signal_from_score(score, regime)
+    except Exception:
+        return (
+            "STRONG_BUY" if score >= 80 else
+            "BUY" if score >= 70 else
+            "HOLD" if score >= 55 else
+            "SELL" if score >= 40 else
+            "STRONG_SELL"
+        )
 
 
 _GROUNDING_MIN_SAMPLES = 30  # 미만이면 "신뢰 낮음" — AI가 과거 적중률에 기대지 말 것
@@ -542,7 +551,13 @@ def _log_signal_outcome(result: dict) -> None:
     st = result.get("stock", {}) or {}
     comp = result.get("composite", {}) or {}
     score = float(comp.get("score") or 0)
-    signal = _signal_from_score(score)
+    # 예측 시점 장세 — (B) 장세 조건부 임계값의 조건 변수로 기록(현재 컷은 동작 불변)
+    regime = None
+    try:
+        regime = ((result.get("market") or {}).get("regime") or {}).get("label")
+    except Exception:
+        regime = None
+    signal = _signal_from_score(score, regime)
 
     entry_close = None
     series = result.get("series") or {}
@@ -585,6 +600,7 @@ def _log_signal_outcome(result: dict) -> None:
             confidence=score,
             entry_close=entry_close,
             features=features,
+            regime=regime,
         ))
         session.commit()
     finally:

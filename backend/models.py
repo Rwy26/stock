@@ -704,6 +704,9 @@ class SignalOutcome(Base):
     # composite 5요소 점수 {"섹터 강도":..,"MTF 정렬":..,"상승지속확률":..,"공매도 수급":..,"손익비":..}
     # 3단계 가중치 재학습(scripts/retrain_weights.py)의 features. 구버전 행은 NULL.
     features: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 예측 시점 market_compass 1단계 장세(유동성/실적/정책/테마/위기). 구버전 행은 NULL.
+    # (B) 장세 조건부 임계값(regime_thresholds) 튜닝의 조건 변수.
+    regime: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
     __table_args__ = (
         Index("ix_signal_outcomes_code_predicted", "stock_code", "predicted_at"),
