@@ -7106,6 +7106,27 @@ def public_stock_suggest(q: str = ""):
     return {"candidates": _suggest_stocks(q)}
 
 
+@app.get("/api/public/report-status")
+def public_report_status(code: str = ""):
+    """종목 리포트 준비 여부 폴링용 — 분석 완료 자동 감지. (LLM 미호출·게이트 없음)."""
+    code = (code or "").strip()
+    if not code or apollo_db is None or models is None:
+        return {"code": code, "hasReport": False, "name": None, "signal": None}
+    try:
+        s: Session = apollo_db.get_session_factory()()
+        try:
+            row = s.execute(select(models.AiAnalysisCache).where(
+                models.AiAnalysisCache.stock_code == code)).scalar_one_or_none()
+        finally:
+            s.close()
+        pj = row.result_json if (row and isinstance(row.result_json, dict)) else None
+        has = bool(pj and (pj.get("aiReport") or pj.get("ai_result")))
+        return {"code": code, "hasReport": has,
+                "name": (row.stock_name if row else None), "signal": (row.signal if row else None)}
+    except Exception:
+        return {"code": code, "hasReport": False, "name": None, "signal": None}
+
+
 def _ai_search_core(query: str, history: list, forced_code: str | None = None) -> dict:
     """자연어 검색 공용 코어 — 종목 해석 + 관심종목/리포트 상태 + LLM 대화. (게이트·제한은 호출부)."""
     import market_compass

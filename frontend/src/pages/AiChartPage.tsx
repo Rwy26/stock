@@ -897,8 +897,36 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
   const [searchChat, setSearchChat] = useState<{ role: 'user' | 'assistant'; content: string; stock?: ChatCand | null; agents?: { label: string; value: string; dir: string }[] | null; candidates?: ChatCand[] | null }[]>([])
   const [searchLoading, setSearchLoading] = useState(false)
   const [searchPhase, setSearchPhase] = useState<'idle' | 'suggest' | 'analyze'>('idle')
+  const [analyzing, setAnalyzing] = useState<{ code: string; name: string } | null>(null)
+  const [analyzeElapsed, setAnalyzeElapsed] = useState(0)
   const abortRef = useRef<AbortController | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // 신규 종목 분석 완료 자동 감지 — report-status 폴링 + 예상시간 카운트다운
+  useEffect(() => {
+    if (!analyzing) { setAnalyzeElapsed(0); return }
+    setAnalyzeElapsed(0)
+    let done = false
+    const tick = setInterval(() => setAnalyzeElapsed(e => e + 1), 1000)
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/public/report-status?code=${analyzing.code}`)
+        const d = await r.json()
+        if (d.hasReport && !done) {
+          done = true
+          setSearchChat(prev => [...prev, { role: 'assistant', content: `✅ ${analyzing.name} 분석이 완료되었습니다. 아래 버튼에서 리포트를 확인하세요.`, stock: { code: analyzing.code, name: analyzing.name, hasReport: true } }])
+          setAnalyzing(null)
+        }
+      } catch { /* keep polling */ }
+    }, 5000)
+    const to = setTimeout(() => {
+      if (!done) {
+        setSearchChat(prev => [...prev, { role: 'assistant', content: `${analyzing.name} 분석이 예상보다 지연되고 있습니다. 잠시 후 '${analyzing.name}'를 다시 검색해 확인해 주세요.` }])
+        setAnalyzing(null)
+      }
+    }, 180_000)
+    return () => { clearInterval(tick); clearInterval(poll); clearTimeout(to) }
+  }, [analyzing])
 
   // 1단계: 질문 → 종목 후보 확인 ("○○를 찾으시나요?")
   const runSuggest = useCallback(async (q: string) => {
@@ -958,6 +986,10 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
       const d = await resp.json()
       if (!resp.ok) throw new Error(d.detail ?? `오류 ${resp.status}`)
       setSearchChat(prev => [...prev, { role: 'assistant', content: d.answer ?? '(응답 없음)', stock: d.resolvedStock, agents: d.agentSummary }])
+      // 리포트가 아직 없으면(신규 종목 분석 시작) 완료 자동 감지 폴링 시작
+      if (d.resolvedStock && d.resolvedStock.hasReport === false) {
+        setAnalyzing({ code: d.resolvedStock.code, name: d.resolvedStock.name })
+      }
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') {
         setSearchChat(prev => [...prev, { role: 'assistant', content: '검색을 취소했습니다.' }])
@@ -1698,6 +1730,27 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
                     </button>
                   </div>
                 )}
+                {analyzing && (() => {
+                  const EST = 90
+                  const remain = Math.max(0, EST - analyzeElapsed)
+                  const pct = Math.min(96, (analyzeElapsed / EST) * 100)
+                  return (
+                    <div className="panel glass" style={{ padding: '14px 18px', alignSelf: 'stretch', width: '100%', borderColor: 'rgba(96,165,250,0.35)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                        <span style={{ fontSize: '0.9rem', fontWeight: 700, color: '#93c5fd' }}>⏳ {analyzing.name} 신규 분석 중…</span>
+                        <span style={{ fontSize: '0.82rem', color: 'var(--text-soft)' }}>
+                          {remain > 0 ? `예상 약 ${remain}초 남음` : '마무리 중…'}
+                        </span>
+                      </div>
+                      <div style={{ height: 8, borderRadius: 99, background: 'rgba(255,255,255,0.07)', overflow: 'hidden' }}>
+                        <div style={{ width: `${pct}%`, height: '100%', borderRadius: 99, background: 'linear-gradient(90deg,#60a5fa,#34d399)', transition: 'width 1s linear' }} />
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: 'var(--text-soft)', marginTop: 8 }}>
+                        완료되면 자동으로 알려드립니다 — 이 창을 떠나도 됩니다.
+                      </div>
+                    </div>
+                  )
+                })()}
               </div>
               <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                 <input value={symbol} onChange={e => setSymbol(e.target.value)}
