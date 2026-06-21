@@ -111,7 +111,7 @@ const panel: React.CSSProperties = {
 // ─── 글로벌 투자심리 (0단계) ─────────────────────────────────────────────────
 
 const SCORE_LABELS: Record<string, string> = {
-  risk_appetite: '위험선호', liquidity: '유동성', ai_cycle: 'AI 사이클', growth: '경기',
+  risk_appetite: '시장 심리(Risk)', liquidity: '유동성', ai_cycle: 'AI 사이클', growth: '경기',
   inflation: '물가안정', geopolitics: '지정학(완화)', us_equity: '미국증시', kr_equity: '한국증시',
 }
 // composite 가중치 순서 (선행지표 먼저)
