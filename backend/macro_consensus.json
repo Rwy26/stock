@@ -1,6 +1,6 @@
 {
   "_doc": "글로벌 매크로 경제지표 시장 예상치(consensus). 발표 캘린더 기준 수동 갱신. FRED 는 actual 만 제공하므로 surprise = sign(actual - consensus) 계산을 위해 이 파일이 필요하다(스펙 §7.3). 키가 없으면 surprise=0(부합) 처리 — 추정 금지. 값은 해당 시리즈의 actual 과 동일 단위(YoY %, 분기 연율 %, 레벨).",
-  "_updated": "2026-06-14",
+  "_updated": "2026-06-21",
   "cpi_yoy": {
     "consensus": 4.2,
     "unit": "% YoY",
@@ -26,9 +26,11 @@
     "note": "U-3 실업률"
   },
   "gdp_qoq": {
-    "consensus": 2.0,
+    "consensus": 1.6,
     "unit": "% annualized",
-    "note": "실질 GDP 전분기비 연율"
+    "note": "ForexFactory Final GDP q/q (2026-06-25)",
+    "source": "forexfactory",
+    "updated": "2026-06-21"
   },
   "ism_mfg": {
     "consensus": 49.5,
