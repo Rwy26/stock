@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { fetchJson } from '../lib/api'
-import { GlobalMacroCharts } from '../components/GlobalMacroCharts'
+import { GlobalMacroCharts, MiniChart, DescModal, trendDir, type Pt } from '../components/GlobalMacroCharts'
+
+type LWC = typeof import('lightweight-charts')
+interface ScoreHist { keys: string[]; count: number; series: Array<{ date: string; [k: string]: number | string | null }> }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -157,6 +160,20 @@ function GlobalSentimentPanel({ g }: { g: GlobalSentiment }) {
   const method = prob.method === 'frequency' ? `빈도 기반 (n=${prob.n})` : '로지스틱 (표본 누적 전)'
   const bands: Array<[string, string]> = [['1w', '1주'], ['1m', '1개월'], ['3m', '3개월']]
 
+  // 26일 일봉 추이로 표현 (참고: 지표 일봉추이) — 차트 라이브러리·히스토리 로드
+  const [lwc, setLwc] = useState<LWC | null>(null)
+  const [hist, setHist] = useState<ScoreHist | null>(null)
+  const [sel, setSel] = useState<string | null>(null)
+  useEffect(() => { import('lightweight-charts').then(setLwc).catch(() => {}) }, [])
+  useEffect(() => { fetchJson<ScoreHist>('/api/admin/global-macro/history?days=26').then(setHist).catch(() => {}) }, [])
+  const histRows = hist?.series ?? []
+  const chartKeys = SCORE_ORDER.filter(k => scores[k] != null)
+  const selData = sel
+    ? (histRows.map(r => ({ time: r.date, value: r[sel] as number | null })).filter(d => d.value != null) as Pt[])
+    : []
+  const selValue = selData.length ? selData[selData.length - 1].value : (sel ? scores[sel] ?? null : null)
+  const selDir = trendDir(selData)
+
   return (
     <div style={{ ...panel, borderColor: 'rgba(96,165,250,0.3)' }}>
       <h4 style={{ margin: '0 0 12px', color: '#93c5fd' }}>
@@ -188,13 +205,18 @@ function GlobalSentimentPanel({ g }: { g: GlobalSentiment }) {
           })}
         </div>
 
-        {/* 8 점수 바 */}
+        {/* 8 점수 — 26일 일봉 추이 (참고: 지표 일봉추이) */}
         <div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: 24 }}>
-            {SCORE_ORDER.filter(k => scores[k] != null).map(k => (
-              <ScoreBar key={k} k={k} v={scores[k]} evidence={g.evidence?.[k]} />
-            ))}
-          </div>
+          {lwc && histRows.length > 0 ? (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
+              {chartKeys.map(k => <MiniChart key={k} lwc={lwc} k={k} rows={histRows} log={false} onSelect={setSel} />)}
+            </div>
+          ) : (
+            // 차트/히스토리 로드 전·데이터 부족 시 점수 바로 폴백
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', columnGap: 24 }}>
+              {chartKeys.map(k => <ScoreBar key={k} k={k} v={scores[k]} evidence={g.evidence?.[k]} />)}
+            </div>
+          )}
         </div>
       </div>
 
@@ -243,8 +265,9 @@ function GlobalSentimentPanel({ g }: { g: GlobalSentiment }) {
         </>
       )}
       <p style={{ fontSize: 11, color: '#475569', margin: '10px 0 0' }}>
-        점수 50=중립 · 높을수록 우호(물가안정·지정학완화 포함) · 점수에 마우스를 올리면 원천 근거 표시
+        점수 50=중립 · 높을수록 우호(물가안정·지정학완화 포함) · 26일 일봉 추이 · 카드 클릭 시 기준 요소 설명
       </p>
+      {sel && <DescModal k={sel} value={selValue} dir={selDir} onClose={() => setSel(null)} />}
     </div>
   )
 }

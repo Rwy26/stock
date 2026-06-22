@@ -29,7 +29,7 @@ const DESC: Record<string, string> = {
 const color = (v: number) => (v >= 60 ? '#34d399' : v >= 40 ? '#fbbf24' : '#f87171')
 
 // ── 볼린저밴드(SMA ± 2σ) — 26일 윈도우라 기간은 데이터 길이에 맞춰 축소 ──────────
-type Pt = { time: string; value: number }
+export type Pt = { time: string; value: number }
 function bollinger(data: Pt[], mult = 2): { upper: Pt[]; lower: Pt[]; mid: Pt[] } {
   const out = { upper: [] as Pt[], lower: [] as Pt[], mid: [] as Pt[] }
   const period = Math.min(20, Math.max(4, Math.floor(data.length / 2)))
@@ -47,7 +47,7 @@ function bollinger(data: Pt[], mult = 2): { upper: Pt[]; lower: Pt[]; mid: Pt[] 
 }
 
 // ── 현재 추세 방향 — 최근 구간 선형회귀 기울기 부호(중립 데드밴드) ──────────────
-function trendDir(data: Pt[]): 'up' | 'down' | 'flat' {
+export function trendDir(data: Pt[]): 'up' | 'down' | 'flat' {
   const n = Math.min(5, data.length)
   if (n < 2) return 'flat'
   const w = data.slice(-n)
@@ -63,7 +63,7 @@ const ARROW = { up: '▲', down: '▼', flat: '▶' }
 const ARROW_COLOR = { up: '#34d399', down: '#f87171', flat: '#94a3b8' }
 
 // ── 개별 미니 차트 (일봉 라인, 로그/선형 토글) ───────────────────────────────
-function MiniChart({ lwc, k, rows, log, onSelect }: { lwc: LWC; k: string; rows: HistRow[]; log: boolean; onSelect: (k: string) => void }) {
+export function MiniChart({ lwc, k, rows, log, onSelect }: { lwc: LWC; k: string; rows: HistRow[]; log: boolean; onSelect: (k: string) => void }) {
   const hostRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Line'> | null>(null)
@@ -146,7 +146,7 @@ function MiniChart({ lwc, k, rows, log, onSelect }: { lwc: LWC; k: string; rows:
 }
 
 // ── 지표 설명 모달 (연결된 큰 창) ─────────────────────────────────────────────
-function DescModal({ k, value, dir, onClose }: { k: string; value: number | null; dir: 'up' | 'down' | 'flat'; onClose: () => void }) {
+export function DescModal({ k, value, dir, onClose }: { k: string; value: number | null; dir: 'up' | 'down' | 'flat'; onClose: () => void }) {
   useEffect(() => {
     const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', esc)
