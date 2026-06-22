@@ -4,7 +4,11 @@
 점수는 이미 결정론 저장돼 있으나 LLM 서술이 비어 있는 종목을 stock_compass.analyze_stock
 으로 재실행해 narrative 를 채운다. KIS 보호를 위해 종목 간 INTERVAL 간격.
 
-대상 코드: 인자로 받은 파일(줄당 6자리 코드) 또는 기본 내장 목록.
+대상 코드(우선순위):
+  1) 인자로 받은 파일(줄당 6자리 코드)
+  2) ai_analysis_cache 동적 조회 — aiProvider='none*' 또는 aiReport 빈 행(서술 누락)
+     (_save_history 는 LLM 실패해도 점수는 항상 저장하므로, 누락은 narrative 뿐)
+  3) DB 조회 실패 시 정적 내장 목록(CODES) 폴백
 로그: logs/renarrate-llm-none.log
 """
 
@@ -25,6 +29,7 @@ sys.path.insert(0, str(BACKEND))
 INTERVAL = 40  # 종목 간 간격(초) — KIS daily-chart 보호
 LOG = REPO / "logs" / "renarrate-llm-none.log"
 
+# 정적 폴백 목록 — DB 동적 조회가 실패할 때만 사용(평소엔 select_pending_codes() 가 우선).
 CODES = """000270 000400 000660 000720 001440 003550 003670 005380 005490 005930
 006400 009420 009540 009830 012330 012510 017670 018260 022100 023590
 030610 032820 034730 035420 035720 039030 042700 047040 048410 051910
@@ -46,15 +51,53 @@ def log(msg: str) -> None:
         pass
 
 
+def select_pending_codes() -> list[str]:
+    """ai_analysis_cache 에서 결정론 점수는 있으나 LLM 서술이 빈 행(재서술 대상) 코드 수집.
+
+    대상: aiProvider 가 'none*' 이거나 aiReport 가 비어 있는 행. analyzed_at(UTC) 최신순.
+    정적 목록과 달리 실제 누락 행을 그대로 따라가므로 stale 되지 않는다.
+    조회 실패 시 빈 목록 반환 → 호출부가 정적 CODES 로 폴백.
+    """
+    try:
+        import db
+        import models
+        from sqlalchemy import select
+
+        s = db.get_session_factory()()
+        try:
+            rows = s.execute(
+                select(models.AiAnalysisCache.stock_code, models.AiAnalysisCache.result_json)
+                .order_by(models.AiAnalysisCache.analyzed_at.desc())
+            ).all()
+        finally:
+            s.close()
+        pending = []
+        for code, rj in rows:
+            rj = rj or {}
+            prov = str(rj.get("aiProvider") or "")
+            if prov.startswith("none") or not rj.get("aiReport"):
+                pending.append(code)
+        return pending
+    except Exception as e:  # noqa: BLE001
+        log(f"동적 대상 조회 실패 — 정적 CODES 폴백: {type(e).__name__} {e}")
+        return []
+
+
 def main() -> int:
     import stock_compass
     from exclusion_engine import ExcludedStockError
 
-    codes = CODES
     if len(sys.argv) > 1 and Path(sys.argv[1]).exists():
         codes = [c.strip() for c in Path(sys.argv[1]).read_text().split() if c.strip()]
+        src = f"파일 인자({sys.argv[1]})"
+    else:
+        codes = select_pending_codes()
+        src = "DB 동적 조회(LLM-none/서술누락)"
+        if not codes:
+            codes = CODES
+            src = "정적 CODES 폴백"
 
-    log(f"=== 재서술 시작: {len(codes)}종목 (INTERVAL={INTERVAL}s) ===")
+    log(f"=== 재서술 시작: {len(codes)}종목 (출처={src}, INTERVAL={INTERVAL}s) ===")
     ok = fail = none = 0
     for i, code in enumerate(codes, start=1):
         try:

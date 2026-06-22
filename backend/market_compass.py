@@ -441,6 +441,64 @@ def _policy_regime(news_ctx: dict) -> dict:
     }
 
 
+# Groq 폴백 전용 — context 에서 우선 트림할 부피 큰/보조 섹션 (왼쪽부터 제거).
+# 핵심 결정론 신호(regime·macroMap·rotationLadder·sectorRanking·vkospi / stock·mtf·targets·
+# stops·composite)는 남기고, 부피 크고 보조적인 섹션부터 버린다. gemini/openai 엔 영향 없음.
+_GROQ_DROP_ORDER = (
+    "dotcomCasebook",     # 닷컴 사례집 (stock, 부피 큰 보조 근거)
+    "series",             # 과거 시계열 (stock, 최대 부피)
+    "newsContext",        # 시장 뉴스 상세 (market)
+    "usLead",             # US 선행 종목 (market)
+    "globalSentiment",    # 글로벌 투자심리 상세 (market)
+    "signalTrackRecord",  # 시그널 과거 적중 그라운딩 (stock)
+    "recentNews",         # 종목 최근 뉴스 (stock)
+    "etfHoldings",        # ETF 구성종목 (stock)
+    "businessProfile",    # 산업·사업 프로필 (stock)
+    "policyRegime",       # 정책·선거 국면 블록
+    "dataNotes",          # 안내 메모
+    "probability",        # 확률 상세 (stock, 무거움 — 후순위로 양보)
+    "tradePlan",          # 분할매수/매집 (stock)
+)
+
+
+def _slim_context_for_groq(context_json: str, budget: int) -> tuple[str, list[str]]:
+    """groq 무료 TPM 한도 이하로 context 를 축약. (json문자열, 제거된섹션목록) 반환.
+
+    1) 한도 이내면 그대로 둔다.
+    2) _GROQ_DROP_ORDER 순으로 섹션을 제거하며 매번 한도 도달 여부 확인.
+    3) 그래도 초과하면 mtf 타임프레임의 부피 큰 하위항목(매물대/FVG/유동성/CDV)을 비운다.
+    4) 최후엔 문자열을 하드 캡한다. JSON 파싱 실패 시에도 하드 캡으로 안전 동작.
+    """
+    if len(context_json) <= budget:
+        return context_json, []
+    try:
+        ctx = json.loads(context_json)
+    except Exception:  # noqa: BLE001
+        return context_json[:budget] + "\n…(groq 한도 초과로 절단)", ["<hard-cap>"]
+
+    dropped: list[str] = []
+    for key in _GROQ_DROP_ORDER:
+        if key in ctx:
+            ctx.pop(key, None)
+            dropped.append(key)
+            if len(json.dumps(ctx, ensure_ascii=False)) <= budget:
+                return json.dumps(ctx, ensure_ascii=False), dropped
+
+    # 중첩 트림 — mtf 타임프레임의 부피 큰 하위항목 제거 (정렬/추세/RSI/구조이벤트는 유지)
+    tfs = (ctx.get("mtf") or {}).get("timeframes")
+    if isinstance(tfs, list):
+        for t in tfs:
+            if isinstance(t, dict):
+                for k in ("volumeProfile", "fvg", "liquidity", "cdv"):
+                    t.pop(k, None)
+        dropped.append("mtf.timeframes.detail")
+
+    out = json.dumps(ctx, ensure_ascii=False)
+    if len(out) <= budget:
+        return out, dropped
+    return out[:budget] + "\n…(groq 한도 초과로 절단)", dropped + ["<hard-cap>"]
+
+
 def _call_llm(context_json: str, policy_active: bool = False) -> tuple[Optional[str], str]:
     """Gemini > Groq > OpenAI 우선순위로 종합 리포트 생성. (리포트, 프로바이더) 반환.
 
@@ -495,14 +553,27 @@ def _call_llm(context_json: str, policy_active: bool = False) -> tuple[Optional[
     ):
         if not key:
             continue
+        # groq 폴백만: 무료 TPM(12k) 한도 내로 context 트림 + 완성 토큰 캡 → 413 방지.
+        # gemini/openai 엔 full 프롬프트 유지(품질 불변).
+        provider_user_msg = user_msg
+        if name == "groq":
+            slim_json, dropped = _slim_context_for_groq(context_json, settings.groq_ctx_char_budget)
+            if dropped:
+                provider_user_msg = (
+                    "다음은 실시간 계산된 시장 데이터다. 이 데이터만 근거로 분석 절차를 수행하라.\n"
+                    "(폴백 모델 토큰 한도로 일부 보조 섹션이 생략됨 — 주어진 수치만 사용)\n\n"
+                    f"```json\n{slim_json}\n```"
+                )
         payload = {
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg},
+                {"role": "user", "content": provider_user_msg},
             ],
             "temperature": 0.3,
         }
+        if name == "groq":
+            payload["max_tokens"] = settings.groq_max_tokens
         for attempt in (1, 2):
             try:
                 r = httpx.post(

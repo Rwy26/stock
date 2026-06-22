@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import sys
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -142,7 +142,12 @@ def done_today(code: str) -> bool:
         ).scalar_one_or_none()
     finally:
         s.close()
-    return row is not None and row.date() == date.today()
+    if row is None:
+        return False
+    # analyzed_at 은 _save_history 가 datetime.utcnow()(UTC)로 저장한다. 서버는 KST 가정
+    # (sector_rotation: "서버는 KST 가정")이라 date.today() 는 KST 날짜 → UTC 값을 그대로
+    # 비교하면 KST 09시(=UTC 자정) 경계에서 어긋난다. KST(+9h)로 환산 후 '오늘' 판정.
+    return (row + timedelta(hours=9)).date() == date.today()
 
 
 def main() -> int:

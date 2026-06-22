@@ -85,6 +85,12 @@ class Settings:
     # Groq (무료 티어 – console.groq.com에서 발급)
     groq_api_key: str = os.getenv("GROQ_API_KEY", "").strip()
     groq_model: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
+    # Groq 폴백 전용 프롬프트 축약 — 무료 TPM(분당 토큰) 한도가 작아 큰 프롬프트가 413(Payload
+    # Too Large)으로 죽는다. groq 로 보낼 때만 context 를 이 글자수 이하로 트림하고 완성 토큰을
+    # 캡해 (입력+출력) 토큰이 TPM 한도 안에 들어가게 한다. gemini/openai 경로는 영향 없음.
+    # 실측: 전체 context 17.3k자→413, series+닷컴 트림 9.8k자→prompt 7467토큰 정상(200).
+    groq_ctx_char_budget: int = int(os.getenv("GROQ_CTX_CHAR_BUDGET", "10000") or "10000")
+    groq_max_tokens: int = int(os.getenv("GROQ_MAX_TOKENS", "2048") or "2048")
 
     # AI provider selection: auto / openai / gemini / groq
     # auto = 설정된 키 중 Gemini > Groq > OpenAI 우선순위로 자동 선택
