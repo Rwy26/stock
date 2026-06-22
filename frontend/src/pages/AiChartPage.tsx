@@ -960,11 +960,11 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
     }
   }, [searchLoading])
 
-  // 2단계: 확인된 종목 분석 (취소 가능)
-  const runSearch = useCallback(async (code: string, name: string) => {
+  // 2단계: 확인된 종목 분석 (취소 가능). pushMsg=false면 사용자 메시지를 추가하지 않음(직접검색용)
+  const runSearch = useCallback(async (code: string, name: string, pushMsg = true) => {
     if (searchLoading) return
     const history = searchChat.map(m => ({ role: m.role, content: m.content }))
-    setSearchChat(prev => [...prev, { role: 'user', content: `${name} 분석` }])
+    if (pushMsg) setSearchChat(prev => [...prev, { role: 'user', content: `${name} 분석` }])
     setSearchPhase('analyze'); setSearchLoading(true)
     const ac = new AbortController()
     abortRef.current = ac
@@ -1000,6 +1000,25 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
       setSearchLoading(false); setSearchPhase('idle'); abortRef.current = null
     }
   }, [searchChat, searchLoading, publicMode])
+
+  // Enter 즉시 분석 — 후보 검색 후 최상위 매칭 종목을 바로 분석 (확인 단계 생략)
+  const runSearchDirect = useCallback(async (q: string) => {
+    if (!q.trim() || searchLoading) return
+    setSearchChat(prev => [...prev, { role: 'user', content: q }])
+    setSymbol('')
+    setSearchPhase('suggest'); setSearchLoading(true)
+    let cands: ChatCand[] = []
+    try {
+      const resp = await fetch(`/api/public/stock-suggest?q=${encodeURIComponent(q.trim())}`)
+      cands = (await resp.json()).candidates ?? []
+    } catch { /* ignore */ }
+    setSearchLoading(false); setSearchPhase('idle')
+    if (cands.length === 0) {
+      setSearchChat(prev => [...prev, { role: 'assistant', content: `'${q.trim()}'에 해당하는 종목을 찾지 못했습니다. 정확한 종목명이나 코드로 다시 입력해 주세요. 예: SK하이닉스 · 삼성전자 · 005930` }])
+      return
+    }
+    await runSearch(cands[0].code, cands[0].name, false)   // 최상위 후보 바로 분석 (사용자 메시지는 위에서 이미 추가)
+  }, [searchLoading, runSearch])
 
   const cancelSearch = useCallback(() => { abortRef.current?.abort() }, [])
   const [showKeyPanel, setShowKeyPanel] = useState(false)
@@ -1185,7 +1204,7 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
     if (mode === 'drop') {
       // 파일 없이 텍스트만 입력 → 자연어 대화형 검색 (질문 자체부터 분석)
       if (droppedFiles.length === 0) {
-        if (symbol.trim()) { runSuggest(symbol.trim()); return }
+        if (symbol.trim()) { runSearchDirect(symbol.trim()); return }
         setError('파일을 업로드하거나 검색어를 입력하세요'); return
       }
       // symbol이 비어있으면 파일명에서 자동 추출 시도 (실패해도 진행 — 백엔드가 콘텐츠 인식)
@@ -1580,7 +1599,7 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
                     <span className="hint"> (종목명·질문 입력 — 대화형 검색 · 파일 올리면 차트 분석)</span>
                     <input value={symbol}
                       onChange={e => setSymbol(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter' && symbol.trim() && !hasFiles) { e.preventDefault(); runSuggest(symbol.trim()) } }}
+                      onKeyDown={e => { if (e.key === 'Enter' && symbol.trim() && !hasFiles) { e.preventDefault(); runSearchDirect(symbol.trim()) } }}
                       placeholder="예: 삼성전자 어때?  /  방산 섹터 전망  /  009150" />
                   </label>
                 )}
@@ -1754,7 +1773,7 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
               </div>
               <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                 <input value={symbol} onChange={e => setSymbol(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter' && symbol.trim()) { e.preventDefault(); runSuggest(symbol.trim()) } }}
+                  onKeyDown={e => { if (e.key === 'Enter' && symbol.trim()) { e.preventDefault(); runSearchDirect(symbol.trim()) } }}
                   placeholder="이어서 질문…" style={{ flex: 1 }} />
                 <button type="button" className="ai-export-btn" disabled={searchLoading || !symbol.trim()}
                   onClick={() => runSuggest(symbol.trim())}>전송</button>

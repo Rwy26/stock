@@ -7162,6 +7162,7 @@ def _ai_search_core(query: str, history: list, forced_code: str | None = None) -
     has_report = False
     agent_summary = None
     grounding = ""
+    quick_answer = None   # 리포트 없는 신규/준비중/제외 종목은 LLM 생략하고 즉시 응답 (ngrok 타임아웃 방지)
     if resolved and apollo_db is not None and models is not None:
         code, name = resolved
         try:
@@ -7225,21 +7226,21 @@ def _ai_search_core(query: str, history: list, forced_code: str | None = None) -
                     "→ 이 데이터를 근거로 답하고, 상세는 리포트로 안내."
                 )
             elif in_watchlist:
-                grounding = f"\n\n[종목 데이터] {name}({code}) — 관심종목이나 리포트 준비 중. '분석 준비 중'이라고 안내."
+                quick_answer = f"{name}({code})은 관심종목에 있으나 분석 리포트가 아직 준비 중입니다. 완료되면 자동으로 알려드립니다."
             else:
                 # 질문한 종목은 항상 관심종목 편입 (제외 로직 통과 시) → 12단계 분석 시작
                 ind = _induct_verified_stock(code, name)
                 if ind.get("inducted"):
-                    grounding = (f"\n\n[종목 데이터] {name}({code}) — 방금 관심종목에 편입하고 분석을 시작했습니다. "
-                                 "'관심종목에 추가했고 분석을 시작했으니 잠시 후 리포트를 확인할 수 있다'고 안내.")
+                    quick_answer = f"{name}({code})을 관심종목에 추가하고 분석을 시작했습니다. 잠시 후 리포트가 준비되면 자동으로 알려드립니다."
                 elif ind.get("excluded"):
-                    grounding = (f"\n\n[종목 데이터] {name}({code}) — 거래 제외 종목(투자 주의). "
-                                 "'분석·편입 대상이 아닌 종목(거래정지·관리종목·우선주 등)이라 투자 주의가 필요하다'고 안내.")
+                    quick_answer = f"{name}({code})은 거래 제외 종목(거래정지·관리종목·우선주 등)이라 분석·편입 대상이 아닙니다. 투자에 주의하세요."
                 else:
-                    grounding = f"\n\n[종목 데이터] {name}({code}) — 분석 준비 중."
+                    quick_answer = f"{name}({code}) 분석을 준비 중입니다. 잠시 후 다시 확인해 주세요."
             # 산업·사업 프로필 주입 (있으면) — 리포트 없어도 사업 내용은 정확히 답하도록
             prof = _stock_profile(code)
-            if prof:
+            if prof and quick_answer:
+                quick_answer += f" 참고로 {name}는 {prof.get('summary')}."
+            if prof and grounding:
                 grounding += (
                     f"\n[산업·사업] 섹터 {prof.get('sector')}({prof.get('theme')}) · "
                     f"{prof.get('industryGroup')} > {prof.get('industry')} > {prof.get('subIndustry')}\n"
@@ -7248,6 +7249,15 @@ def _ai_search_core(query: str, history: list, forced_code: str | None = None) -
                 )
         except Exception:
             pass
+
+    # 리포트 없는 종목(신규 편입·준비중·제외)은 LLM 없이 즉시 템플릿 응답 → 빠른 반환(터널 타임아웃 회피)
+    if quick_answer is not None:
+        return {
+            "answer": quick_answer, "provider": "template",
+            "resolvedStock": {"code": resolved[0], "name": resolved[1],
+                              "inWatchlist": in_watchlist, "hasReport": has_report},
+            "agentSummary": None,
+        }
 
     convo_lines = []
     for h in (history or [])[-6:]:
