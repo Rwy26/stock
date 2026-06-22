@@ -914,7 +914,8 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
         const d = await r.json()
         if (d.hasReport && !done) {
           done = true
-          setSearchChat(prev => [...prev, { role: 'assistant', content: `✅ ${analyzing.name} 분석이 완료되었습니다. 아래 버튼에서 리포트를 확인하세요.`, stock: { code: analyzing.code, name: analyzing.name, hasReport: true } }])
+          setSearchChat(prev => [...prev, { role: 'assistant', content: `✅ ${analyzing.name} 분석이 완료되었습니다. 리포트를 열어드립니다.`, stock: { code: analyzing.code, name: analyzing.name, hasReport: true } }])
+          setReportModal({ code: analyzing.code, name: analyzing.name })   // 완료 시 자동으로 리포트 모달 열기
           setAnalyzing(null)
         }
       } catch { /* keep polling */ }
@@ -924,7 +925,7 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
         setSearchChat(prev => [...prev, { role: 'assistant', content: `${analyzing.name} 분석이 예상보다 지연되고 있습니다. 잠시 후 '${analyzing.name}'를 다시 검색해 확인해 주세요.` }])
         setAnalyzing(null)
       }
-    }, 180_000)
+    }, 600_000)
     return () => { clearInterval(tick); clearInterval(poll); clearTimeout(to) }
   }, [analyzing])
 
@@ -1750,22 +1751,24 @@ export function AiChartPage({ publicMode = false }: { publicMode?: boolean } = {
                   </div>
                 )}
                 {analyzing && (() => {
+                  // 정보 수집 잔량 — 총량 100%에서 시간이 지날수록 줄어듦 (고정 시간 규정 안 함)
                   const EST = 90
-                  const remain = Math.max(0, EST - analyzeElapsed)
-                  const pct = Math.min(96, (analyzeElapsed / EST) * 100)
+                  const remainPct = Math.max(3, Math.round(100 - (analyzeElapsed / EST) * 100))
+                  const nearDone = remainPct <= 3
                   return (
                     <div className="panel glass" style={{ padding: '14px 18px', alignSelf: 'stretch', width: '100%', borderColor: 'rgba(96,165,250,0.35)' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                        <span style={{ fontSize: '0.9rem', fontWeight: 700, color: '#93c5fd' }}>⏳ {analyzing.name} 신규 분석 중…</span>
-                        <span style={{ fontSize: '0.82rem', color: 'var(--text-soft)' }}>
-                          {remain > 0 ? `예상 약 ${remain}초 남음` : '마무리 중…'}
+                        <span style={{ fontSize: '0.9rem', fontWeight: 700, color: '#93c5fd' }}>⏳ {analyzing.name} 정보 수집 중…</span>
+                        <span style={{ fontSize: '0.82rem', fontWeight: 700, color: nearDone ? '#34d399' : '#93c5fd' }}>
+                          {nearDone ? '마무리 중…' : `남은 정보 ${remainPct}%`}
                         </span>
                       </div>
+                      {/* 100%에서 줄어드는 잔량 막대 */}
                       <div style={{ height: 8, borderRadius: 99, background: 'rgba(255,255,255,0.07)', overflow: 'hidden' }}>
-                        <div style={{ width: `${pct}%`, height: '100%', borderRadius: 99, background: 'linear-gradient(90deg,#60a5fa,#34d399)', transition: 'width 1s linear' }} />
+                        <div style={{ width: `${remainPct}%`, height: '100%', borderRadius: 99, background: 'linear-gradient(90deg,#34d399,#60a5fa)', transition: 'width 1s linear' }} />
                       </div>
                       <div style={{ fontSize: '0.78rem', color: 'var(--text-soft)', marginTop: 8 }}>
-                        완료되면 자동으로 알려드립니다 — 이 창을 떠나도 됩니다.
+                        완료되면 자동으로 리포트를 열어드립니다 — 이 창을 떠나도 됩니다.
                       </div>
                     </div>
                   )

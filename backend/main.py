@@ -7123,7 +7123,8 @@ def public_report_status(code: str = ""):
         finally:
             s.close()
         pj = row.result_json if (row and isinstance(row.result_json, dict)) else None
-        has = bool(pj and (pj.get("aiReport") or pj.get("ai_result")))
+        # 결정론 리포트(composite 점수)가 있으면 AI 해석문 없어도 조회 가능 → 준비됨
+        has = bool(pj and (pj.get("aiReport") or pj.get("ai_result") or pj.get("composite")))
         return {"code": code, "hasReport": has,
                 "name": (row.stock_name if row else None), "signal": (row.signal if row else None)}
     except Exception:
@@ -7175,8 +7176,8 @@ def _ai_search_core(query: str, history: list, forced_code: str | None = None) -
             finally:
                 s.close()
             pj = row.result_json if (row and isinstance(row.result_json, dict)) else None
-            if pj and pj.get("aiReport"):
-                # 12단계 표준 리포트
+            if pj and (pj.get("aiReport") or pj.get("composite")):
+                # 12단계 리포트 (AI 해석문 없어도 결정론 점수·목표가로 조회 가능)
                 has_report = True
                 comp = pj.get("composite", {}) or {}
                 tg = pj.get("targets", {}) or {}
