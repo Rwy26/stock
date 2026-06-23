@@ -159,10 +159,15 @@
 - 공통 로더 `fetchPublicSnapshot` ([frontend/src/lib/publicApi.ts](../frontend/src/lib/publicApi.ts)) — 폴백 내장
 - 프론트 [PublicAiHistoryPage.tsx](../frontend/src/pages/public/PublicAiHistoryPage.tsx): 그래프 로드 → 스냅샷(폴백)
 
-### Phase B (예정) — ai-history 인덱스 스냅샷
-### Phase C (예정·주의) — 종목별 리포트 `reports/<code>.json` 샤딩
-⚠️ **제외 게이트 신선도**: 스냅샷 후 종목이 제외되면 "투자 주의" 태그 누락 가능 →
-`refresh_exclusions` / `batch_analyze` 시 리포트 스냅샷 재생성 훅 필요. 착수 시 결정.
+### Phase B — ai-history 인덱스 스냅샷 ❌ 불필요(취소)
+프론트는 인덱스(`/api/public/ai-history`)를 호출하지 않음. 그래프 노드의 `hasReport` 플래그가
+인덱스 역할을 하고, 상세만 `/api/public/ai-history/{code}`로 조회 → 인덱스 스냅샷 소비처 없음.
+
+### Phase C — 종목별 리포트 상세 ✅ 라이브 유지 결정(2026-06-23, 사용자)
+정적화하지 않고 `/api/public/ai-history/{code}` 라이브 유지. 근거:
+(1) **제외 게이트 신선도** — 스냅샷 후 제외되는 종목의 "투자 주의" 태그 누락 위험이
+사용자 제1원칙([[data-accuracy-over-availability]])에 저촉, (2) 상세는 모달 1회 로드(폴링 아님)라
+오프로드 이득이 작고 쿼리가 가벼움. 정확성 > 오프로드.
 
 ### 공유 계층 운영 배포 (보류)
 1. `.\scripts\install-public-snapshots-task.ps1`
