@@ -1561,6 +1561,13 @@ _LOGO_DIR = Path(__file__).resolve().parent / "static" / "logos"
 _LOGO_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static/logos", StaticFiles(directory=str(_LOGO_DIR)), name="stock_logos")
 
+# 대시보드 읽기 계층 정적 스냅샷 (Phase 1: 매크로 차트).
+# 배치(scripts/build_dashboard_snapshots.py)가 *.json 을 떨구고, 여기서 정적 서빙한다.
+# 서빙 시 DB 세션/yfinance/KIS 호출 0 → 매매·예측 경로와 부하 격리.
+_SNAPSHOT_DIR = Path(__file__).resolve().parent / "static" / "snapshots"
+_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static/snapshots", StaticFiles(directory=str(_SNAPSHOT_DIR)), name="dashboard_snapshots")
+
 @app.get("/health")
 def health():
     return {"ok": True}

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import type { IChartApi, ISeriesApi } from 'lightweight-charts'
-import { fetchJson } from '../lib/api'
+import { fetchSnapshot } from '../lib/api'
 
 type LWC = typeof import('lightweight-charts')
 
@@ -66,7 +66,7 @@ export function DxyChart() {
     let cancelled = false
 
     const load = () => {
-      fetchJson<DxyData>('/api/macro/dxy')
+      fetchSnapshot<DxyData>('dashboard-macro-dxy.json', '/api/macro/dxy')
         .then((d) => {
           if (cancelled || !seriesRef.current) return
           seriesRef.current.setData(d.ohlcv.filter(r => r.close != null))
@@ -76,7 +76,7 @@ export function DxyChart() {
     }
 
     load()
-    const id = window.setInterval(load, 5 * 60 * 1000)
+    const id = window.setInterval(load, 30 * 60 * 1000)  // 30분 갱신 (정적 스냅샷 차등 폴링)
     return () => { cancelled = true; window.clearInterval(id) }
   }, [])
 

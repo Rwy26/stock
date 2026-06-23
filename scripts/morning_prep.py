@@ -82,6 +82,14 @@ def main() -> int:
             log(f"{name} 워밍 FAIL: {type(exc).__name__}")
             ok = False
 
+    # 4) 대시보드 매크로 정적 스냅샷 1회 생성 (장전 준비 — 30분 배치와 별개로 워밍)
+    try:
+        import build_dashboard_snapshots
+        rc = build_dashboard_snapshots.main()
+        log(f"대시보드 스냅샷 {'OK' if rc == 0 else 'rc=' + str(rc)}")
+    except Exception as exc:  # noqa: BLE001
+        log(f"대시보드 스냅샷 FAIL: {type(exc).__name__} {exc}")
+
     log(f"=== 아침 준비 {'완료' if ok else '일부 실패 — 점검 필요'} ===")
     return 0 if ok else 1
 

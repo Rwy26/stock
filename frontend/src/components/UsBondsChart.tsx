@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import type { IChartApi, ISeriesApi } from 'lightweight-charts'
-import { fetchJson } from '../lib/api'
+import { fetchSnapshot } from '../lib/api'
 
 type LWC = typeof import('lightweight-charts')
 
@@ -184,7 +184,7 @@ export function UsBondsChart() {
     let cancelled = false
 
     const load = () => {
-      fetchJson<UsBondsData>('/api/macro/us-bonds')
+      fetchSnapshot<UsBondsData>('dashboard-macro-us-bonds.json', '/api/macro/us-bonds')
         .then((d) => {
           if (cancelled) return
           if (!tnxRef.current || !tyxRef.current || !domRef.current) return
@@ -216,7 +216,7 @@ export function UsBondsChart() {
     }
 
     load()
-    const id = window.setInterval(load, 5 * 60 * 1000)  // 5분 갱신
+    const id = window.setInterval(load, 30 * 60 * 1000)  // 30분 갱신 (정적 스냅샷 차등 폴링)
     return () => { cancelled = true; window.clearInterval(id) }
   }, [])
 
