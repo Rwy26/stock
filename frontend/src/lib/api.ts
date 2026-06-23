@@ -43,11 +43,12 @@ export async function refreshAccessToken(): Promise<boolean> {
  * 배치가 생성한 `/static/snapshots/<file>` 를 `?t=` 캐시버스터로 받아
  * `{updated_at,count,source,stale,data}` 봉투에서 `data` 를 푼다.
  * 스냅샷이 없거나(404) 실패하면 라이브 API(`apiFallback`)로 폴백한다.
+ * `apiFallback` 이 없으면(스냅샷 전용 산출물) 실패 시 throw — 호출자가 처리.
  * 인증 불필요(공개 정적 파일) — fetchJson 의 토큰 흐름을 타지 않는다.
  */
 export async function fetchSnapshot<T>(
   file: string,
-  apiFallback: string,
+  apiFallback?: string,
 ): Promise<T> {
   try {
     const res = await fetch(`/static/snapshots/${file}?t=${Date.now()}`, {
@@ -58,9 +59,10 @@ export async function fetchSnapshot<T>(
       if (env && env.data != null) return env.data
     }
   } catch {
-    // fall through to live API
+    // fall through to live API (or throw if no fallback)
   }
-  return fetchJson<T>(apiFallback)
+  if (apiFallback) return fetchJson<T>(apiFallback)
+  throw new Error(`snapshot unavailable: ${file}`)
 }
 
 export async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {

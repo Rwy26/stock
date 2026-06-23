@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { fetchJson } from '../lib/api'
+import { fetchJson, fetchSnapshot } from '../lib/api'
 import { GlobalMacroCharts, MiniChart, DescModal, trendDir, type Pt } from '../components/GlobalMacroCharts'
 
 type LWC = typeof import('lightweight-charts')
@@ -165,7 +165,14 @@ function GlobalSentimentPanel({ g }: { g: GlobalSentiment }) {
   const [hist, setHist] = useState<ScoreHist | null>(null)
   const [sel, setSel] = useState<string | null>(null)
   useEffect(() => { import('lightweight-charts').then(setLwc).catch(() => {}) }, [])
-  useEffect(() => { fetchJson<ScoreHist>('/api/admin/global-macro/history?days=26').then(setHist).catch(() => {}) }, [])
+  useEffect(() => {
+    let alive = true
+    const load = () => fetchSnapshot<ScoreHist>('dashboard-global-macro.json', '/api/admin/global-macro/history?days=26')
+      .then(d => { if (alive) setHist(d) }).catch(() => {})
+    load()
+    const id = window.setInterval(load, 30 * 60 * 1000)   // 30분 차등 폴링 (정적 스냅샷 읽기계층)
+    return () => { alive = false; window.clearInterval(id) }
+  }, [])
   const histRows = hist?.series ?? []
   const chartKeys = SCORE_ORDER.filter(k => scores[k] != null)
   const selData = sel

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { IChartApi, ISeriesApi } from 'lightweight-charts'
-import { fetchJson } from '../lib/api'
+import { fetchSnapshot } from '../lib/api'
 
 type LWC = typeof import('lightweight-charts')
 
@@ -207,9 +207,13 @@ export function GlobalMacroCharts() {
 
   useEffect(() => { import('lightweight-charts').then(setLwc).catch(() => setErr('차트 라이브러리 로드 실패')) }, [])
   useEffect(() => {
-    fetchJson<History>('/api/admin/global-macro/history?days=26')
-      .then(setHist)
-      .catch(e => setErr(e instanceof Error ? e.message : String(e)))
+    let alive = true
+    const load = () => fetchSnapshot<History>('dashboard-global-macro.json', '/api/admin/global-macro/history?days=26')
+      .then(d => { if (alive) setHist(d) })
+      .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)) })
+    load()
+    const id = window.setInterval(load, 30 * 60 * 1000)   // 30분 차등 폴링 (정적 스냅샷 읽기계층)
+    return () => { alive = false; window.clearInterval(id) }
   }, [])
 
   const rows = hist?.series ?? []

@@ -29,6 +29,22 @@ type RecommendationsSnapshot = {
   items: Array<{ rank: number; name: string; code: string; score: number }>
 }
 
+type PreopenSector = {
+  lead_score: number
+  expected_gap_bias: number
+  lead_lag_days: number
+  top_movers: Array<{ ticker: string; name: string; pct: number }>
+  evidence: string
+}
+
+type PreopenLead = {
+  asof: string
+  composite: number
+  regime: { label: string; as_of: string }
+  sectors: Record<string, PreopenSector>
+  note: string | null
+}
+
 type KisTokenStatusResponse = {
   ok: boolean
   hasProfile: boolean
@@ -44,6 +60,7 @@ export function DashboardPage() {
   const [kisTokenLine, setKisTokenLine] = useState<string>('KIS 토큰: -')
   const [portfolio, setPortfolio] = useState<PortfolioResponse | null>(null)
   const [topRecs, setTopRecs] = useState<Array<{ name: string; code: string; score: number }>>([])
+  const [preopen, setPreopen] = useState<PreopenLead | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -105,6 +122,20 @@ export function DashboardPage() {
     }
     loadRecs()
     const id = window.setInterval(loadRecs, 30 * 60 * 1000)
+    return () => { cancelled = true; window.clearInterval(id) }
+  }, [])
+
+  // 개장 전 선행 신호: 예측 엔진 세션이 생성하는 정적 스냅샷(매일 06:10, 라이브 API 없음).
+  // 스냅샷 전용이므로 폴백 없이 직접 로드 — 실패 시 패널 숨김.
+  useEffect(() => {
+    let cancelled = false
+    const loadPreopen = () => {
+      fetchSnapshot<PreopenLead>('preopen-lead.json')
+        .then((d) => { if (!cancelled) setPreopen(d) })
+        .catch(() => { if (!cancelled) setPreopen(null) })
+    }
+    loadPreopen()
+    const id = window.setInterval(loadPreopen, 30 * 60 * 1000)
     return () => { cancelled = true; window.clearInterval(id) }
   }, [])
 
@@ -211,6 +242,43 @@ export function DashboardPage() {
             ))}
           </ol>
         </article>
+
+        {preopen && (
+          <article className="panel glass reveal" style={{ gridColumn: 'span 2' }}>
+            <div className="panel-head">
+              <h3>개장 전 선행 신호 (US→KR)</h3>
+              <p className="subtle">
+                {preopen.regime?.label ?? '—'} · {preopen.asof} 기준 · 야간 미국장 → 익일 한국장 갭 편향
+              </p>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>섹터</th>
+                    <th>선행점수</th>
+                    <th>예상 갭편향</th>
+                    <th>밤사이 주요 변동</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(preopen.sectors ?? {}).map(([name, s]) => (
+                    <tr key={name}>
+                      <td>{name}</td>
+                      <td>{s.lead_score}</td>
+                      <td className={s.expected_gap_bias < 0 ? 'down' : 'up'}>
+                        {formatPercent(s.expected_gap_bias)}
+                      </td>
+                      <td className="subtle">
+                        {(s.top_movers ?? []).map((m) => `${m.name} ${formatPercent(m.pct)}`).join(' · ')}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </article>
+        )}
 
         <article className="panel glass reveal">
           <div className="panel-head">
