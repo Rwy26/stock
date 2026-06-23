@@ -52,7 +52,7 @@ if ($PSCmdlet.ShouldProcess($taskName, 'Register scheduled task')) {
     -Action $action `
     -Settings $settings `
     -Principal $principal `
-    -Description '매일 05:10 / 06:10 KST 미 정규장 마감 직후 글로벌 매크로 투자심리 재계산(포트 8000 캐시 warm). DST 자가 게이트 — EDT는 05:10, EST는 06:10만 실효.' `
+    -Description '매일 05:10 / 06:10 KST 미 정규장 마감 직후 대시보드 읽기계층 스냅샷 1회 보강(build_dashboard_snapshots.py). DST 자가 게이트 — EDT는 05:10, EST는 06:10만 실효. 로그: logs/post-close-macro.log.' `
     -Force | Out-Null
 
   Write-Output ("Registered task: {0}" -f $taskName)

@@ -49,7 +49,7 @@ def log(msg: str) -> None:
 
 def _count_rows(data: dict) -> int:
     """대표 시계열 행수(신선도 1차 게이트용)."""
-    for key in ("tnx", "ohlcv", "items"):
+    for key in ("tnx", "ohlcv", "items", "series"):
         v = data.get(key)
         if isinstance(v, list):
             return len(v)
@@ -125,6 +125,10 @@ def main() -> int:
         # 추천이 비어도(장전·배치 전) 오늘 날짜와 함께 정직하게 발행(min_rows=0).
         build_one("dashboard-top-recommendations.json", "/api/public/recommendations",
                   source="recommendations_db", min_rows=0),
+        # 글로벌 매크로 0단계 — 공개 read 소스(무인증·결정론·시계열+현재스냅샷).
+        # 시계열은 매일 1행씩 누적이라 적게 시작 → 정직하게 발행(min_rows=0).
+        build_one("dashboard-global-macro.json", "/api/public/global-macro-history?days=26",
+                  source="global_macro:MacroSentimentDaily+compute", min_rows=0),
     ]
 
     # version.json — 프론트가 가장 싸게 폴링해 신선도/배포를 감지
@@ -135,6 +139,7 @@ def main() -> int:
                 "dashboard-macro-us-bonds.json",
                 "dashboard-macro-dxy.json",
                 "dashboard-top-recommendations.json",
+                "dashboard-global-macro.json",
             ],
             "ok_count": sum(1 for x in results if x),
         }

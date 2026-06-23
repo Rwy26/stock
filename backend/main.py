@@ -6007,12 +6007,12 @@ def admin_market_compass(force: int = 0, ai: int = 1, user=Depends(require_admin
         raise HTTPException(status_code=502, detail=f"시장 나침반 계산 실패: {exc}") from exc
 
 
-@app.get("/api/admin/global-macro/history")
-def admin_global_macro_history(days: int = 180, user=Depends(require_admin)):
-    """글로벌 투자심리 8점수 + composite 일별 시계열 (MacroSentimentDaily) — 일봉 로그 차트용.
+def _global_macro_history(days: int) -> dict:
+    """글로벌 투자심리 8점수 + composite 일별 시계열 (MacroSentimentDaily).
 
     매일 06:00 fundamentals_sync 가 1행씩 누적 → 기간이 쌓일수록 채워진다.
-    실데이터만 반환(시드 없음) — 행이 적으면 그대로 적게 반환.
+    실데이터만 반환(시드 없음) — 행이 적으면 그대로 적게 반환. 결정론·민감정보 없음.
+    admin/public 양쪽이 공유.
     """
     if apollo_db is None or models is None:
         raise HTTPException(status_code=500, detail="DB module not available")
@@ -6035,6 +6035,35 @@ def admin_global_macro_history(days: int = 180, user=Depends(require_admin)):
             item[k] = getattr(r, k)
         series.append(item)
     return {"keys": keys, "count": len(series), "series": series}
+
+
+@app.get("/api/admin/global-macro/history")
+def admin_global_macro_history(days: int = 180, user=Depends(require_admin)):
+    """글로벌 투자심리 8점수 + composite 일별 시계열 — 일봉 로그 차트용(관리자)."""
+    return _global_macro_history(days)
+
+
+@app.get("/api/public/global-macro-history")
+def public_global_macro_history(days: int = 26):
+    """공개 글로벌 투자심리 시계열 + 현재 결정론 스냅샷 (읽기계층 정적 스냅샷 소스).
+
+    admin/global-macro/history 와 동일 시계열에 더해 0단계 표시용 현재 점수/asof 를 동봉한다.
+    `global_macro.compute_global_macro` 결정론 계산만 사용 — LLM 미호출, 주문경로·민감정보 미노출.
+    빌더(build_dashboard_snapshots.py)가 무인증으로 가져와 dashboard-global-macro.json 으로 떨군다.
+    """
+    out = _global_macro_history(days)
+    try:
+        import global_macro
+        g = global_macro.compute_global_macro(force=False)
+        out["current"] = {
+            "asof": g.get("asof"),
+            "composite": g.get("composite"),
+            "flow": g.get("flow"),
+            "scores": g.get("scores"),
+        }
+    except Exception:  # noqa: BLE001
+        out["current"] = None  # 현재 스냅샷 실패해도 시계열은 발행
+    return out
 
 
 @app.get("/api/admin/mtf-analysis")

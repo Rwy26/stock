@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { fetchJson, fetchSnapshot } from '../lib/api'
+import { fetchJson, fetchSnapshot, fetchSnapshotEnvelope } from '../lib/api'
 import { GlobalMacroCharts, MiniChart, DescModal, trendDir, type Pt } from '../components/GlobalMacroCharts'
 
 type LWC = typeof import('lightweight-charts')
@@ -142,7 +142,7 @@ function ScoreBar({ k, v, evidence }: { k: string; v: number; evidence?: string[
   )
 }
 
-function GlobalSentimentPanel({ g }: { g: GlobalSentiment }) {
+function GlobalSentimentPanel({ g, snapAt }: { g: GlobalSentiment; snapAt?: string }) {
   if (!g.available) {
     return (
       <div style={panel}>
@@ -185,7 +185,7 @@ function GlobalSentimentPanel({ g }: { g: GlobalSentiment }) {
     <div style={{ ...panel, borderColor: 'rgba(96,165,250,0.3)' }}>
       <h4 style={{ margin: '0 0 12px', color: '#93c5fd' }}>
         🌐 글로벌 투자심리 (0단계 — 국내 판정 선행)
-        <span style={{ marginLeft: 8, fontSize: 11, color: '#475569' }}>{g.asof?.replace('T', ' ')}</span>
+        <span style={{ marginLeft: 8, fontSize: 11, color: '#475569' }}>{(snapAt ?? g.asof)?.replace('T', ' ')}</span>
       </h4>
 
       <div style={{ display: 'grid', gridTemplateColumns: '200px 1fr', gap: 20, alignItems: 'start' }}>
@@ -354,6 +354,19 @@ export function MarketCompassPage() {
   const [mErr, setMErr] = useState<string | null>(null)
   const [calcSec, setCalcSec] = useState(0)  // 계산 경과초 (카운트다운용)
 
+  // 스냅샷 봉투 발행시각(updated_at) — 헤더·0단계 asof 를 라이브 계산시각 대신 이 값으로 표시.
+  // 30분 차등 폴링(정적 스냅샷 읽기계층). 스냅샷 없으면 undefined → 라이브 타임스탬프로 폴백.
+  const [snapAt, setSnapAt] = useState<string | undefined>(undefined)
+  useEffect(() => {
+    let alive = true
+    const load = () => fetchSnapshotEnvelope('dashboard-global-macro.json')
+      .then(env => { if (alive) setSnapAt(env.updated_at) })
+      .catch(() => { /* 스냅샷 없음 — 라이브 폴백 유지 */ })
+    load()
+    const id = window.setInterval(load, 30 * 60 * 1000)
+    return () => { alive = false; window.clearInterval(id) }
+  }, [])
+
   // 계산 중 1초 틱 — 남은 시간 줄어드는 시각 효과
   useEffect(() => {
     if (!mLoading) { setCalcSec(0); return }
@@ -416,9 +429,9 @@ export function MarketCompassPage() {
         <div>
           <p className="top-label">Global Sentiment</p>
           <h2>📡 글로벌 투자심리 (AI 자금흐름 분석)</h2>
-          {market?.asOf && (
+          {(snapAt ?? market?.asOf) && (
             <p className="top-updated" style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b' }}>
-              마지막 업데이트 {market.asOf.replace('T', ' ')}{market.cached ? ' (캐시)' : ''}
+              마지막 업데이트 {(snapAt ?? market!.asOf).replace('T', ' ')}{!snapAt && market?.cached ? ' (캐시)' : ''}
             </p>
           )}
         </div>
@@ -464,7 +477,7 @@ export function MarketCompassPage() {
 
       {market && (
         <>
-          {market.globalSentiment && <GlobalSentimentPanel g={market.globalSentiment} />}
+          {market.globalSentiment && <GlobalSentimentPanel g={market.globalSentiment} snapAt={snapAt} />}
           {market.globalSentiment?.available && <GlobalMacroCharts />}
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>

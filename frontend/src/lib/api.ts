@@ -65,6 +65,40 @@ export async function fetchSnapshot<T>(
   throw new Error(`snapshot unavailable: ${file}`)
 }
 
+export interface SnapshotEnvelope<T> {
+  updated_at?: string
+  count?: number
+  source?: string
+  stale?: boolean
+  data: T
+}
+
+/**
+ * fetchSnapshot 의 봉투 버전 — `data` 뿐 아니라 봉투 메타(`updated_at` 등)도 돌려준다.
+ *
+ * 헤더 '마지막 업데이트'·0단계 asof 를 라이브 계산시각이 아닌 **스냅샷 발행시각**
+ * (봉투 `updated_at`)으로 표시할 때 사용한다. 스냅샷이 없으면 라이브로 폴백하되
+ * `updated_at` 은 비운다(호출부가 라이브 타임스탬프로 폴백하도록).
+ */
+export async function fetchSnapshotEnvelope<T>(
+  file: string,
+  apiFallback?: string,
+): Promise<SnapshotEnvelope<T>> {
+  try {
+    const res = await fetch(`/static/snapshots/${file}?t=${Date.now()}`, {
+      headers: { Accept: 'application/json' },
+    })
+    if (res.ok) {
+      const env = (await res.json()) as SnapshotEnvelope<T>
+      if (env && env.data != null) return env
+    }
+  } catch {
+    // fall through to live API (or throw if no fallback)
+  }
+  if (apiFallback) return { data: await fetchJson<T>(apiFallback), source: 'live' }
+  throw new Error(`snapshot unavailable: ${file}`)
+}
+
 export async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const initHeaders = (init?.headers ?? {}) as Record<string, string>
 

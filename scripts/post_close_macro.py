@@ -1,7 +1,9 @@
-"""미 정규장 마감 직후 글로벌 매크로 투자심리 재계산 (예약작업 MOON-STOCK-PostClose-Macro).
+"""미 정규장 마감 직후 대시보드 읽기계층 스냅샷 1회 보강 (예약작업 MOON-STOCK-PostClose-Macro).
 
-목적: 미 정규장(16:00 ET) 마감 직후 운영 백엔드(포트 8000)의 인메모리 매크로 캐시를
-강제로 데워서 화면 헤더 asOf 타임스탬프가 사람이 열지 않아도 자동 갱신되게 한다.
+목적: 미 정규장(16:00 ET) 마감 직후 `build_dashboard_snapshots.py` 를 1회 실행해
+backend/static/snapshots/*.json (글로벌 매크로·미국채·DXY 등)을 즉시 갱신한다.
+30분 배치 사이 마감직후 신선도를 메우는 보강 트리거 — 화면 asOf(스냅샷 봉투 updated_at)가
+사람이 열지 않아도 마감 직후 값으로 자동 갱신된다.
 
 마감 시각(KST) — 미 동부 서머타임에 따라 달라진다:
   - EDT(여름): 16:00 ET = 익일 05:00 KST  → KST 05시대 트리거에만 실행
@@ -9,7 +11,8 @@
 예약작업은 05:10 / 06:10 두 트리거를 모두 걸어두고, 이 스크립트가 DST를 자가 게이트해
 둘 중 하나만 실효시킨다(나머지는 즉시 no-op 종료).
 
-with_ai=False(LLM 비용 0) read-only warm 엔드포인트만 호출한다 — 주문·autotrade 불가침.
+별도 warm 엔드포인트는 더 이상 호출하지 않는다(정적 스냅샷 표준으로 통합 — 중복 제거).
+빌더는 무인증 공개 read 엔드포인트만 호출하고 깨진 값은 발행하지 않는다(직전본 유지).
 """
 
 from __future__ import annotations
@@ -20,15 +23,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 REPO = Path(__file__).resolve().parents[1]
-BACKEND = REPO / "backend"
-sys.path.insert(0, str(BACKEND))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import httpx  # noqa: E402
-
 LOG = REPO / "logs" / "post-close-macro.log"
-BASE = "http://127.0.0.1:8000"
-WARM_PATH = "/api/public/macro-warm"
 
 
 def log(msg: str) -> None:
@@ -58,15 +55,14 @@ def main() -> int:
         )
         return 0
 
-    log(f"실행: 미동부={tz_label}, 마감 직후(KST {kst_hour}시대) → macro warm 호출")
+    log(f"실행: 미동부={tz_label}, 마감 직후(KST {kst_hour}시대) → 대시보드 스냅샷 1회 보강")
     try:
-        r = httpx.get(BASE + WARM_PATH, timeout=120)
-        r.raise_for_status()
-        as_of = r.json().get("asOf")
-        log(f"macro warm OK — asOf={as_of}")
-        return 0
+        import build_dashboard_snapshots
+        rc = build_dashboard_snapshots.main()
+        log(f"스냅샷 보강 완료 rc={rc}")
+        return rc
     except Exception as exc:  # noqa: BLE001
-        log(f"macro warm FAIL: {type(exc).__name__} {exc}")
+        log(f"스냅샷 보강 FAIL: {type(exc).__name__} {exc}")
         return 1
 
 
