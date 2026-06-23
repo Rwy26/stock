@@ -40,6 +40,44 @@ CODES = """000270 000400 000660 000720 001440 003550 003670 005380 005490 005930
 483650""".split()
 
 
+def _llm_available() -> bool:
+    """gemini/groq 중 하나라도 2xx 응답하면 True. 라이트 단일 핑(재시도 없음).
+
+    혼잡/쿼터 소진(429·5xx·타임아웃) 시 urlopen 이 예외를 던지므로 False 가 되어
+    재서술 루프를 진입하지 않는다 → KIS 일봉·국제망 헛호출 차단.
+    점검 자체가 망을 무리하게 치지 않도록 timeout 12s 단일 시도만 한다.
+    """
+    import json
+    import urllib.request
+
+    from settings import settings
+
+    # gemini
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{settings.gemini_model}:generateContent?key={settings.gemini_api_key}",
+            data=json.dumps({"contents": [{"parts": [{"text": "hi"}]}]}).encode(),
+            headers={"Content-Type": "application/json"}), timeout=12)
+        return True
+    except Exception:  # noqa: BLE001
+        pass
+    # groq
+    try:
+        gk = getattr(settings, "groq_api_key", "")
+        urllib.request.urlopen(urllib.request.Request(
+            "https://api.groq.com/openai/v1/chat/completions",
+            data=json.dumps({
+                "model": settings.groq_model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 5}).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {gk}"}), timeout=12)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def log(msg: str) -> None:
     line = f"[{datetime.now().isoformat(timespec='seconds')}] {msg}"
     print(line)
@@ -96,6 +134,10 @@ def main() -> int:
         if not codes:
             codes = CODES
             src = "정적 CODES 폴백"
+
+    if not _llm_available():
+        log("=== LLM 전부 불가(혼잡/쿼터) — 재서술 중단. KIS 호출 0, 네트워크 회복 후 재실행 ===")
+        return 0
 
     log(f"=== 재서술 시작: {len(codes)}종목 (출처={src}, INTERVAL={INTERVAL}s) ===")
     ok = fail = none = 0
