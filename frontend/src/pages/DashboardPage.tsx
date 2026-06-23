@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { fetchJson } from '../lib/api'
+import { fetchJson, fetchSnapshot } from '../lib/api'
 import { formatKRW, formatNumber, formatPercent } from '../lib/format'
 import type { PortfolioResponse } from '../lib/types'
 import { StatusChip } from '../components/StatusChip'
@@ -24,6 +24,11 @@ type DashboardResponse = {
   kis?: { connected: boolean; label: string }
 }
 
+type RecommendationsSnapshot = {
+  date: string
+  items: Array<{ rank: number; name: string; code: string; score: number }>
+}
+
 type KisTokenStatusResponse = {
   ok: boolean
   hasProfile: boolean
@@ -38,6 +43,7 @@ export function DashboardPage() {
   const [data, setData] = useState<DashboardResponse | null>(null)
   const [kisTokenLine, setKisTokenLine] = useState<string>('KIS 토큰: -')
   const [portfolio, setPortfolio] = useState<PortfolioResponse | null>(null)
+  const [topRecs, setTopRecs] = useState<Array<{ name: string; code: string; score: number }>>([])
 
   useEffect(() => {
     let cancelled = false
@@ -85,8 +91,25 @@ export function DashboardPage() {
     }
   }, [])
 
+  // Top 추천: 정적 스냅샷(배치 생성) 차등 폴링 — 저빈도(일배치)이므로 30분.
+  // 스냅샷 미존재/실패 시 fetchSnapshot 이 /api/public/recommendations 로 폴백.
+  useEffect(() => {
+    let cancelled = false
+    const loadRecs = () => {
+      fetchSnapshot<RecommendationsSnapshot>('dashboard-top-recommendations.json', '/api/public/recommendations')
+        .then((d) => {
+          if (cancelled) return
+          setTopRecs((d.items ?? []).slice(0, 5).map((it) => ({ name: it.name, code: it.code, score: it.score })))
+        })
+        .catch(() => { /* silent — 패널은 빈 상태 유지 */ })
+    }
+    loadRecs()
+    const id = window.setInterval(loadRecs, 30 * 60 * 1000)
+    return () => { cancelled = true; window.clearInterval(id) }
+  }, [])
+
   const kpis = data?.kpis
-  const top = data?.topRecommendations
+  const top = topRecs
   const automation = data?.automation
   const kisLabel = data?.kis?.label ?? 'KIS 연결 필요'
   const positions = portfolio?.positions ?? []

@@ -3,7 +3,7 @@
    + 유기적 호흡 + 레이블 lag. 중심 인력 없음 → 전체 공간 활용. */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { publicFetch } from '../../lib/publicApi'
+import { fetchPublicSnapshot } from '../../lib/publicApi'
 import { StockReportModal } from '../../components/StockReportModal'
 
 type GNode = {
@@ -138,7 +138,7 @@ export function PublicAiHistoryPage() {
 
   // ── 그래프 로드 + 초기 배치: 캔버스 전체 면적으로 흩뿌림 ──
   useEffect(() => {
-    publicFetch<Graph>('/api/public/stock-graph').then(g => {
+    fetchPublicSnapshot<Graph>('public-stock-graph.json', '/api/public/stock-graph').then(g => {
       const sectors = Array.from(new Set(g.nodes.map(n => n.sector)))
       const secAngle: Record<string, number> = {}
       sectors.forEach((s, i) => { secAngle[s] = (i / sectors.length) * Math.PI * 2 })

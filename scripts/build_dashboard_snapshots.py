@@ -121,6 +121,10 @@ def main() -> int:
                   source="yfinance:^TNX,^TYX", min_rows=2),
         build_one("dashboard-macro-dxy.json", "/api/macro/dxy",
                   source="yfinance:DX-Y.NYB", min_rows=2),
+        # Top 추천 — 공개 추천 엔드포인트(무인증·DB·네이버 검증명·실시간가 없음).
+        # 추천이 비어도(장전·배치 전) 오늘 날짜와 함께 정직하게 발행(min_rows=0).
+        build_one("dashboard-top-recommendations.json", "/api/public/recommendations",
+                  source="recommendations_db", min_rows=0),
     ]
 
     # version.json — 프론트가 가장 싸게 폴링해 신선도/배포를 감지
@@ -130,6 +134,7 @@ def main() -> int:
             "files": [
                 "dashboard-macro-us-bonds.json",
                 "dashboard-macro-dxy.json",
+                "dashboard-top-recommendations.json",
             ],
             "ok_count": sum(1 for x in results if x),
         }

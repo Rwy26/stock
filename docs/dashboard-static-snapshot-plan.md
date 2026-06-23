@@ -110,3 +110,61 @@
 4. **범위 외(라이브 유지)**: KPI/포트폴리오/토큰/자동매매/DevMonitor.
 
 각 Phase는 기존 API를 폴백으로 남긴 채 점진 전환(롤백 용이).
+
+---
+
+## 구현 현황 (2026-06-23)
+
+### Phase 1 — 매크로 차트 정적화 ✅ 코드 완료
+- 마운트 `/static/snapshots` ([backend/main.py:1564](../backend/main.py))
+- 빌더 [scripts/build_dashboard_snapshots.py](../scripts/build_dashboard_snapshots.py) — 메타·`stale`·원자적 쓰기·정확성 게이트(실패/빈데이터 시 직전본 유지·미발행). 실행 검증 OK.
+- 30분 스케줄 설치본 [scripts/install-dashboard-snapshots-task.ps1](../scripts/install-dashboard-snapshots-task.ps1) — **미등록(운영 보류)**
+- 장전 워밍 훅 [scripts/morning_prep.py](../scripts/morning_prep.py)
+- 프론트 [UsBondsChart.tsx](../frontend/src/components/UsBondsChart.tsx)·[DxyChart.tsx](../frontend/src/components/DxyChart.tsx) → `fetchSnapshot`(폴백 내장), 5분→30분
+- 공통 로더 `fetchSnapshot` ([frontend/src/lib/api.ts](../frontend/src/lib/api.ts))
+
+### Phase 2 — Top 추천 정적화 ✅ 코드 완료
+- 소스: `/api/public/recommendations`(무인증·DB·네이버 검증명·실시간가 없음, 동일 쿼리/폴백)
+- 빌더에 `dashboard-top-recommendations.json` 추가(min_rows=0 — 빈 추천도 오늘 날짜와 정직 발행)
+- 프론트 [DashboardPage.tsx](../frontend/src/pages/DashboardPage.tsx): Top 추천 패널만 분리해 스냅샷 30분 폴링. **KPI·자동매매·KIS·포트폴리오는 라이브 30초 유지.**
+- 검증: 빌더 3/3 OK, 추천 14행 검증명 정상, 프론트 빌드 타입체크 통과.
+
+### 운영 배포 (보류 중 — 사용자 지시로 정지)
+1. `.\scripts\install-dashboard-snapshots-task.ps1` (30분 스케줄 등록)
+2. 8000 백엔드 재시작 → `/static/snapshots` 마운트 활성 (재시작 전에도 프론트는 라이브 API 폴백으로 정상)
+
+### 후속 범위
+- 잔여 라이브 호출 차등 폴링 재조정(계좌는 라이브 유지)
+
+---
+
+## 리포트/공유 계층 (후속 진행 — 2026-06-23)
+
+게스트 공개 페이지(이름+전화 게이트)의 읽기 경로. **CompassReport는 `result_json`을 props로 받는
+표현 컴포넌트** → 데이터는 `ai_analysis_cache`(21:00 batch_analyze 산출). 경로: PublicAiHistoryPage(그래프)
+→ 노드 클릭 → StockReportModal → `/api/public/ai-history/{code}` → CompassReport.
+
+| 엔드포인트 | 소스 | 분류 | 처리 |
+|---|---|---|---|
+| `/api/public/watchlist`, `/api/public/etf-quotes` | 네이버 실시간 | 시세=라이브 | 유지(60/90s 캐시) |
+| `/api/public/stock-graph` | graph_engine(30분 캐시) | 저빈도 | **Phase A 스냅샷** |
+| `/api/public/ai-history` (인덱스) | ai_analysis_cache 최근50 | 저빈도 | Phase B |
+| `/api/public/ai-history/{code}` (상세) | ai_analysis_cache + 제외 게이트 | 저빈도 | Phase C(샤딩) |
+| `/api/public/recommendations` | DB 일배치 | 저빈도 | Phase 2에서 완료 |
+| LLM(이미지/대화), 리드캡처, admin | LLM/쓰기/인증 | 라이브 | 유지 |
+
+### Phase A — AI 그래프 정적화 ✅ 코드 완료
+- 빌더 [scripts/build_public_snapshots.py](../scripts/build_public_snapshots.py) → `public-stock-graph.json`(무인증, graph_engine). 검증: 123 노드·369 엣지, 검증명 정상.
+- 30분 스케줄 [scripts/install-public-snapshots-task.ps1](../scripts/install-public-snapshots-task.ps1) — **미등록(운영 보류)**
+- 공통 로더 `fetchPublicSnapshot` ([frontend/src/lib/publicApi.ts](../frontend/src/lib/publicApi.ts)) — 폴백 내장
+- 프론트 [PublicAiHistoryPage.tsx](../frontend/src/pages/public/PublicAiHistoryPage.tsx): 그래프 로드 → 스냅샷(폴백)
+
+### Phase B (예정) — ai-history 인덱스 스냅샷
+### Phase C (예정·주의) — 종목별 리포트 `reports/<code>.json` 샤딩
+⚠️ **제외 게이트 신선도**: 스냅샷 후 종목이 제외되면 "투자 주의" 태그 누락 가능 →
+`refresh_exclusions` / `batch_analyze` 시 리포트 스냅샷 재생성 훅 필요. 착수 시 결정.
+
+### 공유 계층 운영 배포 (보류)
+1. `.\scripts\install-public-snapshots-task.ps1`
+2. morning_prep 에 build_public_snapshots 워밍 훅 추가(선택)
+3. 8000 백엔드 재시작(마운트는 Phase 1에서 이미 추가됨 — 동일 재시작으로 활성)
