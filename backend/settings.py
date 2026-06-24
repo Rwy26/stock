@@ -74,6 +74,16 @@ class Settings:
     # Override by setting PIPELINE_ROOT in backend/.env.
     pipeline_root: Path = _default_pipeline_root()
 
+    # Claude CLI (Claude Code MAX 구독) — narrative LLM 1순위.
+    # 개발단계 단일 사용 전제(본인+테스터 소수). claude.cmd -p 를 stdin 파이프로 호출하며
+    # MAX 구독 한도(5시간/주간) 안에서 동작한다. 외부 공개 서비스 전환 시 정식 Anthropic API
+    # 로 교체할 것(_call_claude_cli 의 TODO 참조). 비활성화하면 gemini/groq/openai 체인만 사용.
+    claude_cli_enabled: bool = os.getenv("CLAUDE_CLI_ENABLED", "1").strip() in {"1", "true", "True", "YES", "yes"}
+    claude_cli_path: str = os.getenv(
+        "CLAUDE_CLI_PATH", r"C:\Users\MOON\.local\bin\claude.cmd"
+    ).strip() or r"C:\Users\MOON\.local\bin\claude.cmd"
+    claude_cli_timeout: int = int(os.getenv("CLAUDE_CLI_TIMEOUT", "120") or "120")
+
     # OpenAI (AI chart analysis)
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"

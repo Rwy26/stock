@@ -20,6 +20,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -499,8 +501,50 @@ def _slim_context_for_groq(context_json: str, budget: int) -> tuple[str, list[st
     return out[:budget] + "\n…(groq 한도 초과로 절단)", dropped + ["<hard-cap>"]
 
 
+def _call_claude_cli(prompt: str, timeout: Optional[int] = None) -> Optional[str]:
+    """claude -p (Claude Code MAX 구독) 로 narrative 생성. stdin 으로 프롬프트 전달(UTF-8).
+
+    성공 시 stdout 텍스트, 실패/타임아웃/빈 출력/비활성화 시 None → 호출부가 gemini/groq/
+    openai 체인으로 자연 강등(무중단). 결정론 점수·로직과 무관하며 narrative 생성 전용이다.
+
+    개발단계 단일 사용 전제(본인+테스터 소수, MAX 구독 1계정). 동시 다발 호출은 MAX rate 와
+    인터랙티브 사용을 침범하므로 idle 스케줄러(scripts/idle_narrative_filler.ps1)가 호출 빈도
+    /상한을 통제한다.
+
+    TODO(public-service): 외부 공개 서비스로 전환하면 claude.cmd CLI 를 정식 Anthropic API
+    (키 기반 과금 + rate-limit 처리)로 교체할 것. CLI 는 단일 사용자 MAX 구독 전용이다.
+    """
+    if not settings.claude_cli_enabled:
+        return None
+    path = settings.claude_cli_path
+    if not path or not os.path.exists(path):
+        return None
+    timeout = timeout if timeout is not None else settings.claude_cli_timeout
+    # .cmd/.bat 은 CreateProcess 가 직접 실행하지 못하므로 cmd.exe 경유로 기동.
+    if os.name == "nt" and path.lower().endswith((".cmd", ".bat")):
+        argv = ["cmd", "/c", path, "-p"]
+    else:
+        argv = [path, "-p"]
+    try:
+        proc = subprocess.run(
+            argv,
+            input=prompt.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+    if proc.returncode != 0:
+        return None
+    text = (proc.stdout or b"").decode("utf-8", errors="replace").strip()
+    return text or None
+
+
 def _call_llm(context_json: str, policy_active: bool = False) -> tuple[Optional[str], str]:
-    """Gemini > Groq > OpenAI 우선순위로 종합 리포트 생성. (리포트, 프로바이더) 반환.
+    """Claude(MAX) > Gemini > Groq > OpenAI 우선순위로 종합 리포트 생성. (리포트, 프로바이더) 반환.
 
     실패 시 다음 프로바이더로 폴백하고, 전부 실패하면 마지막 오류를 프로바이더 문자열에 담는다.
     """
@@ -511,6 +555,15 @@ def _call_llm(context_json: str, policy_active: bool = False) -> tuple[Optional[
     # 윈도우 밖(policy_active=False)에서는 시스템 프롬프트가 기존과 완전히 동일 — 회귀 없음.
     system_prompt = _SYSTEM_PROMPT + (("\n\n" + _POLICY_DIRECTIVE) if policy_active else "")
     errors: list[str] = []
+
+    # Claude CLI (MAX 구독) — 1순위. 수치 정확·절제(없는 값 안 지어냄) 실측 우위로 머니시스템에
+    # 적합. CLI 는 system/user 역할 분리가 없어 시스템 프롬프트를 프롬프트 본문에 합쳐 전달한다.
+    # 실패/타임아웃/비활성화 시 None → 아래 gemini/groq/openai 체인으로 강등(품질 회귀 없음).
+    if settings.claude_cli_enabled:
+        claude_text = _call_claude_cli(f"{system_prompt}\n\n{user_msg}")
+        if claude_text:
+            return claude_text, "claude:max"
+        errors.append("claude unavailable")
 
     # Gemini (2.5-flash 는 thinking 토큰을 쓰므로 출력 한도를 넉넉히)
     # 무료 티어 레이트리밋(429) 대비 1회 재시도.
