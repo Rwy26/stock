@@ -1058,25 +1058,57 @@ SECTOR_ETF_MAP: dict[str, str] = {
 }
 
 
-def _etf_alpha_vs_kospi(etf_ticker: str, period_days: int = 21) -> float | None:
-    """ETF의 KOSPI 대비 초과수익률 계산 (기간: period_days 거래일)."""
-    import yfinance as yf
+def _kr_close_series(ticker: str, period_days: int) -> pd.Series:
+    """KR 일별 종가 Series. FinanceDataReader 우선(무인증·KRX/네이버 기반), 실패 시 yfinance 폴백.
 
-    yf_period = "3mo" if period_days <= 63 else "6mo"
+    yfinance 의 KOSPI 지수(^KS11)가 Yahoo 차단/결측으로 last=NaN 을 반환해 '기준선'이 깨지면
+    모든 섹터 알파가 None 이 되는 문제를 회피한다. FDR Close 는 yfinance ETF 종가와 실측 일치
+    (교차검증 완료: 091160=171440, KS11=8471.02). ticker 예 '091160.KS'|'^KS11' →
+    FDR 심볼('091160'|'KS11')로 정규화.
+    """
+    need = max(int(period_days), 21) + 10  # 필요한 거래일 + 여유
+    # 1) FinanceDataReader (KRX/네이버 기반, 무인증)
     try:
-        etf_df  = yf.download(etf_ticker, period=yf_period, interval="1d",
-                               progress=False, auto_adjust=True)
-        mkt_df  = yf.download(KOSPI_TICKER, period=yf_period, interval="1d",
-                               progress=False, auto_adjust=True)
-        etf_close = _to_series(etf_df, "Close").dropna()
-        mkt_close = _to_series(mkt_df, "Close").dropna()
+        import datetime as _dt
+
+        import FinanceDataReader as fdr
+
+        fdr_sym = ticker.replace(".KS", "").replace(".KQ", "").lstrip("^")
+        start = (_dt.date.today() - _dt.timedelta(days=int(need * 1.7) + 20)).strftime("%Y-%m-%d")
+        df = fdr.DataReader(fdr_sym, start)
+        if df is not None and not df.empty and "Close" in df.columns:
+            s = df["Close"].dropna()
+            if len(s) >= 5:
+                return s
+    except Exception:  # noqa: BLE001
+        pass
+    # 2) yfinance 폴백 (Yahoo 가 회복됐을 때만 의미)
+    try:
+        import yfinance as yf
+
+        yf_period = "3mo" if period_days <= 63 else "6mo"
+        df = yf.download(ticker, period=yf_period, interval="1d", progress=False, auto_adjust=True)
+        return _to_series(df, "Close").dropna()
+    except Exception:  # noqa: BLE001
+        return pd.Series(dtype="float64")
+
+
+def _etf_alpha_vs_kospi(etf_ticker: str, period_days: int = 21) -> float | None:
+    """ETF의 KOSPI 대비 초과수익률 계산 (기간: period_days 거래일).
+
+    데이터는 _kr_close_series(FinanceDataReader 우선·yfinance 폴백)로 가져온다 —
+    Yahoo 차단/^KS11 NaN 회피. (구버전은 yfinance 직접 호출로 차단 시 전부 None)
+    """
+    try:
+        etf_close = _kr_close_series(etf_ticker, period_days)
+        mkt_close = _kr_close_series(KOSPI_TICKER, period_days)
         if len(etf_close) < 5 or len(mkt_close) < 5:
             return None
         n = min(period_days, len(etf_close), len(mkt_close))
         etf_ret = float(etf_close.iloc[-1] / etf_close.iloc[-n] - 1)
         mkt_ret = float(mkt_close.iloc[-1] / mkt_close.iloc[-n] - 1)
         return round(etf_ret - mkt_ret, 4)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
