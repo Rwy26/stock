@@ -575,6 +575,22 @@ def _claude_budget_exhausted() -> bool:
         return False
 
 
+def _record_claude_usage() -> None:
+    """claude 호출 1건을 공유 원장(logs/claude-usage.json)에 누적. 원장 미가용 시 무시.
+
+    실제 호출 지점에서 기록하는 '단일 소스' — 어느 경로(배치/idle 필러/서버)가 claude 를
+    쓰든 여기서만 카운트한다. 호출부는 더 이상 따로 증가시키지 않고 원장을 재조회만 한다.
+    (호출은 전역 호출락으로 직렬화되므로 이 record 의 read-modify-write 도 경쟁하지 않는다.)
+    """
+    cu = _get_claude_usage()
+    if cu is None:
+        return
+    try:
+        cu.record(1)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _claude_active() -> bool:
     """claude 1순위 narrative 를 '시도할 가치가 있는' 상태인지. False 면 호출부가 조용히 폴백."""
     if not settings.claude_cli_enabled or not _claude_runtime_enabled:
@@ -701,8 +717,12 @@ def _call_llm(context_json: str, policy_active: bool = False) -> tuple[Optional[
             # 다른 프로세스가 claude 점유 중 — 대기 금지, 즉시 폴백(에러 아님, 정보 로그).
             print("[market_compass] claude busy → gemini/groq 폴백", file=sys.stderr, flush=True)
         else:
+            claude_text = None
             try:
                 claude_text = _call_claude_cli(f"{system_prompt}\n\n{user_msg}")
+                if claude_text:
+                    # 성공 시 락 보유 중 공유 예산 원장에 기록(단일 소스, 경쟁 방지).
+                    _record_claude_usage()
             finally:
                 _release_claude_lock(lock)
             if claude_text:

@@ -214,7 +214,9 @@ def main() -> int:
             comp = r.get("composite", {})
             prov = str(r.get("aiProvider"))
             if prov.startswith("claude"):
-                u = claude_usage.record(1)
+                # 카운트는 market_compass 가 호출 지점에서 원장에 이미 기록함(단일 소스).
+                # 여기선 표시용으로 재조회만 한다(이중 카운트 방지).
+                u = claude_usage.read()
                 claude_used += 1
                 note = f" | claude 예산 주간 {u['weekCount']}/{weekly_cap} 일일 {u['dayCount']}/{daily_cap}"
             else:

@@ -90,11 +90,8 @@ function Read-Usage {
   return $u
 }
 
-function Save-Usage($u) {
-  $u.updatedAt = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
-  try { ($u | ConvertTo-Json -Compress) | Set-Content -Path $usageFile -Encoding UTF8 }
-  catch { Log "usage 파일 저장 실패: $($_.Exception.Message)" }
-}
+# (Save-Usage 제거됨) 원장 쓰기는 backend/market_compass._record_claude_usage 가 호출 지점에서
+# 단일 소스로 담당한다. 이 스크립트는 Read-Usage 로 재조회만 해 윈도우 게이팅·표시에 쓴다.
 
 # 유휴 대기 — total 초를 5초 청크로 쪼개 대기하되, 입력이 감지되면 즉시 $false 반환(중단 신호).
 function Wait-WhileIdle([int]$total) {
@@ -150,8 +147,9 @@ function Invoke-FillWindow {
     if (-not $result) { $result = ($out | Select-Object -Last 1) }
 
     switch ($rc) {
-      0 {  # claude(MAX)가 narrative 생성 → 사용 카운트 증가
-        $claudeCalls++; $usage.weekCount++; $usage.dayCount++; Save-Usage $usage
+      0 {  # claude(MAX)가 narrative 생성 — 카운트는 backend/market_compass 가 호출 지점에서
+           # 공유 원장에 이미 기록함(단일 소스). 여기선 재조회만 해 표시/게이팅에 반영(이중 카운트 방지).
+        $claudeCalls++; $usage = Read-Usage
         Log "[$i/$($codes.Count)] $result | claude:max ✅ (주간 $($usage.weekCount)/$WeeklyCap, 일일 $($usage.dayCount)/$DailyCap)"
       }
       1 { Log "[$i/$($codes.Count)] $result | 폴백 생성(claude 외) — 카운트 미증가" }
