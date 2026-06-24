@@ -100,7 +100,12 @@ def _run_list(argv: list[str]) -> int:
 
 def _run_code(code: str) -> int:
     import stock_compass
+    import market_compass as mc
     from exclusion_engine import ExcludedStockError
+
+    # 이 프로세스를 'idle 필러 경로'로 표시 — CLAUDE_NARRATIVE_PATH=idle_only 정책에서
+    # claude 1순위를 허용하는 유일한 경로다(정규 배치/서버는 opt-in 하지 않아 gemini/groq).
+    mc.set_claude_idle_optin(True)
 
     try:
         r = stock_compass.analyze_stock(code, with_ai=True)

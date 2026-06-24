@@ -22,14 +22,23 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import httpx
 
 from settings import settings
+
+# Windows 파일락(claude 전역 직렬화)용. 윈도우 전용 시스템이지만 비윈도우에서 import 실패해도
+# 모듈 로드는 깨지지 않도록 가드 — msvcrt 부재 시 직렬화 없이 통과(개발 편의).
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - 비윈도우
+    msvcrt = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # 캐시 (장중 30분 / 장외 8시간 — LLM 호출 비용 절약)
@@ -507,6 +516,12 @@ def _slim_context_for_groq(context_json: str, budget: int) -> tuple[str, list[st
 # 전제라 락 없이 단순 전역으로 충분하다.
 _claude_runtime_enabled = True
 
+# narrative claude 경로 게이트(settings.claude_narrative_path == "idle_only"):
+# 정규 배치/온디맨드 경로는 claude 를 쓰지 않고(동시성 충돌 원천 제거), idle 필러
+# (scripts/narrate_one.py, 단일 프로세스·직렬)만 이 플래그를 켜서 주도주 예산 내로 claude
+# 품질 narrative 를 채운다. "all" 모드에선 무시(모든 경로가 claude 1순위 시도).
+_claude_idle_optin = False
+
 
 def set_claude_runtime(enabled: bool) -> None:
     """이 프로세스의 claude 1순위 사용 여부를 런타임에 토글. (배치 예산 가드용)"""
@@ -514,8 +529,110 @@ def set_claude_runtime(enabled: bool) -> None:
     _claude_runtime_enabled = bool(enabled)
 
 
+def set_claude_idle_optin(enabled: bool) -> None:
+    """이 프로세스를 'idle 필러 경로'로 표시 — idle_only 정책에서 claude 사용을 허용한다.
+
+    narrate_one.py(idle 스케줄러 헬퍼)만 호출한다. 정규 배치/서버 경로는 호출하지 않으므로
+    idle_only 정책에서 claude 를 시도하지 않고 곧장 gemini/groq 로 간다(조용히).
+    """
+    global _claude_idle_optin
+    _claude_idle_optin = bool(enabled)
+
+
+# claude 사용량 공유 원장(scripts/claude_usage.py) 지연 로딩. 배치/필러 경로는 sys.path 에
+# scripts 가 있어 바로 import 되고, 백엔드 서버 경로는 여기서 scripts 를 path 에 얹어 import 한다.
+# False = 이전에 import 실패(원장 미가용) — 예산 판정 불가 시 호출측 게이팅에 위임한다.
+_claude_usage_mod = None
+
+
+def _get_claude_usage():
+    global _claude_usage_mod
+    if _claude_usage_mod is not None:
+        return _claude_usage_mod or None
+    try:
+        import claude_usage  # type: ignore
+    except ImportError:
+        scripts_dir = str(Path(__file__).resolve().parents[1] / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.append(scripts_dir)
+        try:
+            import claude_usage  # type: ignore
+        except Exception:  # noqa: BLE001
+            _claude_usage_mod = False
+            return None
+    _claude_usage_mod = claude_usage
+    return claude_usage
+
+
+def _claude_budget_exhausted() -> bool:
+    """일/주 캡 도달 여부(공유 원장 기준). 원장 미가용/오류 시 막지 않음(False)."""
+    cu = _get_claude_usage()
+    if cu is None:
+        return False
+    try:
+        return bool(cu.exhausted(settings.claude_daily_cap, settings.claude_weekly_cap))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _claude_active() -> bool:
-    return bool(settings.claude_cli_enabled) and _claude_runtime_enabled
+    """claude 1순위 narrative 를 '시도할 가치가 있는' 상태인지. False 면 호출부가 조용히 폴백."""
+    if not settings.claude_cli_enabled or not _claude_runtime_enabled:
+        return False
+    # 경로 게이트: idle_only 정책에선 idle 필러가 opt-in 한 프로세스에서만 claude 시도.
+    if settings.claude_narrative_path == "idle_only" and not _claude_idle_optin:
+        return False
+    # 예산 게이트: 일/주 캡 도달 시 조용히 폴백(에러 아님).
+    if _claude_budget_exhausted():
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# claude 전역 호출락 — 단일 MAX 구독 세션을 동시에 1건만 점유(동시성 1).
+# 여러 프로세스(수동 배치·정규 배치·idle 필러)가 동시에 claude.cmd 를 때리면 MAX rate/동시성을
+# 못 견뎌 대부분 실패하므로, 전역 파일락으로 직렬화한다. 락 획득 실패(타 프로세스 사용 중)면
+# 대기 없이 즉시 None 반환 → 호출부가 gemini/groq 로 강등. 프로세스가 죽어도 OS 가 파일락을
+# 자동 해제하므로 stale 락이 남지 않는다.
+# ---------------------------------------------------------------------------
+_CLAUDE_LOCK_PATH = Path(__file__).resolve().parents[1] / "logs" / "claude-call.lock"
+
+
+def _acquire_claude_lock():
+    """비대기(non-blocking) 전역 락 시도. 성공 시 파일 핸들, 점유 중이면 None.
+
+    msvcrt 부재(비윈도우) 시 직렬화 없이 통과하도록 핸들만 반환한다.
+    """
+    try:
+        _CLAUDE_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(_CLAUDE_LOCK_PATH, "a+b")
+    except OSError:
+        return None
+    if msvcrt is None:  # 비윈도우 — 직렬화 미적용, 그대로 진행
+        return fh
+    try:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)  # 1바이트 비대기 배타락
+    except OSError:
+        fh.close()
+        return None  # 다른 프로세스가 claude 점유 중
+    return fh
+
+
+def _release_claude_lock(fh) -> None:
+    if fh is None:
+        return
+    try:
+        if msvcrt is not None:
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+    finally:
+        try:
+            fh.close()
+        except OSError:
+            pass
 
 
 def _call_claude_cli(prompt: str, timeout: Optional[int] = None) -> Optional[str]:
@@ -575,13 +692,24 @@ def _call_llm(context_json: str, policy_active: bool = False) -> tuple[Optional[
 
     # Claude CLI (MAX 구독) — 1순위. 수치 정확·절제(없는 값 안 지어냄) 실측 우위로 머니시스템에
     # 적합. CLI 는 system/user 역할 분리가 없어 시스템 프롬프트를 프롬프트 본문에 합쳐 전달한다.
-    # 실패/타임아웃/비활성화 시 None → 아래 gemini/groq/openai 체인으로 강등(품질 회귀 없음).
-    # _claude_active(): 전역 설정 + 런타임 토글(배치 예산 가드) 둘 다 켜져 있을 때만 시도.
+    # _claude_active() 가 False(경로/예산/비활성)면 '조용히' 폴백 — 에러로 남기지 않는다.
+    # 활성이면 전역 호출락으로 동시성 1 보장: 타 프로세스가 점유 중이면 대기 없이 즉시 강등하고
+    # 정보 로그만 남긴다("claude busy"). 실패/타임아웃/빈 출력도 gemini/groq/openai 로 자연 강등.
     if _claude_active():
-        claude_text = _call_claude_cli(f"{system_prompt}\n\n{user_msg}")
-        if claude_text:
-            return claude_text, "claude:max"
-        errors.append("claude unavailable")
+        lock = _acquire_claude_lock()
+        if lock is None:
+            # 다른 프로세스가 claude 점유 중 — 대기 금지, 즉시 폴백(에러 아님, 정보 로그).
+            print("[market_compass] claude busy → gemini/groq 폴백", file=sys.stderr, flush=True)
+        else:
+            try:
+                claude_text = _call_claude_cli(f"{system_prompt}\n\n{user_msg}")
+            finally:
+                _release_claude_lock(lock)
+            if claude_text:
+                return claude_text, "claude:max"
+            # 실제 시도했으나 빈 출력/실패(타임아웃 등) — 폴백 진행. 동시성/예산 오염과 구분되는
+            # 드문 케이스라 'unavailable'(혼동 유발) 대신 'no-output' 으로 표기.
+            errors.append("claude no-output")
 
     # Gemini (2.5-flash 는 thinking 토큰을 쓰므로 출력 한도를 넉넉히)
     # 무료 티어 레이트리밋(429) 대비 1회 재시도.

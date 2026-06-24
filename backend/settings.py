@@ -95,6 +95,15 @@ class Settings:
     claude_daily_cap: int = int(os.getenv("CLAUDE_DAILY_CAP", "30") or "30")
     claude_weekly_cap: int = int(os.getenv("CLAUDE_WEEKLY_CAP", "150") or "150")
 
+    # claude narrative 경로 정책 — 단일 MAX 세션의 동시 호출 충돌을 원천 차단하는 스위치.
+    #   "idle_only"(기본·권장): 정규 배치/온디맨드는 claude 미사용(gemini/groq 점수+간이 narrative).
+    #                claude 품질 narrative 는 idle 필러(단일 프로세스, 직렬)에서만 주도주 예산 내로
+    #                채운다(market_compass.set_claude_idle_optin). 동시 호출 충돌·로그 오염 제거.
+    #   "all": 모든 경로가 claude 1순위 시도(레거시). 전역 호출락+공유 예산 원장으로 보호.
+    claude_narrative_path: str = (
+        os.getenv("CLAUDE_NARRATIVE_PATH", "idle_only").strip().lower() or "idle_only"
+    )
+
     # OpenAI (AI chart analysis)
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"

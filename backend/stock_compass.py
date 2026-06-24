@@ -487,6 +487,41 @@ def _us_lead_for_sector(sector: str | None):
     return us_lead.get_sector_lead_score(key)
 
 
+# 투자의견 → 강세도 점수(0~100, 중립 50). '기타'는 제외(방향성 없음).
+_OPINION_BULL = {"적극매수": 100.0, "매수": 75.0, "중립": 50.0, "매도": 25.0}
+
+
+def _research_features(code: str, entry_close: float | None) -> dict:
+    """증권사 리포트 컨센서스 → 예측 피처(0~100, 중립 50). 무데이터 키는 생략(중립 보간 위임).
+
+    리서치의견   = 투자의견 분포 가중 강세도
+    목표가리비전 = 최근 목표가 상향(up=100)/flat(50)/하향(down=0)
+    목표가상방   = clamp(50 + (median_tp/entry-1)*100)  — 컨센서스 목표가 대비 상방
+    """
+    out: dict[str, float] = {}
+    try:
+        import research_consensus
+        con = research_consensus.get_consensus(code)
+    except Exception:
+        return out
+    dist = con.get("opinion_dist") or {}
+    num = sum(_OPINION_BULL[k] * v for k, v in dist.items() if k in _OPINION_BULL)
+    den = sum(v for k, v in dist.items() if k in _OPINION_BULL)
+    if den:
+        out["리서치의견"] = round(num / den, 1)
+    rev = con.get("tp_revision_7d")
+    if rev in ("up", "flat", "down"):
+        out["목표가리비전"] = {"up": 100.0, "flat": 50.0, "down": 0.0}[rev]
+    mtp = con.get("median_tp")
+    if mtp and entry_close:
+        try:
+            up = (float(mtp) / float(entry_close) - 1.0) * 100.0
+            out["목표가상방"] = round(max(0.0, min(100.0, 50.0 + up)), 1)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+    return out
+
+
 def _signal_grounding(signal: str, score: float) -> dict | None:
     """과거 채점 실적(signal_outcomes)에서 이 시그널 유형의 적중률·표본수 산출.
 
@@ -587,6 +622,16 @@ def _log_signal_outcome(result: dict) -> None:
             if features is None:
                 features = {}
             features["US선행"] = us_lead_score
+    except Exception:
+        pass
+
+    # 증권사 리포트 컨센서스 (research_consensus) — 목표가·투자의견·리비전. 무데이터는 미주입.
+    try:
+        rf = _research_features(st.get("code"), entry_close)
+        if rf:
+            if features is None:
+                features = {}
+            features.update(rf)
     except Exception:
         pass
 
