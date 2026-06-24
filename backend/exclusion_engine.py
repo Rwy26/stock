@@ -89,8 +89,8 @@ def sector_etf_codes() -> set[str]:
 
         return {str(t).split(".")[0].strip() for t in scoring_engine.SECTOR_ETF_MAP.values()}
     except Exception:
-        # scoring_engine 로드 실패 시에도 동일 목록 유지 (KODEX 반도체/2차전지/K-바이오/K-방산/인공지능/미디어&엔터)
-        return {"091160", "305720", "244580", "459580", "476600", "140570"}
+        # scoring_engine 로드 실패 시에도 동일 목록 유지 (KODEX 반도체/2차전지/K-바이오/K-방산/로봇액티브/미디어&엔터)
+        return {"091160", "305720", "244580", "459580", "445290", "140570"}
 
 
 # ─── 주도주 보호 인덱스 (market_leaders) ─────────────────────────────────────

@@ -66,7 +66,7 @@ SECTOR_ETFS: dict[str, str] = {
     "2차전지":  "305720.KS",   # KODEX 2차전지산업
     "바이오":   "244580.KS",   # KODEX K-바이오
     "방산":     "459580.KS",   # KODEX K-방산
-    "AI/로봇":  "476600.KS",   # KODEX 인공지능
+    "AI/로봇":  "445290.KS",   # KODEX 로봇액티브 (구 476600 KODEX 인공지능은 폐지/코드 재배정 → 네이버·yfinance 무데이터)
     "엔터":     "140570.KS",   # KODEX 미디어&엔터
 }
 
@@ -152,6 +152,25 @@ def _yf_ticker(code: str) -> str:
     if code.isdigit() and len(code) == 6:
         return f"{code}.KS"
     return code
+
+
+def _to_series(df: pd.DataFrame, col: str) -> pd.Series:
+    """yfinance OHLCV DataFrame에서 단일 가격 컬럼을 1차원 Series로 추출.
+
+    yfinance는 단일 티커라도 버전/옵션에 따라 MultiIndex 컬럼
+    ``(col, ticker)`` 또는 평면 컬럼 ``col`` 을 반환한다. 두 경우 모두
+    Series로 정규화하고, 컬럼이 없으면 빈 Series를 돌려준다.
+    (예전엔 미정의여서 _etf_alpha_vs_kospi가 항상 None을 반환했음.)
+    """
+    if df is None or len(df) == 0:
+        return pd.Series(dtype="float64")
+    try:
+        if isinstance(df.columns, pd.MultiIndex):
+            sub = df.xs(col, axis=1, level=0)
+            return sub.iloc[:, 0] if getattr(sub, "ndim", 1) == 2 else sub
+        return df[col]
+    except (KeyError, IndexError):
+        return pd.Series(dtype="float64")
 
 
 # ─── 기술적 지표 헬퍼 ────────────────────────────────────────────────────────
@@ -1034,7 +1053,7 @@ SECTOR_ETF_MAP: dict[str, str] = {
     "2차전지":   "305720.KS",
     "바이오":    "244580.KS",
     "방산":      "459580.KS",
-    "AI/로봇":   "476600.KS",
+    "AI/로봇":   "445290.KS",   # KODEX 로봇액티브 (구 476600 KODEX 인공지능 폐지/재배정 교체)
     "엔터":      "140570.KS",
 }
 
