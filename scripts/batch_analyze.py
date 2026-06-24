@@ -178,8 +178,13 @@ def main() -> int:
 
     args = _parse_args()
     tier = args.tier or "all"
-    daily_cap = settings.claude_daily_cap
-    weekly_cap = settings.claude_weekly_cap
+    cap_sec = settings.claude_5h_budget_sec
+    win_sec = settings.claude_5h_window_sec
+
+    # 정규 배치도 claude 1순위 사용(claude_narrative_path='all'). 속도·한도는 market_compass
+    # 내부의 전역 호출락(동시성 1) + 롤링 5h 예산 게이트가 자동 통제하고, 예산 초과분은
+    # gemini/groq 로 자연 강등된다. 이 프로세스는 claude 런타임을 켠 채로 둔다(기본 True).
+    mc.set_claude_runtime(True)
 
     log(f"=== 배치 분석 시작 (tier={tier}, offset={args.offset}, "
         f"limit={args.limit or '끝까지'}) ===")
@@ -193,10 +198,10 @@ def main() -> int:
     end = (start + args.limit) if args.limit and args.limit > 0 else full
     queue = full_queue[start:end]
 
-    u = claude_usage.read()
+    s0 = claude_usage.summary(cap_sec, win_sec)
     log(f"대기열: 전체 {full}건 중 [{start}:{end}] = {len(queue)}건 처리 "
-        f"(ETF {len(ETFS)} 포함) | claude 예산 주간 {u['weekCount']}/{weekly_cap}, "
-        f"일일 {u['dayCount']}/{daily_cap}")
+        f"(ETF {len(ETFS)} 포함) | claude 롤링5h {s0['rollingSec']:.0f}/{cap_sec}s "
+        f"({s0['pct']:.0f}%)")
 
     from exclusion_engine import ExcludedStockError
 
@@ -205,22 +210,20 @@ def main() -> int:
         if done_today(code):
             skip += 1
             continue
-        # MAX 예산 가드 — 소진 시 이후 종목은 claude 끄고 gemini/groq 로 강등(무중단).
-        # idle 필러와 같은 원장을 공유하므로 자동 경로 전체의 claude 사용량이 캡 아래로 묶인다.
-        budget_left = not claude_usage.exhausted(daily_cap, weekly_cap)
-        mc.set_claude_runtime(budget_left)
+        # claude 사용 여부는 market_compass 내부 게이트(롤링 5h 예산 + 전역 호출락)가 결정한다.
+        # 예산 소진/점유 중이면 자동으로 gemini/groq 로 강등(무중단) — 여기서 따로 끄지 않는다.
         try:
             r = stock_compass.analyze_stock(code, with_ai=True)
             comp = r.get("composite", {})
             prov = str(r.get("aiProvider"))
             if prov.startswith("claude"):
-                # 카운트는 market_compass 가 호출 지점에서 원장에 이미 기록함(단일 소스).
-                # 여기선 표시용으로 재조회만 한다(이중 카운트 방지).
-                u = claude_usage.read()
+                # 소요초는 market_compass 가 호출 지점에서 원장에 이미 기록함(단일 소스).
+                # 여기선 표시용으로 롤링 사용량만 재조회한다.
+                s = claude_usage.summary(cap_sec, win_sec)
                 claude_used += 1
-                note = f" | claude 예산 주간 {u['weekCount']}/{weekly_cap} 일일 {u['dayCount']}/{daily_cap}"
+                note = f" | claude 롤링5h {s['rollingSec']:.0f}/{cap_sec}s ({s['pct']:.0f}%)"
             else:
-                note = " | 예산소진→폴백" if not budget_left else ""
+                note = " | claude 예산소진/점유→폴백"
             log(f"[{i}/{len(queue)}] {name}({code}) → {comp.get('score')}점 "
                 f"{comp.get('grade')} | LLM {prov}{note}")
             ok += 1

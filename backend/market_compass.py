@@ -565,28 +565,40 @@ def _get_claude_usage():
 
 
 def _claude_budget_exhausted() -> bool:
-    """일/주 캡 도달 여부(공유 원장 기준). 원장 미가용/오류 시 막지 않음(False)."""
+    """롤링 5시간 예산 소진 여부(공유 원장 기준). 원장 미가용/오류 시 막지 않음(False).
+
+    최근 settings.claude_5h_window_sec(기본 5h) 안에 누적된 claude 소요초 합이
+    settings.claude_budget_use_ratio(기본 97%) × settings.claude_5h_budget_sec 에 도달하면
+    True → 그 창 동안만 claude 스킵. 시간이 흘러 사용량이 빠지면 자동 False(재개).
+    """
     cu = _get_claude_usage()
     if cu is None:
         return False
     try:
-        return bool(cu.exhausted(settings.claude_daily_cap, settings.claude_weekly_cap))
+        return bool(
+            cu.rolling_exhausted(
+                settings.claude_5h_budget_sec,
+                settings.claude_5h_window_sec,
+                settings.claude_budget_use_ratio,
+            )
+        )
     except Exception:  # noqa: BLE001
         return False
 
 
-def _record_claude_usage() -> None:
-    """claude 호출 1건을 공유 원장(logs/claude-usage.json)에 누적. 원장 미가용 시 무시.
+def _record_claude_usage(sec: float = 0.0) -> None:
+    """claude 호출 1건(소요 sec초)을 공유 원장(logs/claude-usage.json)에 누적. 미가용 시 무시.
 
     실제 호출 지점에서 기록하는 '단일 소스' — 어느 경로(배치/idle 필러/서버)가 claude 를
-    쓰든 여기서만 카운트한다. 호출부는 더 이상 따로 증가시키지 않고 원장을 재조회만 한다.
+    쓰든 여기서만 기록한다. sec(벽시계 소요초)는 롤링 5h 예산 게이트의 핵심 입력이다.
+    호출부는 더 이상 따로 증가시키지 않고 원장을 재조회만 한다.
     (호출은 전역 호출락으로 직렬화되므로 이 record 의 read-modify-write 도 경쟁하지 않는다.)
     """
     cu = _get_claude_usage()
     if cu is None:
         return
     try:
-        cu.record(1)
+        cu.record(sec=sec, n=1)
     except Exception:  # noqa: BLE001
         pass
 
@@ -693,10 +705,16 @@ def _call_claude_cli(prompt: str, timeout: Optional[int] = None) -> Optional[str
     return text or None
 
 
-def _call_llm(context_json: str, policy_active: bool = False) -> tuple[Optional[str], str]:
+def _call_llm(
+    context_json: str, policy_active: bool = False, simple: bool = False
+) -> tuple[Optional[str], str]:
     """Claude(MAX) > Gemini > Groq > OpenAI 우선순위로 종합 리포트 생성. (리포트, 프로바이더) 반환.
 
     실패 시 다음 프로바이더로 폴백하고, 전부 실패하면 마지막 오류를 프로바이더 문자열에 담는다.
+
+    simple=True: 고급 추론이 불필요한 단순 작업(짧은 요약·분류·인터랙티브 응답 등)은 claude 를
+    아예 시도하지 않고 gemini/groq 로 직행한다 — 한정된 MAX 5h 예산을 리포트·고급추론에 아끼고,
+    인터랙티브 경로(claude -p ≈ 190s)의 지연/타임아웃을 피한다.
     """
     user_msg = (
         "다음은 실시간 계산된 시장 데이터다. 이 데이터만 근거로 분석 절차를 수행하라.\n\n"
@@ -711,7 +729,8 @@ def _call_llm(context_json: str, policy_active: bool = False) -> tuple[Optional[
     # _claude_active() 가 False(경로/예산/비활성)면 '조용히' 폴백 — 에러로 남기지 않는다.
     # 활성이면 전역 호출락으로 동시성 1 보장: 타 프로세스가 점유 중이면 대기 없이 즉시 강등하고
     # 정보 로그만 남긴다("claude busy"). 실패/타임아웃/빈 출력도 gemini/groq/openai 로 자연 강등.
-    if _claude_active():
+    # simple=True(단순작업)면 claude 시도 자체를 건너뛴다 — 예산 절약 + 인터랙티브 지연 회피.
+    if not simple and _claude_active():
         lock = _acquire_claude_lock()
         if lock is None:
             # 다른 프로세스가 claude 점유 중 — 대기 금지, 즉시 폴백(에러 아님, 정보 로그).
@@ -719,10 +738,12 @@ def _call_llm(context_json: str, policy_active: bool = False) -> tuple[Optional[
         else:
             claude_text = None
             try:
+                _t0 = time.monotonic()
                 claude_text = _call_claude_cli(f"{system_prompt}\n\n{user_msg}")
                 if claude_text:
-                    # 성공 시 락 보유 중 공유 예산 원장에 기록(단일 소스, 경쟁 방지).
-                    _record_claude_usage()
+                    # 성공 시 락 보유 중 공유 예산 원장에 (소요초와 함께) 기록 — 롤링 5h 게이트의
+                    # 단일 소스. 소요초는 다음 호출들의 예산 판정에 누적된다.
+                    _record_claude_usage(time.monotonic() - _t0)
             finally:
                 _release_claude_lock(lock)
             if claude_text:

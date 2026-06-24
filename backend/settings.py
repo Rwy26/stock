@@ -86,22 +86,33 @@ class Settings:
     # idle 스케줄러는 유휴시간에 돌아 여유가 있고, 타임아웃 시 gemini/groq 로 자연 강등된다.
     claude_cli_timeout: int = int(os.getenv("CLAUDE_CLI_TIMEOUT", "300") or "300")
 
-    # MAX 구독 claude 호출 예산(일/주) — 단일 소스. 배치(scripts/batch_analyze.py)와 idle
-    # 필러(scripts/idle_narrative_filler.ps1)가 공유 원장(logs/claude-usage.json)에 같은 캡을
-    # 적용해 자동 경로 전체의 claude 사용량을 묶어 제한한다. 실측: 풀리포트 1건 ≈ 190s 생성.
-    # 106종목 전량을 매일 claude 로 돌리면 ≈ 39h/주로 5h/주 MAX 한도를 크게 초과하므로,
-    # 주도주 위주로 예산 내에서만 claude 품질을 부여하고 나머지는 gemini/groq 로 강등한다.
-    # 실제 소비를 claude-usage.json 으로 관찰한 뒤 이 숫자를 조정할 것.
-    claude_daily_cap: int = int(os.getenv("CLAUDE_DAILY_CAP", "30") or "30")
-    claude_weekly_cap: int = int(os.getenv("CLAUDE_WEEKLY_CAP", "150") or "150")
+    # MAX 구독 claude 호출 예산 — **롤링 5시간 창**(단일 소스). 배치(scripts/batch_analyze.py)·
+    # idle 필러(scripts/idle_narrative_filler.ps1)·백엔드 서버가 공유 원장(logs/claude-usage.json)
+    # 에 각 claude 호출의 (타임스탬프, 소요초)를 누적하고, 최근 claude_5h_window_sec(기본 5h)
+    # 안에 쌓인 소요초 합이 capacity 의 use_ratio(기본 97%)에 도달하면 그 창 동안만 claude 를
+    # 끈다(gemini/groq 강등). 창이 흐르며 오래된 호출이 빠지면 자동 재개. 실측: 풀리포트 1건
+    # ≈ 190s. 전역 호출락(동시성 1)이 속도를, 이 게이트가 누적 한도를 통제한다.
+    #
+    # claude_5h_budget_sec = 5시간 창에서 claude -p 에 쓸 수 있는 누적 벽시계 초(capacity).
+    #   MAX 한도를 직접 알 수 없어 **보수적 추정값**으로 시작하고, claude-usage.json 실측으로
+    #   조정한다(과도 설정 시 사용자 인터랙티브 사용을 침범). 0 이면 게이트 비활성(무제한).
+    #   3% 헤드룸(use_ratio=0.97)은 인터랙티브용으로 비워 둔다.
+    claude_5h_budget_sec: int = int(os.getenv("CLAUDE_5H_BUDGET_SEC", "3600") or "3600")
+    claude_5h_window_sec: int = int(os.getenv("CLAUDE_5H_WINDOW_SEC", "18000") or "18000")
+    claude_budget_use_ratio: float = float(
+        os.getenv("CLAUDE_BUDGET_USE_RATIO", "0.97") or "0.97"
+    )
+    # [레거시·미사용] 일/주 카운트 캡 — 롤링 5h 예산으로 대체됨. 하위 호환을 위해 필드만 유지.
+    claude_daily_cap: int = int(os.getenv("CLAUDE_DAILY_CAP", "0") or "0")
+    claude_weekly_cap: int = int(os.getenv("CLAUDE_WEEKLY_CAP", "0") or "0")
 
     # claude narrative 경로 정책 — 단일 MAX 세션의 동시 호출 충돌을 원천 차단하는 스위치.
-    #   "idle_only"(기본·권장): 정규 배치/온디맨드는 claude 미사용(gemini/groq 점수+간이 narrative).
-    #                claude 품질 narrative 는 idle 필러(단일 프로세스, 직렬)에서만 주도주 예산 내로
-    #                채운다(market_compass.set_claude_idle_optin). 동시 호출 충돌·로그 오염 제거.
-    #   "all": 모든 경로가 claude 1순위 시도(레거시). 전역 호출락+공유 예산 원장으로 보호.
+    #   "all"(기본·2026-06 공격적 전환): 모든 경로(정규 배치·서버·idle 필러)가 claude 1순위 시도.
+    #                전역 호출락(동시성 1)+롤링 5h 예산 게이트가 충돌·한도를 자동 통제하고,
+    #                예산 초과분은 gemini/groq 로 자연 강등한다. 단순작업은 simple=True 로 우회.
+    #   "idle_only": 정규 배치/온디맨드는 claude 미사용, idle 필러(opt-in)에서만 claude 승급.
     claude_narrative_path: str = (
-        os.getenv("CLAUDE_NARRATIVE_PATH", "idle_only").strip().lower() or "idle_only"
+        os.getenv("CLAUDE_NARRATIVE_PATH", "all").strip().lower() or "all"
     )
 
     # OpenAI (AI chart analysis)

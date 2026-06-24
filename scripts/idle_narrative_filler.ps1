@@ -29,10 +29,12 @@ param(
   [int]$CheckIntervalSec = 60,    # 유휴 점검 간격(초)
   [int]$RequiredMisses   = 10,    # 연속 무반응 N회 → 채우기 시작(기본 ~10분)
   [int]$MaxPerWindow     = 20,    # 1회 idle 윈도우당 처리 상한(5시간 창 보호)
-  # 일/주 캡은 배치(settings.claude_daily_cap/weekly_cap)와 단일 소스 공유 — 환경변수
-  # CLAUDE_DAILY_CAP / CLAUDE_WEEKLY_CAP 우선, 미설정 시 settings 기본값과 동일(30/150).
-  [int]$DailyCap         = $(if ($env:CLAUDE_DAILY_CAP)  { [int]$env:CLAUDE_DAILY_CAP }  else { 30 }),
-  [int]$WeeklyCap        = $(if ($env:CLAUDE_WEEKLY_CAP) { [int]$env:CLAUDE_WEEKLY_CAP } else { 150 }),
+  # [레거시] 일/주 카운트 캡 — 롤링 5h 예산 게이트(backend/market_compass._claude_budget_exhausted)
+  # 로 대체됨. 0(기본)이면 이 스크립트의 count 캡을 끄고 rolling 게이트에 위임한다. narrate_one
+  # --code 호출이 예산 소진 시 자동으로 폴백(exit 1)을 받으므로 claude 사용은 전역 예산 내로 묶인다.
+  # >0 으로 설정하면 추가 보조 브레이크로 동작(환경변수 CLAUDE_DAILY_CAP/CLAUDE_WEEKLY_CAP).
+  [int]$DailyCap         = $(if ($env:CLAUDE_DAILY_CAP)  { [int]$env:CLAUDE_DAILY_CAP }  else { 0 }),
+  [int]$WeeklyCap        = $(if ($env:CLAUDE_WEEKLY_CAP) { [int]$env:CLAUDE_WEEKLY_CAP } else { 0 }),
   [int]$StockIntervalSec = 40,    # 종목 간 간격(초) — KIS 일봉 + MAX rate 보호
   [switch]$Once                   # 1회 윈도우만 실행 후 종료(테스트용)
 )
@@ -108,8 +110,8 @@ function Wait-WhileIdle([int]$total) {
 # 한 번의 채우기 윈도우 실행. 처리한 claude 호출 수 반환.
 function Invoke-FillWindow {
   $usage = Read-Usage
-  if ($usage.weekCount -ge $WeeklyCap) { Log "주간 상한 도달($($usage.weekCount)/$WeeklyCap) — 윈도우 건너뜀"; return 0 }
-  if ($usage.dayCount  -ge $DailyCap)  { Log "일일 상한 도달($($usage.dayCount)/$DailyCap) — 윈도우 건너뜀"; return 0 }
+  if ($WeeklyCap -gt 0 -and $usage.weekCount -ge $WeeklyCap) { Log "주간 상한 도달($($usage.weekCount)/$WeeklyCap) — 윈도우 건너뜀"; return 0 }
+  if ($DailyCap  -gt 0 -and $usage.dayCount  -ge $DailyCap)  { Log "일일 상한 도달($($usage.dayCount)/$DailyCap) — 윈도우 건너뜀"; return 0 }
 
   # 우선순위 대상 목록(관심종목·발행추천 먼저) — 윈도우 상한만큼만 요청
   $codes = @()
@@ -131,9 +133,10 @@ function Invoke-FillWindow {
       Log "입력 감지 — 채우기 일시정지($i 번째 직전, 처리 $done / claude $claudeCalls)"
       break
     }
-    # 한도 재확인(윈도우 진행 중 일/주 경계 변동 대비)
+    # 한도 재확인(윈도우 진행 중 일/주 경계 변동 대비) — 캡 0 이면 rolling 게이트에 위임(스킵)
     $usage = Read-Usage
-    if ($usage.weekCount -ge $WeeklyCap -or $usage.dayCount -ge $DailyCap) {
+    if (($WeeklyCap -gt 0 -and $usage.weekCount -ge $WeeklyCap) -or `
+        ($DailyCap  -gt 0 -and $usage.dayCount  -ge $DailyCap)) {
       Log "한도 도달(주간 $($usage.weekCount)/$WeeklyCap, 일일 $($usage.dayCount)/$DailyCap) — 윈도우 중단"
       break
     }

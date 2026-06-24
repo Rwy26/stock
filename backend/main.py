@@ -7306,7 +7306,9 @@ def _ai_search_core(query: str, history: list, forced_code: str | None = None) -
     saved = market_compass._SYSTEM_PROMPT
     try:
         market_compass._SYSTEM_PROMPT = _SEARCH_SYSTEM_PROMPT
-        answer, provider = market_compass._call_llm(user_content)
+        # 인터랙티브 대화형 검색 — 빠른 응답 필요(터널 타임아웃 회피)·고급추론 불필요라
+        # claude(≈190s) 건너뛰고 gemini/groq 로 직행(simple). MAX 5h 예산은 리포트에 아낀다.
+        answer, provider = market_compass._call_llm(user_content, simple=True)
     finally:
         market_compass._SYSTEM_PROMPT = saved
 
