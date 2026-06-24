@@ -34,6 +34,7 @@ score 컬럼 매핑 (IndicatorScore):
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
@@ -101,6 +102,23 @@ class StockScoreResult:
             self.score_profit * W_PROFIT +
             self.score_tech   * W_TECH
         )
+
+
+def _json_safe(obj: Any) -> Any:
+    """details 를 MySQL JSON 컬럼/표준 JSON 에 안전하게 — NaN·±Infinity 제거.
+
+    pandas/yfinance 계산값이 NaN(±inf)이면 json.dumps 가 비표준 리터럴 `NaN`/`Infinity`
+    를 내보내고, MySQL JSON 컬럼이 이를 거부한다(pymysql err 3140 'Invalid JSON text').
+    dict/list 를 재귀 순회해 비유한(非有限) float 을 None 으로 치환한다. numpy float 는
+    파이썬 float 의 서브클래스라 math.isfinite 로 동일 처리된다.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
 
 
 # ─── OHLCV 로딩 ───────────────────────────────────────────────────────────────
@@ -923,6 +941,8 @@ def compute_stock_score(
         },
     }
 
+    # NaN/Infinity 가 섞이면 MySQL JSON 저장이 거부되므로(err 3140) 저장 전 정규화.
+    result.details = _json_safe(result.details)
     return result
 
 

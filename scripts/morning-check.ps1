@@ -112,6 +112,16 @@ try {
   Fail ("main.py compile check failed: " + $_.Exception.Message)
 }
 
+# 9) IndicatorScore 신선도 (3-Tier 스코어링 정체 조기 감지 — MOON-STOCK-Scoring/run_scoring.py)
+try {
+  $freshScript = Join-Path $PWD 'scripts\check_scoring_freshness.py'
+  $fresh = & $pythonExe $freshScript --max-age 3 2>&1
+  if ($LASTEXITCODE -eq 0) { Ok ("scoring freshness: " + ($fresh -join ' ')) }
+  else                     { Warn ("scoring stale: " + ($fresh -join ' ')) }
+} catch {
+  Warn ("scoring freshness check failed (non-fatal): " + $_.Exception.Message)
+}
+
 $summary = if ($HadFail) { 'FAIL' } else { 'PASS' }
 Write-Log 'INFO' ("=== Morning check done: {0} ===" -f $summary)
 
