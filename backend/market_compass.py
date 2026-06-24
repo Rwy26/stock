@@ -501,6 +501,23 @@ def _slim_context_for_groq(context_json: str, budget: int) -> tuple[str, list[st
     return out[:budget] + "\n…(groq 한도 초과로 절단)", dropped + ["<hard-cap>"]
 
 
+# 런타임 claude on/off — settings.claude_cli_enabled(전역 기본값) 위에 얹는 프로세스 단위
+# 스위치. 배치(batch_analyze.py)가 MAX 예산 소진 시 이후 종목에 대해 claude 를 끄고
+# gemini/groq 로 강등시키는 데 쓴다. 기본 True(설정값 그대로). 단일 프로세스 내 직렬 호출
+# 전제라 락 없이 단순 전역으로 충분하다.
+_claude_runtime_enabled = True
+
+
+def set_claude_runtime(enabled: bool) -> None:
+    """이 프로세스의 claude 1순위 사용 여부를 런타임에 토글. (배치 예산 가드용)"""
+    global _claude_runtime_enabled
+    _claude_runtime_enabled = bool(enabled)
+
+
+def _claude_active() -> bool:
+    return bool(settings.claude_cli_enabled) and _claude_runtime_enabled
+
+
 def _call_claude_cli(prompt: str, timeout: Optional[int] = None) -> Optional[str]:
     """claude -p (Claude Code MAX 구독) 로 narrative 생성. stdin 으로 프롬프트 전달(UTF-8).
 
@@ -559,7 +576,8 @@ def _call_llm(context_json: str, policy_active: bool = False) -> tuple[Optional[
     # Claude CLI (MAX 구독) — 1순위. 수치 정확·절제(없는 값 안 지어냄) 실측 우위로 머니시스템에
     # 적합. CLI 는 system/user 역할 분리가 없어 시스템 프롬프트를 프롬프트 본문에 합쳐 전달한다.
     # 실패/타임아웃/비활성화 시 None → 아래 gemini/groq/openai 체인으로 강등(품질 회귀 없음).
-    if settings.claude_cli_enabled:
+    # _claude_active(): 전역 설정 + 런타임 토글(배치 예산 가드) 둘 다 켜져 있을 때만 시도.
+    if _claude_active():
         claude_text = _call_claude_cli(f"{system_prompt}\n\n{user_msg}")
         if claude_text:
             return claude_text, "claude:max"

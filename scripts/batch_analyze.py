@@ -8,7 +8,14 @@
   - market_compass(시장 차원)는 30분 캐시 재사용 — 종목마다 재계산하지 않음
   - LLM 실패(레이트리밋) 시에도 결정론 데이터는 저장하고 다음 종목 진행
 
-스케줄: MOON-STOCK-Batch-Analyze (매일 21:00 — 장 마감·저녁 동기화 이후)
+티어/예산:
+  - --offset/--limit 로 우선순위 큐(주도 섹터순×시총순)를 잘라 야간 분산 실행한다.
+  - claude(MAX) 호출은 claude_usage.py 공유 원장(logs/claude-usage.json)으로 idle 필러와
+    같은 일/주 캡(settings.claude_daily_cap/weekly_cap)을 적용 — 예산 소진 시 그 종목부터는
+    claude 를 끄고 gemini/groq 로 강등(무중단). 주도주 위주로 예산 내 claude 품질 부여.
+
+스케줄(staggered, install-batch-analyze-tiered.ps1):
+  21:00 tier=leaders [0:30]  /  01:00 tier=next [30:70]  /  03:00 tier=rest [70:]
 로그: logs/batch-analyze.log
 """
 
@@ -25,6 +32,7 @@ if hasattr(sys.stdout, "reconfigure"):
 REPO = Path(__file__).resolve().parents[1]
 BACKEND = REPO / "backend"
 sys.path.insert(0, str(BACKEND))
+sys.path.insert(0, str(REPO / "scripts"))
 
 import httpx  # noqa: E402
 
@@ -150,29 +158,69 @@ def done_today(code: str) -> bool:
     return (row + timedelta(hours=9)).date() == date.today()
 
 
+def _parse_args() -> "argparse.Namespace":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="전 관심종목 AI 분석 배치(티어/예산 지원)")
+    ap.add_argument("--offset", type=int, default=0,
+                    help="우선순위 큐 시작 인덱스(ETF 포함 절대 위치). 기본 0")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="이 티어에서 처리할 개수(0=offset 부터 끝까지)")
+    ap.add_argument("--tier", default="", help="로그용 티어 라벨(예: leaders/next/rest)")
+    return ap.parse_args()
+
+
 def main() -> int:
     import stock_compass
+    import market_compass as mc
+    import claude_usage
+    from settings import settings
 
-    log("=== 배치 분석 시작 ===")
+    args = _parse_args()
+    tier = args.tier or "all"
+    daily_cap = settings.claude_daily_cap
+    weekly_cap = settings.claude_weekly_cap
+
+    log(f"=== 배치 분석 시작 (tier={tier}, offset={args.offset}, "
+        f"limit={args.limit or '끝까지'}) ===")
     if not wait_for_backend(max_wait=300):
         log("=== 배치 중단: 백엔드 5분 내 미기동 — 백엔드 기동 후 재실행 필요 ===")
         return 2  # 백엔드 미기동 명시적 종료코드
     ensure_etf_stock_rows()
-    queue = build_queue()
-    log(f"대기열: {len(queue)}건 (ETF {len(ETFS)} + 종목 {len(queue) - len(ETFS)})")
+    full_queue = build_queue()
+    full = len(full_queue)
+    start = max(0, args.offset)
+    end = (start + args.limit) if args.limit and args.limit > 0 else full
+    queue = full_queue[start:end]
+
+    u = claude_usage.read()
+    log(f"대기열: 전체 {full}건 중 [{start}:{end}] = {len(queue)}건 처리 "
+        f"(ETF {len(ETFS)} 포함) | claude 예산 주간 {u['weekCount']}/{weekly_cap}, "
+        f"일일 {u['dayCount']}/{daily_cap}")
 
     from exclusion_engine import ExcludedStockError
 
-    ok = fail = skip = 0
+    ok = fail = skip = claude_used = 0
     for i, (code, name) in enumerate(queue, start=1):
         if done_today(code):
             skip += 1
             continue
+        # MAX 예산 가드 — 소진 시 이후 종목은 claude 끄고 gemini/groq 로 강등(무중단).
+        # idle 필러와 같은 원장을 공유하므로 자동 경로 전체의 claude 사용량이 캡 아래로 묶인다.
+        budget_left = not claude_usage.exhausted(daily_cap, weekly_cap)
+        mc.set_claude_runtime(budget_left)
         try:
             r = stock_compass.analyze_stock(code, with_ai=True)
             comp = r.get("composite", {})
+            prov = str(r.get("aiProvider"))
+            if prov.startswith("claude"):
+                u = claude_usage.record(1)
+                claude_used += 1
+                note = f" | claude 예산 주간 {u['weekCount']}/{weekly_cap} 일일 {u['dayCount']}/{daily_cap}"
+            else:
+                note = " | 예산소진→폴백" if not budget_left else ""
             log(f"[{i}/{len(queue)}] {name}({code}) → {comp.get('score')}점 "
-                f"{comp.get('grade')} | LLM {r.get('aiProvider')}")
+                f"{comp.get('grade')} | LLM {prov}{note}")
             ok += 1
         except ExcludedStockError:
             log(f"[{i}/{len(queue)}] {name}({code}) SKIP: 제외종목")
@@ -183,7 +231,8 @@ def main() -> int:
             fail += 1
         time.sleep(INTERVAL)
 
-    log(f"=== 배치 완료: 성공 {ok} / 실패 {fail} / 스킵(당일 기분석) {skip} ===")
+    log(f"=== 배치 완료(tier={tier}): 성공 {ok} / 실패 {fail} / "
+        f"스킵(당일 기분석) {skip} / claude {claude_used} ===")
     return 0
 
 

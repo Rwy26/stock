@@ -672,6 +672,40 @@ class UsKrLeadLink(Base):
     )
 
 
+class KrResearchReport(Base):
+    """증권사 종목분석 리포트 — 목표가·투자의견 컨센서스 원천 (다이렉트 수집).
+
+    1차 출처 = 네이버 금융 종목분석 리포트(MOON STOCK 네이버 교차검증 제1원칙과 일치):
+      리스트:  finance.naver.com/research/company_list.naver?searchType=itemCode&itemCode=<code>
+      상세:    finance.naver.com/research/company_read.naver?nid=<nid>
+    리스트 행에서 종목명/증권사(firm)/제목/작성일/PDF 링크를, 상세 페이지(div.view_info_1)에서
+    목표가(target_price)·투자의견(recommendation)·요약(summary)을 파싱한다. moneyland 등 2차
+    출처는 오염 위험이라 재스크랩하지 않는다(감사 세션 결론). 네이버 코드-이름 검증 통과분만 적재.
+    목표가는 KRW 정수, 무데이터 항목은 NULL(N/A). 수집: scripts/research_reports_sync.py.
+    소비: backend/research_consensus.get_consensus() — 목표가 컨센서스·투자의견 분포·최근 상향/하향.
+    (stock_code, firm, report_date, title) UPSERT 로 중복 방지.
+    """
+
+    __tablename__ = "kr_research_reports"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # 리포트는 추천 유니버스(stocks 마스터) 밖 코드도 다룰 수 있어 NewsArticle 처럼 FK 를 두지 않는다.
+    stock_code: Mapped[str] = mapped_column(String(20), index=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120), nullable=True)   # 네이버 검증 종목명
+    firm: Mapped[str] = mapped_column(String(40))                                # 증권사
+    report_date: Mapped[date] = mapped_column(Date, index=True)                  # 작성일
+    title: Mapped[str] = mapped_column(String(300))
+    recommendation: Mapped[str | None] = mapped_column(String(30), nullable=True)  # 매수/중립/매도/Buy ... (원문)
+    target_price: Mapped[int | None] = mapped_column(Integer, nullable=True)        # 목표주가 KRW (무데이터 NULL)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)                # 리포트 본문 발췌
+    source_url: Mapped[str | None] = mapped_column(String(400), nullable=True)      # 상세/PDF 링크
+    collected_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("uq_kr_research_code_firm_date_title", "stock_code", "firm", "report_date", "title", unique=True),
+    )
+
+
 class SignalOutcome(Base):
     """AI 시그널 적중 추적 (append-only 예측 로그 + 익일 채점).
 

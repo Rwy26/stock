@@ -82,7 +82,18 @@ class Settings:
     claude_cli_path: str = os.getenv(
         "CLAUDE_CLI_PATH", r"C:\Users\MOON\.local\bin\claude.cmd"
     ).strip() or r"C:\Users\MOON\.local\bin\claude.cmd"
-    claude_cli_timeout: int = int(os.getenv("CLAUDE_CLI_TIMEOUT", "120") or "120")
+    # 풀컨텍스트 종목 리포트는 입력 ~25k자·출력 ~11k자로 실측 ~190s 소요 → 기본 300s.
+    # idle 스케줄러는 유휴시간에 돌아 여유가 있고, 타임아웃 시 gemini/groq 로 자연 강등된다.
+    claude_cli_timeout: int = int(os.getenv("CLAUDE_CLI_TIMEOUT", "300") or "300")
+
+    # MAX 구독 claude 호출 예산(일/주) — 단일 소스. 배치(scripts/batch_analyze.py)와 idle
+    # 필러(scripts/idle_narrative_filler.ps1)가 공유 원장(logs/claude-usage.json)에 같은 캡을
+    # 적용해 자동 경로 전체의 claude 사용량을 묶어 제한한다. 실측: 풀리포트 1건 ≈ 190s 생성.
+    # 106종목 전량을 매일 claude 로 돌리면 ≈ 39h/주로 5h/주 MAX 한도를 크게 초과하므로,
+    # 주도주 위주로 예산 내에서만 claude 품질을 부여하고 나머지는 gemini/groq 로 강등한다.
+    # 실제 소비를 claude-usage.json 으로 관찰한 뒤 이 숫자를 조정할 것.
+    claude_daily_cap: int = int(os.getenv("CLAUDE_DAILY_CAP", "30") or "30")
+    claude_weekly_cap: int = int(os.getenv("CLAUDE_WEEKLY_CAP", "150") or "150")
 
     # OpenAI (AI chart analysis)
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()

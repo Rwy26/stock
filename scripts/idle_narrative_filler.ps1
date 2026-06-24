@@ -29,8 +29,10 @@ param(
   [int]$CheckIntervalSec = 60,    # 유휴 점검 간격(초)
   [int]$RequiredMisses   = 10,    # 연속 무반응 N회 → 채우기 시작(기본 ~10분)
   [int]$MaxPerWindow     = 20,    # 1회 idle 윈도우당 처리 상한(5시간 창 보호)
-  [int]$DailyCap         = 80,    # claude 일일 호출 상한
-  [int]$WeeklyCap        = 200,   # claude 주간 호출 상한(5시간/주간 한도 보호)
+  # 일/주 캡은 배치(settings.claude_daily_cap/weekly_cap)와 단일 소스 공유 — 환경변수
+  # CLAUDE_DAILY_CAP / CLAUDE_WEEKLY_CAP 우선, 미설정 시 settings 기본값과 동일(30/150).
+  [int]$DailyCap         = $(if ($env:CLAUDE_DAILY_CAP)  { [int]$env:CLAUDE_DAILY_CAP }  else { 30 }),
+  [int]$WeeklyCap        = $(if ($env:CLAUDE_WEEKLY_CAP) { [int]$env:CLAUDE_WEEKLY_CAP } else { 150 }),
   [int]$StockIntervalSec = 40,    # 종목 간 간격(초) — KIS 일봉 + MAX rate 보호
   [switch]$Once                   # 1회 윈도우만 실행 후 종료(테스트용)
 )
