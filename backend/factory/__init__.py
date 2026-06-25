@@ -18,15 +18,15 @@ from factory.contracts import (
 from factory.registry import REGISTRY, AgentStatus, active_agents, register, sync_to_db
 
 __all__ = [
+    "REGISTRY",
     "Agent",
     "AgentKind",
+    "AgentStatus",
     "Direction",
     "Prediction",
     "PredictionContext",
-    "stamp",
-    "REGISTRY",
-    "AgentStatus",
     "active_agents",
     "register",
+    "stamp",
     "sync_to_db",
 ]

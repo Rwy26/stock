@@ -437,7 +437,7 @@ def score_breakout(
 
     trend_ok = golden_cross or trend_hold
     trend_note = (
-        f"골든크로스=True" if golden_cross
+        "골든크로스=True" if golden_cross
         else ("5MA우상향유지=True" if trend_hold else "5MA기울기하락 또는 100MA하방")
     )
     conditions.append(ConditionResult(
@@ -1100,7 +1100,7 @@ def _kr_close_series(ticker: str, period_days: int) -> pd.Series:
             s = df["Close"].dropna()
             if len(s) >= 5:
                 return s
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     # 2) yfinance 폴백 (Yahoo 가 회복됐을 때만 의미)
     try:
@@ -1109,7 +1109,7 @@ def _kr_close_series(ticker: str, period_days: int) -> pd.Series:
         yf_period = "3mo" if period_days <= 63 else "6mo"
         df = yf.download(ticker, period=yf_period, interval="1d", progress=False, auto_adjust=True)
         return _to_series(df, "Close").dropna()
-    except Exception:  # noqa: BLE001
+    except Exception:
         return pd.Series(dtype="float64")
 
 
@@ -1128,7 +1128,7 @@ def _etf_alpha_vs_kospi(etf_ticker: str, period_days: int = 21) -> float | None:
         etf_ret = float(etf_close.iloc[-1] / etf_close.iloc[-n] - 1)
         mkt_ret = float(mkt_close.iloc[-1] / mkt_close.iloc[-n] - 1)
         return round(etf_ret - mkt_ret, 4)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 

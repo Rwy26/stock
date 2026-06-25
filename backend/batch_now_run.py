@@ -1,5 +1,7 @@
 """전 종목 즉시 재분석 (사용자 강행 — 장중 가드 없음). 최신 10섹터 분류·모빌리티 통합 반영."""
-import sys, os, time
+import sys
+import os
+import time
 sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, '.')
 from dotenv import load_dotenv
@@ -7,7 +9,8 @@ load_dotenv('.env')
 os.environ['KRX_ID'] = os.getenv('KRX_ID', '')
 os.environ['KRX_PW'] = os.getenv('KRX_PW', '')
 
-import db, models
+import db
+import models
 from sqlalchemy import select
 import stock_compass
 

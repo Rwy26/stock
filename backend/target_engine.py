@@ -381,7 +381,7 @@ def _similar_regime_prob(bars: list[dict], up_pct: float, dn_pct: float,
     try:
         import regime_analogs
         dotcom = regime_analogs.find_analogs(zc[:6], val_pctile=cur_valp)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         dotcom = {"error": f"닷컴 표본 조회 실패: {type(exc).__name__}"}
 
     def _date(i: int) -> str:
@@ -499,7 +499,7 @@ def analyze_targets(code: str) -> dict:
             }
         else:
             short_data = {"error": f"공매도 데이터 부족 ({len(srows)}일)"}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         short_data = {"error": f"공매도 조회 실패: {type(exc).__name__}"}
     closes = [b["close"] for b in bars]
     highs = [b["high"] for b in bars]

@@ -125,7 +125,7 @@ def _us_lead_context(force: bool = False) -> dict:
             "evidence": {s: u["evidence"].get(s) for s in scored},
             "note": u.get("note"),
         }
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return {"available": False, "error": f"us_lead 실패: {type(exc).__name__}"}
 
 
@@ -152,7 +152,7 @@ def _stage0_global_sentiment(force: bool = False) -> dict:
             "evidence": g.get("evidence"),
             "asof": g.get("asof"),
         }
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return {"available": False, "error": f"global_macro 실패: {type(exc).__name__}"}
 
 
@@ -484,7 +484,7 @@ def _slim_context_for_groq(context_json: str, budget: int) -> tuple[str, list[st
         return context_json, []
     try:
         ctx = json.loads(context_json)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return context_json[:budget] + "\n…(groq 한도 초과로 절단)", ["<hard-cap>"]
 
     dropped: list[str] = []
@@ -557,7 +557,7 @@ def _get_claude_usage():
             sys.path.append(scripts_dir)
         try:
             import claude_usage  # type: ignore
-        except Exception:  # noqa: BLE001
+        except Exception:
             _claude_usage_mod = False
             return None
     _claude_usage_mod = claude_usage
@@ -582,7 +582,7 @@ def _claude_budget_exhausted() -> bool:
                 settings.claude_budget_use_ratio,
             )
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         return False
 
 
@@ -599,7 +599,7 @@ def _record_claude_usage(sec: float = 0.0) -> None:
         return
     try:
         cu.record(sec=sec, n=1)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
 
@@ -704,7 +704,7 @@ def _call_claude_cli(prompt: str, timeout: Optional[int] = None) -> Optional[str
         )
     except subprocess.TimeoutExpired:
         return None
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
     if proc.returncode != 0:
         return None
@@ -791,7 +791,7 @@ def _call_llm(
             except httpx.HTTPStatusError as exc:
                 errors.append(f"gemini HTTP {exc.response.status_code}")
                 break
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 errors.append(f"gemini {type(exc).__name__}")
                 break
 
@@ -843,7 +843,7 @@ def _call_llm(
             except httpx.HTTPStatusError as exc:
                 errors.append(f"{name} HTTP {exc.response.status_code}")
                 break
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 errors.append(f"{name} {type(exc).__name__}")
                 break
     return None, f"none ({'; '.join(errors)})" if errors else "none"
