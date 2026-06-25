@@ -46,15 +46,15 @@ check("cross_down no-cross stays False", se._cross_down(a2, b) is False)
 check("cross_below_zero true", se._cross_below_zero(s([1, 0.5, -0.2])) is True)
 check("cross_below_zero false (already below)", se._cross_below_zero(s([-1, -0.5, -0.2])) is False)
 
-# 3) MA dead cross: 상승추세 후 급락으로 5선이 20선 하향돌파
-up = list(np.linspace(100, 140, 30))      # 완만 상승
-drop = list(np.linspace(139, 110, 6))     # 마지막 급락
-close = s(up + drop)
+# 3) MA dead cross: 상승추세 후 급락으로 5선이 20선 하향돌파 (교차가 마지막 봉에 오도록 절단)
+up = list(np.linspace(100, 140, 30))
+drop = list(np.linspace(139, 90, 12))
+close = s((up + drop)[:35])   # 교차 봉(idx 34)에서 종료
 check("ma_dead_cross 5/20 detects drop", se.ma_dead_cross(close, 5, 20) is True)
 check("ma_dead_cross pure uptrend = False", se.ma_dead_cross(s(up), 5, 20) is False)
 
-# 4) MACD osc 0선 하향돌파: 상승 후 꺾임
-seq = list(np.linspace(100, 130, 40)) + list(np.linspace(129, 118, 8))
+# 4) MACD osc 0선 하향돌파: 상승 후 꺾임 (교차 봉에서 종료)
+seq = (list(np.linspace(100, 130, 40)) + list(np.linspace(129, 110, 12)))[:42]
 check("macd_osc_down on reversal", se.macd_osc_down(s(seq)) is True)
 
 # 5) RSI signal 하향돌파

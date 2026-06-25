@@ -2787,6 +2787,41 @@ def admin_list_leaders(_admin=Depends(require_admin)):
         db.close()
 
 
+@app.get("/api/admin/daily-screener")
+def admin_daily_screener(date: str | None = None, _admin=Depends(require_admin)):
+    """약세·과열 탐지(적출형) 일일 스크리너 결과 조회.
+
+    Query(선택): ?date=YYYY-MM-DD (생략 시 가장 최근 저장분).
+    저장은 scripts/run_daily_screener.py (예약작업 16:35 KST)가 수행한다.
+    """
+    if apollo_db is None or models is None:
+        raise HTTPException(status_code=500, detail="DB 모듈 없음")
+    db: Session = apollo_db.get_session_factory()()
+    try:
+        q = db.query(models.DailyScreenerResult)
+        if date:
+            try:
+                from datetime import date as _date
+
+                target = _date.fromisoformat(date)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="date 형식은 YYYY-MM-DD")
+            row = q.filter(models.DailyScreenerResult.scan_date == target).one_or_none()
+        else:
+            row = q.order_by(models.DailyScreenerResult.scan_date.desc()).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="해당일 스크리너 결과 없음")
+        return {
+            "scanDate": row.scan_date.isoformat(),
+            "universeTotal": row.universe_total,
+            "universeScored": row.universe_scored,
+            "flaggedCount": row.flagged_count,
+            "report": row.payload,
+        }
+    finally:
+        db.close()
+
+
 @app.post("/api/admin/leaders/refresh")
 def admin_refresh_leaders(payload: dict = Body(default={}), _admin=Depends(require_admin)):
     """주도주 인덱스 재산출.
