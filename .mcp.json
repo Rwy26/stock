@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "apollo-db": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@benborla29/mcp-server-mysql",
+        "mysql://apollo:dZULl1i6cfBVCTsIkYbaRhHjr9W2pKDw@127.0.0.1:3306/apollo_db"
+      ],
+      "env": {}
+    }
+  }
+}

@@ -139,3 +139,30 @@ npm run preview  # preview production build
 **예약 작업**: 06:00 fundamentals_sync(이름 검증·VKOSPI·뉴스) → 06:30 morning_prep(전일 등락 스냅샷+캐시 워밍) → 06:50 morning-check → 21:00 batch_analyze(전 106종목, 90초 간격) → 20:10 저녁 sync. ngrok 워치독 5분(터널: cost-negligee-violate.ngrok-free.dev, 본체 C:\stock\tools\ngrok.exe — AppData 설치본은 샌드박스 격리 주의).
 
 **원칙**: 잘못된 정보는 없는 것보다 위험 — 외부 데이터는 네이버 교차검증, 무데이터 항목은 N/A 명시, 확률은 표본 수와 함께 빈도 기반. 추세선 보정은 저장된 시계열로 앵커 날짜 시뮬레이션 후 배포.
+
+## Batch Jobs & Automation
+
+배치 작업은 명시적 요청이 없는 한 청크마다 중간 보고 없이 전체를 한 번에 완료한다.
+실패한 청크는 원인 진단(cp949/UnicodeEncodeError, 0x1 태스크 킬, 동시 인스턴스 충돌, 백엔드 아웃) 후 자동 재시도.
+모든 HTTP 호출 전 백엔드 헬스 게이트 확인. 전체 완료 후 성공/실패 건수 요약 1회만 보고.
+
+## Python Conventions
+
+모든 파일 I/O와 콘솔 출력은 `encoding='utf-8'` 사용 (cp949 UnicodeEncodeError 방지).
+새 import 추가 시 `bootstrap.ps1`에도 함께 추가.
+
+## Language / Transformation Rules
+
+한국어→영어 변환 규칙(글로벌 CLAUDE.md)은 태스크 명령뿐 아니라 대화·감정 메시지를 포함한
+**모든 메시지**에 적용한다.
+
+## LLM Provider / Fallback
+
+운영 LLM 프롬프트 타임아웃은 최소 300초로 설정 (실제 프롬프트가 ~191초 소요).
+groq 폴백 프롬프트는 TPM 한도 이내로 슬림화 (413/429 방지).
+폴백 순서: Gemini → Groq → OpenAI.
+
+## Windows Scheduled Tasks
+
+태스크 재등록 시 `DisallowStartIfOnBatteries=False` 반드시 보존.
+등록 후 전원/절전 설정 변경 여부 사후 검증 필수.
