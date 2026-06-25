@@ -15,8 +15,11 @@ kr_research_reports(scripts/research_reports_sync.py 적재)를 종목별로 집
 from __future__ import annotations
 
 import statistics
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional
+
+KST = ZoneInfo("Asia/Seoul")
 
 # 투자의견 원문 → 정규 라벨. 영문/국문 혼용을 흡수한다. 매칭 안 되면 '기타'.
 _OPINION_MAP: list[tuple[tuple[str, ...], str]] = [
@@ -50,7 +53,7 @@ def _load_reports(code: str, lookback_days: int) -> list[dict]:
         from sqlalchemy import select
     except Exception:
         return []
-    since = date.today() - timedelta(days=lookback_days)
+    since = datetime.now(KST).date() - timedelta(days=lookback_days)
     try:
         s = db.get_session_factory()()
         try:

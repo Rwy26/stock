@@ -26,8 +26,11 @@ import sys
 import threading
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Optional
+
+KST = ZoneInfo("Asia/Seoul")  # 장중 판정·표시 기준 시장 시간
 
 import httpx
 
@@ -49,7 +52,7 @@ _cache_ts: float = 0.0
 
 
 def _ttl() -> int:
-    now = datetime.now()
+    now = datetime.now(KST)
     if now.weekday() < 5 and (9 * 60 <= now.hour * 60 + now.minute <= 15 * 60 + 30):
         return 1800
     return 28800
@@ -894,7 +897,7 @@ def compute_market_compass(force: bool = False, with_ai: bool = True) -> dict:
     ]
 
     context = {
-        "asOf": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "asOf": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
         "vkospi": vkospi,
         "globalSentiment": global_sent,
         "usLead": us_lead_ctx,

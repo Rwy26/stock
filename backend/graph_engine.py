@@ -19,7 +19,10 @@ import math
 import threading
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Optional
+
+KST = ZoneInfo("Asia/Seoul")
 
 _lock = threading.Lock()
 _cache: Optional[dict] = None
@@ -94,7 +97,7 @@ def build_graph(force: bool = False) -> dict:
         ).scalars().all()
         # '관종 신입' 3일 뱃지: admin(user_id=1) 워치리스트 편입 3일 이내 종목
         from datetime import timedelta as _td
-        cutoff = datetime.now() - _td(days=3)
+        cutoff = datetime.now(KST) - _td(days=3)
         new_codes = {
             str(c) for c in s.execute(
                 select(models.Watchlist.stock_code).where(
@@ -241,7 +244,7 @@ def build_graph(force: bool = False) -> dict:
         boosts = {}
 
     result = {
-        "asOf": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "asOf": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
         "nodes": nodes,
         "edges": edges,
         "sectorBoost": boosts,   # 같은 섹터 스프링에 곱할 계수 (외부 바람)

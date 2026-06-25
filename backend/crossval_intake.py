@@ -22,7 +22,11 @@ import json
 import hashlib
 import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
+
+# 이 창구의 시간값은 모두 시장 로컬(KST) 의도 — 파일명 타임스탬프·received_at_kst·표시용
+KST = ZoneInfo("Asia/Seoul")
 
 # ── 경로 ────────────────────────────────────────────────────────────────
 BASE = Path(r"D:\개인연구용 데이터\교차검증")
@@ -52,7 +56,7 @@ def available() -> bool:
 
 
 def _now_stamp() -> str:
-    return datetime.now().strftime("%Y%m%d-%H%M%S")
+    return datetime.now(KST).strftime("%Y%m%d-%H%M%S")
 
 
 def safe_symbol(symbol: str) -> str:
@@ -82,7 +86,7 @@ def _parse_ts(s):
             return None
     for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"):
         try:
-            return datetime.strptime(s[:len(fmt) + 4], fmt)
+            return datetime.strptime(s[:len(fmt) + 4], fmt).replace(tzinfo=KST)
         except Exception:
             continue
     return None
@@ -182,7 +186,7 @@ def existing_data(symbol: str) -> dict:
     return {
         "found": True,
         "file_count": len(csvs),
-        "last_uploaded": datetime.fromtimestamp(last.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+        "last_uploaded": datetime.fromtimestamp(last.stat().st_mtime, tz=KST).strftime("%Y-%m-%d %H:%M"),
         "files": [p.name for p in csvs[-5:]],
     }
 
@@ -210,7 +214,7 @@ def save_csv(symbol: str, filename: str, raw: bytes, *, extra_context: str | Non
         "source": "AI 종목 분석 창구", "reference_only": True,
         "do_not_reprocess_original": True,
         "symbol": sym, "timeframe": tf, "original_filename": filename,
-        "received_at_kst": datetime.now().isoformat(),
+        "received_at_kst": datetime.now(KST).isoformat(),
         "sha256": sha, "bytes": len(raw), "extra_context": extra_context or None,
     })
     return {"stored": True, "path": str(target), "sha256": sha[:16],
@@ -231,7 +235,7 @@ def save_image(symbol: str, filename: str, raw: bytes, *, extra_context: str | N
         "source": "AI 종목 분석 창구", "reference_only": True,
         "crossval": "불가 — 이미지는 네이버 수치 대조 대상 아님 (참고/패턴 코퍼스용)",
         "symbol": sym, "original_filename": filename,
-        "received_at_kst": datetime.now().isoformat(),
+        "received_at_kst": datetime.now(KST).isoformat(),
         "sha256": sha, "bytes": len(raw), "extra_context": extra_context or None,
     })
     return {"stored": True, "path": str(target), "sha256": sha[:16],

@@ -20,8 +20,11 @@ import ast
 import logging
 import math
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
+
+KST = ZoneInfo("Asia/Seoul")  # 시장 바(YYYYMMDD) 날짜 — KST
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
@@ -119,7 +122,7 @@ def _fetch_naver_daily(code: str, start: date, end: date) -> list[dict] | None:
     for item in raw[1:]:  # [0]은 헤더
         try:
             rows.append({
-                "date": datetime.strptime(str(item[0]), "%Y%m%d").date(),
+                "date": datetime.strptime(str(item[0]), "%Y%m%d").replace(tzinfo=KST).date(),
                 "open": int(item[1]), "high": int(item[2]),
                 "low": int(item[3]), "close": int(item[4]),
                 "volume": int(item[5]),

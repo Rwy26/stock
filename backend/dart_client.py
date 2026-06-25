@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from functools import lru_cache
 from typing import Any
+
+KST = ZoneInfo("Asia/Seoul")  # DART 회계연도 판정 기준 — 시장(KST)
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +75,7 @@ def fetch_income_statement(
     if not corp_code:
         return []
 
-    current_year = year or datetime.now().year
+    current_year = year or datetime.now(KST).year
 
     rows: list[dict[str, Any]] = []
     try:

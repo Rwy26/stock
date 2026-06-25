@@ -36,7 +36,10 @@ import logging
 import threading
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any, Iterable
+
+KST = ZoneInfo("Asia/Seoul")
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -442,7 +445,8 @@ def _write_entry(
     else:
         row.tags = tags_s
         row.source = source
-        row.last_checked = datetime.now()
+        # 컬럼 server_default=func.now()(DB 로컬=KST, naive)와 일관되게 naive KST 로 기록
+        row.last_checked = datetime.now(KST).replace(tzinfo=None)
         if name:
             row.name = name
         if detail:
