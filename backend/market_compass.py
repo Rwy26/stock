@@ -626,9 +626,12 @@ def _claude_active() -> bool:
 _CLAUDE_LOCK_PATH = Path(__file__).resolve().parents[1] / "logs" / "claude-call.lock"
 
 
-def _acquire_claude_lock():
-    """비대기(non-blocking) 전역 락 시도. 성공 시 파일 핸들, 점유 중이면 None.
+def _acquire_claude_lock(wait_sec: float = 0.0):
+    """전역 락 시도. 성공 시 파일 핸들, 끝내 점유 중이면 None.
 
+    wait_sec<=0(기본): 기존 비대기 — 점유 중이면 즉시 None(인터랙티브/단순 경로의 즉시 강등 유지).
+    wait_sec>0: 그 시간만큼 1초 간격으로 폴링 재시도(한정 대기). 리포트 경로(_call_llm)가
+    선행 claude 콜 종료를 기다려 실제 획득하게 함 — 폴백 API 한도소진 시 빈 narrative 강등 방지.
     msvcrt 부재(비윈도우) 시 직렬화 없이 통과하도록 핸들만 반환한다.
     """
     try:
@@ -638,13 +641,17 @@ def _acquire_claude_lock():
         return None
     if msvcrt is None:  # 비윈도우 — 직렬화 미적용, 그대로 진행
         return fh
-    try:
-        fh.seek(0)
-        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)  # 1바이트 비대기 배타락
-    except OSError:
-        fh.close()
-        return None  # 다른 프로세스가 claude 점유 중
-    return fh
+    deadline = time.monotonic() + max(0.0, wait_sec)
+    while True:
+        try:
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)  # 1바이트 비대기 배타락
+            return fh
+        except OSError:
+            if time.monotonic() >= deadline:
+                fh.close()
+                return None  # 다른 프로세스가 claude 점유 중(대기 초과)
+            time.sleep(1.0)
 
 
 def _release_claude_lock(fh) -> None:
@@ -731,10 +738,12 @@ def _call_llm(
     # 정보 로그만 남긴다("claude busy"). 실패/타임아웃/빈 출력도 gemini/groq/openai 로 자연 강등.
     # simple=True(단순작업)면 claude 시도 자체를 건너뛴다 — 예산 절약 + 인터랙티브 지연 회피.
     if not simple and _claude_active():
-        lock = _acquire_claude_lock()
+        # 리포트 경로는 한정 대기(settings.claude_lock_wait_sec)로 선행 claude 콜을 기다려
+        # 실제 획득한다 — 폴백 API 한도소진 시에도 빈 narrative 로 강등되지 않게 하는 가드.
+        lock = _acquire_claude_lock(settings.claude_lock_wait_sec)
         if lock is None:
-            # 다른 프로세스가 claude 점유 중 — 대기 금지, 즉시 폴백(에러 아님, 정보 로그).
-            print("[market_compass] claude busy → gemini/groq 폴백", file=sys.stderr, flush=True)
+            # 대기 시간 내 못 얻음(타 프로세스가 계속 점유) — 폴백(에러 아님, 정보 로그).
+            print("[market_compass] claude busy(대기초과) → gemini/groq 폴백", file=sys.stderr, flush=True)
         else:
             claude_text = None
             try:

@@ -41,16 +41,26 @@ CODES = """000270 000400 000660 000720 001440 003550 003670 005380 005490 005930
 
 
 def _llm_available() -> bool:
-    """gemini/groq 중 하나라도 2xx 응답하면 True. 라이트 단일 핑(재시도 없음).
+    """claude(MAX) 활성이거나 gemini/groq 중 하나라도 2xx 응답하면 True. 라이트 단일 핑.
 
     혼잡/쿼터 소진(429·5xx·타임아웃) 시 urlopen 이 예외를 던지므로 False 가 되어
     재서술 루프를 진입하지 않는다 → KIS 일봉·국제망 헛호출 차단.
     점검 자체가 망을 무리하게 치지 않도록 timeout 12s 단일 시도만 한다.
     """
     import json
+    import os
     import urllib.request
 
     from settings import settings
+
+    # claude(MAX) 1순위 — 폴백 API 가 모두 한도소진(429)이어도 claude 가 활성이면 재서술 가능.
+    # gemini/groq 핑만 보던 기존 게이트는 claude 작동 중에도 오판으로 중단시켰다(빈 리포트 미복구 원인).
+    try:
+        import market_compass as _mc
+        if _mc._claude_active() and settings.claude_cli_path and os.path.exists(settings.claude_cli_path):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
 
     # gemini
     try:

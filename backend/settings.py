@@ -86,6 +86,12 @@ class Settings:
     # idle 스케줄러는 유휴시간에 돌아 여유가 있고, 타임아웃 시 gemini/groq 로 자연 강등된다.
     claude_cli_timeout: int = int(os.getenv("CLAUDE_CLI_TIMEOUT", "300") or "300")
 
+    # claude 전역 호출락 '한정 대기' 시간(초). 리포트 경로(_call_llm)는 락이 점유 중이면
+    # 즉시 강등하지 않고 이 시간만큼 폴링 대기해 claude 를 실제 획득한다 — 폴백 API(gemini 등)가
+    # 한도소진 상태여도 빈 narrative 로 떨어지지 않게 하는 핵심 가드. 0 이면 기존 비대기 동작.
+    # 점유 콜 1건(≈190s, 최대 claude_cli_timeout) 을 넘겨받도록 timeout 보다 약간 크게 둔다.
+    claude_lock_wait_sec: int = int(os.getenv("CLAUDE_LOCK_WAIT_SEC", "320") or "320")
+
     # MAX 구독 claude 호출 예산 — **롤링 5시간 창**(단일 소스). 배치(scripts/batch_analyze.py)·
     # idle 필러(scripts/idle_narrative_filler.ps1)·백엔드 서버가 공유 원장(logs/claude-usage.json)
     # 에 각 claude 호출의 (타임스탬프, 소요초)를 누적하고, 최근 claude_5h_window_sec(기본 5h)
