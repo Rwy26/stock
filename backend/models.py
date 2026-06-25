@@ -165,6 +165,25 @@ class Watchlist(Base):
     __table_args__ = (Index("uq_watchlist_user_stock", "user_id", "stock_code", unique=True),)
 
 
+class DailyScreenerResult(Base):
+    """증권사식 약세·과열 탐지(적출형) 일일 스크리너 결과 (날짜+JSON 영구 보관).
+
+    payload: screener_engine.build_report() 표준 구조
+        {asOf, universe, categories, indicators, frequency, concentrated, compressed, params}
+    하루 1행 (scan_date unique). 과거 비교·추세 분석용으로 누적 저장한다.
+    """
+    __tablename__ = "daily_screener_results"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    scan_date: Mapped[date] = mapped_column(Date, index=True, unique=True)
+    universe_total: Mapped[int] = mapped_column(Integer, default=0)
+    universe_scored: Mapped[int] = mapped_column(Integer, default=0)
+    flagged_count: Mapped[int] = mapped_column(Integer, default=0)  # frequency에 잡힌 종목 수
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class StockInterest(Base):
     """사용자별 종목 관심도 추적.
 
