@@ -468,13 +468,13 @@ def compute_lead_corr(lookback_days: int = CORR_LOOKBACK_DAYS) -> dict:
         import db
         import models
         from sqlalchemy import select
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return {"ok": False, "error": f"import 실패: {type(exc).__name__}"}
 
     try:
         import sector_rotation
         rotation_sectors = sector_rotation.SECTORS
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return {"ok": False, "error": f"sector_rotation 로드 실패: {type(exc).__name__}"}
 
     since = datetime.now(KST).date() - timedelta(days=lookback_days)
@@ -538,7 +538,7 @@ def compute_lead_corr(lookback_days: int = CORR_LOOKBACK_DAYS) -> dict:
                     continue
                 lk.corr = round(c, 4)
                 updated += 1
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     return {"ok": True, "updated": updated, "skipped": skipped,

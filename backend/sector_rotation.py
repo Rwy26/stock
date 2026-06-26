@@ -456,7 +456,7 @@ def _macro_score() -> Tuple[float, dict]:
         }
         return growth_score, detail
 
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return 50.0, {"error": str(exc)}
 
 
@@ -570,7 +570,7 @@ def _get_flow_scores() -> Dict[str, Dict[str, float]]:
             for sector in SECTORS
         }
 
-    except Exception:  # noqa: BLE001
+    except Exception:
         return fallback
 
 
@@ -711,7 +711,7 @@ def _get_pv_scores() -> Dict[str, Dict[str, float]]:
             for sector in SECTORS
         }
 
-    except Exception:  # noqa: BLE001
+    except Exception:
         return fallback
 
 

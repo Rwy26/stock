@@ -774,7 +774,7 @@ def _sync_portfolio_from_kis(db: Session, *, user_id: int, profile, balance: dic
             )
             for s in existing_stocks:
                 try:
-                    code = str(getattr(s, "code"))
+                    code = str(s.code)
                     new_name = (stock_names.get(code) or "").strip()
                     if not new_name:
                         continue
@@ -904,7 +904,7 @@ def _place_market_order_and_log(
         except Exception:
             odno = None
 
-        msg = (f"주문 성공" + (f" (ODNO={odno})" if odno else ""))
+        msg = ("주문 성공" + (f" (ODNO={odno})" if odno else ""))
 
         if engine == "sa":
             db.add(
@@ -1661,7 +1661,7 @@ def get_recommendations(_current_user=Depends(get_current_user)):
         user_profile = None
         try:
             # _current_user is required by auth; keep mypy happy.
-            user_id = int(getattr(_current_user, "id"))
+            user_id = int(_current_user.id)
             user_profile = db.execute(select(models.KisProfile).where(models.KisProfile.user_id == user_id)).scalar_one_or_none()
         except Exception:
             user_profile = None
@@ -3012,7 +3012,8 @@ def admin_scoring_run(
                     merged.update(supply_demand_map.get(code) or {})
                     supply_demand_map[code] = merged
             except Exception as exc:
-                logger.warning("수급 자동 수집 실패 (스코어링은 계속): %s", exc)
+                import logging
+                logging.getLogger("scoring").warning("수급 자동 수집 실패 (스코어링은 계속): %s", exc)
     finally:
         db.close()
 
@@ -3981,7 +3982,7 @@ def google_login(request: Request, payload: dict = Body(...)):
             "https://oauth2.googleapis.com/tokeninfo",
             params={"id_token": credential}, timeout=10.0,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=502, detail="구글 토큰 검증 실패(네트워크)") from exc
     if resp.status_code != 200:
         raise HTTPException(status_code=401, detail="유효하지 않은 구글 토큰")
@@ -4981,7 +4982,6 @@ def get_macro_us_bonds():
     """
     try:
         import yfinance as yf  # type: ignore
-        import pandas as pd    # type: ignore
         import math
 
         raw = yf.download("^TNX ^TYX", period="72d", interval="1d",
@@ -5066,7 +5066,7 @@ def get_macro_us_bonds():
             "rsi":  rsi_rows,
         }
 
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"us-bonds 데이터 조회 실패: {exc}") from exc
 
 
@@ -5110,7 +5110,7 @@ def get_macro_dxy():
             "ohlcv": rows,
         }
 
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"DXY 데이터 조회 실패: {exc}") from exc
 
 
@@ -5137,7 +5137,7 @@ def get_sector_rotation(force: bool = False):
         raise HTTPException(status_code=503, detail="sector_rotation 모듈 로드 실패")
     try:
         return _sector_rotation.compute_sector_rotation(force=force)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"섹터 로테이션 계산 실패: {exc}") from exc
 
 
@@ -6047,7 +6047,7 @@ def admin_market_compass(force: int = 0, ai: int = 1, user=Depends(require_admin
     try:
         import market_compass
         return market_compass.compute_market_compass(force=bool(force), with_ai=bool(ai))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"시장 나침반 계산 실패: {exc}") from exc
 
 
@@ -6105,7 +6105,7 @@ def public_global_macro_history(days: int = 26):
             "flow": g.get("flow"),
             "scores": g.get("scores"),
         }
-    except Exception:  # noqa: BLE001
+    except Exception:
         out["current"] = None  # 현재 스냅샷 실패해도 시계열은 발행
     return out
 
@@ -6120,7 +6120,7 @@ def admin_mtf_analysis(code: str, user=Depends(require_admin)):
     try:
         import mtf_analysis
         return mtf_analysis.analyze_mtf(code.strip())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"MTF 분석 실패: {exc}") from exc
 
 
@@ -6135,7 +6135,7 @@ def admin_stock_compass(code: str, ai: int = 1, user=Depends(require_admin)):
     try:
         import stock_compass
         return stock_compass.analyze_stock(code.strip(), with_ai=bool(ai))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"종목 종합 평가 실패: {exc}") from exc
 
 
@@ -6146,7 +6146,7 @@ def admin_stock_targets(code: str, user=Depends(require_admin)):
     try:
         import target_engine
         return target_engine.analyze_targets(code.strip())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"목표가 분석 실패: {exc}") from exc
 
 
@@ -6156,7 +6156,7 @@ def public_stock_graph():
     try:
         import graph_engine
         return graph_engine.build_graph(force=False)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"그래프 생성 실패: {exc}") from exc
 
 
@@ -6293,7 +6293,7 @@ def public_sector_rotation():
         raise HTTPException(status_code=503, detail="sector_rotation 모듈 로드 실패")
     try:
         return _sector_rotation.compute_sector_rotation(force=False)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"섹터 나침반 계산 실패: {exc}") from exc
 
 
@@ -6308,7 +6308,7 @@ def public_macro_warm():
         import market_compass
         result = market_compass.compute_market_compass(force=True, with_ai=False)
         return {"asOf": result.get("asOf")}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"macro warm 실패: {exc}") from exc
 
 
@@ -6964,7 +6964,7 @@ async def public_chart_analysis_image(
             symbol="AUTO", image_files=image_files, api_key=api_key,
             model=vision_model, provider=provider, extra_context=extra_context,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"분석 실패: {exc}") from exc
 
     # 방문 기록 (lead capture)
@@ -7045,7 +7045,7 @@ _SEARCH_SYSTEM_PROMPT = """당신은 MOON STOCK의 한국 주식 분석 대화 �
    한자어도 반드시 한글로 적는다 — 예: '詳細'(X)→'상세'(O), '多樣'(X)→'다양'(O), '更'(X)→'더'(O)."""
 
 
-def _resolve_stock_in_text(text: str) -> Optional[tuple[str, str]]:
+def _resolve_stock_in_text(text: str) -> _Optional[tuple[str, str]]:
     """자유 텍스트에서 종목명/코드를 찾아 (code, name). DB 우선, 6자리코드, 부분일치."""
     if apollo_db is None or models is None:
         return None
@@ -7391,7 +7391,7 @@ def public_ai_search(request: Request, body: dict = Body(default={})):
 
     try:
         return _ai_search_core(query, body.get("history") or [], forced_code=body.get("code"))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"검색 실패: {exc}") from exc
 
 
@@ -7407,7 +7407,7 @@ def admin_ai_search(body: dict = Body(default={}), _current_user=Depends(require
         raise HTTPException(status_code=400, detail="검색어를 입력하세요.")
     try:
         return _ai_search_core(query, body.get("history") or [], forced_code=body.get("code"))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=502, detail=f"검색 실패: {exc}") from exc
 
 
@@ -7432,7 +7432,8 @@ def admin_mobility_induct(body: dict = Body(default={}), _current_user=Depends(r
     pending = [c for c in codes if c not in have]
 
     def _do(target: list[str]):
-        import stock_compass, exclusion_engine
+        import stock_compass
+        import exclusion_engine
         analyzed: list[str] = []
         for code in target:
             try:

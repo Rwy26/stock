@@ -19,7 +19,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Optional
 
 
@@ -382,7 +381,7 @@ def analyze_mtf(code: str) -> dict:
             if period == "D":
                 daily_bars = bars
             tf[label] = analyze_timeframe(bars, label)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             tf[label] = {"label": label, "error": f"조회 실패: {exc}"}
         _time.sleep(0.12)
 
@@ -397,7 +396,7 @@ def analyze_mtf(code: str) -> dict:
             _time.sleep(0.12)
         tf["60분(5일)"] = analyze_timeframe(_resample_minutes_daily(minutes, 60), "60분(5일)")
         tf["15분(5일)"] = analyze_timeframe(_resample_minutes_daily(minutes, 15), "15분(5일)")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         tf["60분(5일)"] = {"label": "60분(5일)", "error": f"분봉 조회 실패: {exc}"}
         tf["15분(5일)"] = {"label": "15분(5일)", "error": "분봉 조회 실패"}
 

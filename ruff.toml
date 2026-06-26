@@ -1,0 +1,33 @@
+# Ruff config — MOON STOCK
+# 돈 다루는 코드용 보안+정확성 룰셋. semgrep(Windows 미지원) 대체.
+# 사용: python -m ruff check backend          (점검)
+#       python -m ruff check backend --fix    (안전 수정 적용)
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = [
+  "F",    # pyflakes — 미정의 변수, import 오류
+  "E",    # pycodestyle errors
+  "B",    # flake8-bugbear — 잠복 버그(가변 기본인자 등)
+  "S",    # flake8-bandit — 보안 취약점
+  "DTZ",  # flake8-datetimez — timezone 누락 datetime (UTC 오독 방지)
+  "PD",   # pandas-vet — pandas 안티패턴
+  "NPY",  # numpy 권고
+  "RUF",  # ruff 고유 룰
+]
+ignore = [
+  "E501",   # 라인 길이는 치명적이지 않음
+]
+
+[lint.per-file-ignores]
+"**/test_*.py" = ["S101"]   # 테스트의 assert 허용
+"**/*_test.py" = ["S101"]
+"**/conftest.py" = ["S101"]
+
+[lint.flake8-bugbear]
+# FastAPI 의존성 주입은 기본인자 함수호출이 정상 — B008 오탐 제외
+extend-immutable-calls = [
+  "fastapi.Depends", "fastapi.Query", "fastapi.Body",
+  "fastapi.Header", "fastapi.Path", "fastapi.Form", "fastapi.File",
+]

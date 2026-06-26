@@ -346,7 +346,7 @@ def fetch_market_internals() -> dict:
         data = yf.download(list(MARKET_SYMBOLS.values()), period="3mo",
                            progress=False, threads=True)
         close = data["Close"]
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         out["_note"] = f"yfinance download failed: {type(exc).__name__}"
         return out
 
@@ -511,7 +511,7 @@ def fetch_news_sentiment() -> dict:
     try:
         import news_collector
         ctx = news_collector.get_news_context(max_headlines_per_sector=10)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         out["note"] = f"news_collector unavailable: {type(exc).__name__}"
         return out
 

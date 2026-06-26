@@ -17,7 +17,6 @@ from __future__ import annotations
 import base64
 import io
 import json
-import mimetypes
 from datetime import datetime, timezone
 from typing import Any
 
@@ -1094,7 +1093,7 @@ def analyze_chart_images_multi(
                 timeout_seconds=timeout_seconds,
             )
             results.append(res)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             results.append({"symbol": sym, "error": str(exc), "ai_result": None,
                             "analyzed_at": datetime.now(timezone.utc).isoformat()})
     return {"multi": True, "results": results, "groups": groups}
@@ -1176,7 +1175,7 @@ def extract_and_classify(
         if not isinstance(data, dict) or "content_type" not in data:
             raise ValueError("malformed")
         return data
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return {"content_type": "unknown", "confidence": 0,
                 "extracted_summary": f"이미지 인식 실패: {exc}",
                 "stocks": [], "sectors": [], "single_stock": {"name": None, "code_in_image": None},
