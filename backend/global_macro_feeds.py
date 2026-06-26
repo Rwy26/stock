@@ -20,9 +20,12 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Optional
+
+KST = ZoneInfo("Asia/Seoul")
 
 import httpx
 
@@ -64,7 +67,7 @@ POLICY_PREDICTION_WEIGHTS = {"polymarket": 0.6, "kalshi": 0.4}
 
 def election_window_active(today: Optional[date] = None) -> bool:
     """오늘이 중간선거 시한부 윈도우(≤ ELECTION_WINDOW_UNTIL) 안인가."""
-    return (today or date.today()) <= ELECTION_WINDOW_UNTIL
+    return (today or datetime.now(KST).date()) <= ELECTION_WINDOW_UNTIL
 
 
 def _weights_for(target_key: str, today: Optional[date] = None) -> tuple[dict, str]:

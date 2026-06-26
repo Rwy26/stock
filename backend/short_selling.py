@@ -23,7 +23,10 @@ import logging
 import os
 import time
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from typing import Any
+
+KST = ZoneInfo("Asia/Seoul")  # 시장 거래일(YYYYMMDD) 날짜 — KST
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +39,7 @@ MIN_ROWS_FOR_JUDGE = 8    # 판정 최소 데이터 일수 (기준선 5일 + 최
 
 def _parse_yyyymmdd(s: str) -> date | None:
     try:
-        return datetime.strptime(s.strip(), "%Y%m%d").date()
+        return datetime.strptime(s.strip(), "%Y%m%d").replace(tzinfo=KST).date()
     except Exception:
         return None
 

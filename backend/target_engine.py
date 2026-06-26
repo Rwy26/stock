@@ -33,7 +33,10 @@ from __future__ import annotations
 
 import time as _time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Optional
+
+KST = ZoneInfo("Asia/Seoul")  # 시장 바 날짜·표시 기준 — KST
 
 import httpx
 
@@ -56,7 +59,7 @@ def _fetch_daily_long(code: str, kw: dict, windows: int = 5) -> list[dict]:
         for b in bars:
             all_bars[b["date"]] = b
         earliest = min(b["date"] for b in bars)
-        prev = _dt.strptime(earliest, "%Y%m%d").date() - _td(days=1)
+        prev = _dt.strptime(earliest, "%Y%m%d").replace(tzinfo=KST).date() - _td(days=1)
         end_date = prev.strftime("%Y%m%d")
         _time.sleep(0.12)
         if len(bars) < 50:  # 상장 초기 도달
@@ -670,7 +673,7 @@ def analyze_targets(code: str) -> dict:
     return {
         "code": code,
         "name": getattr(stock, "name", code) if stock else code,
-        "asOf": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "asOf": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
         "currentPrice": cur,
         "barsUsed": len(bars),
         # 핵심 차트용 시계열 — 퀀트 추세선 엔진(고/저가 피벗)용으로 highs/lows/volumes 추가

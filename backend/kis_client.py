@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 from typing import Literal
+
+KST = ZoneInfo("Asia/Seoul")  # KIS 조회 날짜 파라미터는 시장 거래일(KST) 기준
 
 import httpx
 
@@ -209,7 +212,7 @@ def inquire_price(
     )
     shares = int(_to_float(output.get("lstn_stcn") or output.get("LSTN_STCN")))
 
-    as_of = output.get("stck_cntg_hour") or datetime.now().isoformat()
+    as_of = output.get("stck_cntg_hour") or datetime.now(KST).isoformat()
 
     def _yn(*keys: str) -> bool:
         for k in keys:
@@ -490,8 +493,6 @@ def inquire_investor(
     Returns raw KIS JSON. output 리스트에 날짜별 매매 내역.
     각 행: stck_bsop_date, frgn_ntby_qty(외국인 순매수), orgn_ntby_qty(기관), etc.
     """
-    from datetime import date as _date
-
     code = code.strip()
     if not code:
         raise KisError("code is required")
@@ -508,11 +509,10 @@ def inquire_investor(
     url = f"{base}/uapi/domestic-stock/v1/quotations/inquire-investor"
 
     if not end_date:
-        end_date = _date.today().strftime("%Y%m%d")
+        end_date = datetime.now(KST).strftime("%Y%m%d")
     if not start_date:
         # 약 30 거래일 전 (≈42 캘린더일)
-        from datetime import timedelta
-        start_date = (_date.today() - timedelta(days=42)).strftime("%Y%m%d")
+        start_date = (datetime.now(KST).date() - timedelta(days=42)).strftime("%Y%m%d")
 
     headers = {
         "authorization": f"Bearer {token}",
@@ -613,7 +613,7 @@ def inquire_program_trade(
     TR: FHPPG04650100 (국내주식 프로그램매매 추이(종목))
     각 행: bsop_date, whol_ntby_qty(전체 순매수), whol_ntby_tr_pbmn(순매수 대금)
     """
-    from datetime import date as _date, timedelta
+    from datetime import timedelta
 
     code = code.strip()
     if not code:
@@ -631,9 +631,9 @@ def inquire_program_trade(
     url = f"{base}/uapi/domestic-stock/v1/quotations/program-trade-by-stock"
 
     if not end_date:
-        end_date = _date.today().strftime("%Y%m%d")
+        end_date = datetime.now(KST).strftime("%Y%m%d")
     if not start_date:
-        start_date = (_date.today() - timedelta(days=14)).strftime("%Y%m%d")
+        start_date = (datetime.now(KST).date() - timedelta(days=14)).strftime("%Y%m%d")
 
     headers = {
         "authorization": f"Bearer {token}",
@@ -711,7 +711,7 @@ def inquire_daily_chart(
 
     반환: 과거→현재 순 [{date, open, high, low, close, volume}].
     """
-    from datetime import date as _date, datetime as _dt, timedelta as _td
+    from datetime import datetime as _dt, timedelta as _td
 
     code = code.strip()
     token, _ = get_access_token(
@@ -724,7 +724,7 @@ def inquire_daily_chart(
 
     # 100봉을 덮는 달력 범위 (D: 150일, W: 750일, M: 3200일)
     span = {"D": 150, "W": 750, "M": 3200, "Y": 36500}.get(period, 150)
-    end = _dt.strptime(end_date, "%Y%m%d").date() if end_date else _date.today()
+    end = _dt.strptime(end_date, "%Y%m%d").replace(tzinfo=KST).date() if end_date else _dt.now(KST).date()
     start = end - _td(days=span)
 
     headers = {
@@ -965,7 +965,7 @@ def inquire_short_sale(
     반환: 과거→현재 순 [{date, close, shortQty(공매도 수량), shortRatio(거래량 대비 %)}].
     대차잔고는 KIS 미제공 — 공매도 비중 추이가 수급 압력의 대용 지표.
     """
-    from datetime import date as _date, timedelta as _td
+    from datetime import datetime as _dt, timedelta as _td
 
     code = code.strip()
     token, _ = get_access_token(
@@ -975,7 +975,7 @@ def inquire_short_sale(
     )
     base = _base_url(is_paper, live_base_url=live_base_url, paper_base_url=paper_base_url)
     url = f"{base}/uapi/domestic-stock/v1/quotations/daily-short-sale"
-    end = _date.today()
+    end = _dt.now(KST).date()
     start = end - _td(days=days)
     headers = {
         "authorization": f"Bearer {token}",

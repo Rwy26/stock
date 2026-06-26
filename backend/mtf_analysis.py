@@ -347,6 +347,7 @@ def analyze_mtf(code: str) -> dict:
     """월봉→주봉→일봉→60분→15분 멀티 타임프레임 분석 (KIS 차트 데이터)."""
     import time as _time
     from datetime import datetime
+    from zoneinfo import ZoneInfo
 
     import db
     import models
@@ -406,7 +407,7 @@ def analyze_mtf(code: str) -> dict:
     return {
         "code": code,
         "name": getattr(stock, "name", code) if stock else code,
-        "asOf": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "asOf": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M"),
         "timeframes": [tf[k] for k in order if k in tf],
         "alignment": {
             "uptrendCount": up, "downtrendCount": down, "total": len(order),

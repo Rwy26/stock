@@ -10,8 +10,12 @@ import string
 import threading
 import time
 from difflib import SequenceMatcher
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
+
+# 시장 영업일/장중 판정 기준 시간대 — KOSPI/KOSDAQ 는 KST. DB 저장 타임스탬프는 UTC(timezone.utc)
+KST = ZoneInfo("Asia/Seoul")
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -296,7 +300,7 @@ def _recommendations_loop() -> None:
             if apollo_db is not None and models is not None:
                 db: Session = apollo_db.get_session_factory()()
                 try:
-                    today = date.today()
+                    today = datetime.now(KST).date()
                     count, _score_date = _generate_recommendations_for_date(db, rec_date=today, limit=200)
                     if count:
                         db.commit()
@@ -313,10 +317,10 @@ def _is_market_open(now: datetime) -> bool:
     if now.weekday() >= 5:
         return False
     t = now.time()
-    start = datetime(now.year, now.month, now.day, 9, 0, 0).time()
+    start = dt_time(9, 0, 0)
     # Keep the loop running a bit after close so liquidation at 15:20 can still run
     # even if the 1-minute scheduler is not perfectly aligned.
-    end = datetime(now.year, now.month, now.day, 15, 30, 0).time()
+    end = dt_time(15, 30, 0)
     return start <= t <= end
 
 
@@ -324,12 +328,12 @@ def _should_sa_friday_liquidate(now: datetime) -> bool:
     # Friday 15:15 이후 전량 청산
     if now.weekday() != 4:
         return False
-    return now.time() >= datetime(now.year, now.month, now.day, 15, 15, 0).time()
+    return now.time() >= dt_time(15, 15, 0)
 
 
 def _should_daily_close_liquidate(now: datetime) -> bool:
     # 15:20 이후 잔여 포지션 정리
-    return now.time() >= datetime(now.year, now.month, now.day, 15, 20, 0).time()
+    return now.time() >= dt_time(15, 20, 0)
 
 
 def _parse_kis_account(value: str | None) -> tuple[str | None, str | None]:
@@ -819,14 +823,14 @@ def _sync_portfolio_from_kis(db: Session, *, user_id: int, profile, balance: dic
                     stock_code=code,
                     qty=int(qty),
                     avg_buy=float(avg),
-                    buy_date=date.today(),
+                    buy_date=datetime.now(KST).date(),
                 )
             )
         else:
             pos.qty = int(qty)
             pos.avg_buy = float(avg)
             if pos.buy_date is None:
-                pos.buy_date = date.today()
+                pos.buy_date = datetime.now(KST).date()
         upserted += 1
 
     deleted = 0
@@ -971,7 +975,7 @@ def _place_market_order_and_log(
                         pos.avg_buy = float(holding_avg)
                 else:
                     if pos is not None and side == "sell":
-                        pos.closed_at = datetime.now()
+                        pos.closed_at = datetime.now(KST).replace(tzinfo=None)
 
             elif engine == "plus":
                 pos = db.execute(
@@ -991,7 +995,7 @@ def _place_market_order_and_log(
                         pos.avg_buy = float(holding_avg)
                 else:
                     if pos is not None and side == "sell":
-                        pos.closed_at = datetime.now()
+                        pos.closed_at = datetime.now(KST).replace(tzinfo=None)
         except Exception:
             pass
 
@@ -1025,7 +1029,7 @@ def _place_market_order_and_log(
 
 def _pick_top_recommendation_code(db: Session, *, exclude_codes: set[str]) -> str | None:
     assert models is not None
-    today = date.today()
+    today = datetime.now(KST).date()
     rows = db.execute(
         select(models.Recommendation.stock_code)
         .where(models.Recommendation.rec_date == today)
@@ -1117,7 +1121,7 @@ def _run_sa_engine_tick(db: Session, *, user_id: int, profile, now: datetime) ->
             )
             db.add(models.AutomationEngineLog(user_id=user_id, engine="sa", event=("sell" if ok else "error"), message=msg))
             if ok:
-                p.closed_at = datetime.now()
+                p.closed_at = datetime.now(KST).replace(tzinfo=None)
         return
 
     # buy minimal: if holdings < max_positions, buy 1 share of top recommendation not held
@@ -1269,7 +1273,7 @@ def _run_plus_engine_tick(db: Session, *, user_id: int, profile, now: datetime) 
             )
             db.add(models.AutomationEngineLog(user_id=user_id, engine="plus", event=("sell" if ok else "error"), message=msg))
             if ok:
-                p.closed_at = datetime.now()
+                p.closed_at = datetime.now(KST).replace(tzinfo=None)
         return
 
     open_pos = db.execute(
@@ -1364,7 +1368,9 @@ def _autotrade_tick_loop() -> None:
                 _autotrade_stop.wait(timeout=60)
                 continue
 
-            now = datetime.now()
+            # 장중 판정·청산 시각은 시장 시간(KST) 기준. 안전 게이트(주문) 경로이므로 naive 로 유지
+            # (서버 로케일과 무관하게 KST 로 못박되, _is_market_open/_should_* 의 .time() 비교는 naive)
+            now = datetime.now(KST).replace(tzinfo=None)
             if not _is_market_open(now):
                 _autotrade_stop.wait(timeout=60)
                 continue
@@ -1625,7 +1631,7 @@ def get_portfolio(current_user=Depends(get_current_user)):
                     "qty": int(qty),
                     "avgBuy": float(avg_buy),
                     "current": float(current),
-                    "buyDate": (buy_date or date.today()).isoformat(),
+                    "buyDate": (buy_date or datetime.now(KST).date()).isoformat(),
                 }
             )
 
@@ -1637,7 +1643,7 @@ def get_portfolio(current_user=Depends(get_current_user)):
             except Exception:
                 cash = None
 
-        return {"asOf": datetime.now().isoformat(), "positions": payload_positions, "cash": cash}
+        return {"asOf": datetime.now(KST).isoformat(), "positions": payload_positions, "cash": cash}
     finally:
         db.close()
 
@@ -1647,7 +1653,7 @@ def get_recommendations(_current_user=Depends(get_current_user)):
     if apollo_db is None or models is None:
         raise HTTPException(status_code=500, detail="DB module not available")
 
-    today = date.today()
+    today = datetime.now(KST).date()
     db: Session = apollo_db.get_session_factory()()
     try:
         # Realtime prices are per-user (KIS credentials).
@@ -1738,7 +1744,7 @@ def get_king_recommendations(_current_user=Depends(get_current_user)):
         raise HTTPException(status_code=502, detail=f"섹터 분석 실패: {exc}") from exc
 
     # DB에서 오늘 기준 최고점수 종목 (상위 10개)
-    today = date.today()
+    today = datetime.now(KST).date()
     db: Session = apollo_db.get_session_factory()()
     try:
         rows = db.execute(
@@ -2301,7 +2307,7 @@ def get_dashboard(current_user=Depends(get_current_user)):
             plus_on = bool(plus_cfg.enabled) if plus_cfg else False
             sv_on = bool(sv_cfg.enabled) if sv_cfg else False
 
-            start_dt = datetime.combine(date.today(), datetime.min.time())
+            start_dt = datetime.combine(datetime.now(KST).date(), datetime.min.time())
             end_dt = start_dt + timedelta(days=1)
 
             try:
@@ -2351,7 +2357,7 @@ def get_dashboard(current_user=Depends(get_current_user)):
 
             # Prefer real recommendations from DB.
             try:
-                today = date.today()
+                today = datetime.now(KST).date()
                 rec_rows = db.execute(
                     select(
                         models.Recommendation.rank,
@@ -2415,7 +2421,7 @@ def get_dashboard(current_user=Depends(get_current_user)):
         raise HTTPException(status_code=503, detail=f"KIS 잔고 파싱 실패: {exc}") from exc
 
     return {
-        "asOf": datetime.now().isoformat(),
+        "asOf": datetime.now(KST).isoformat(),
         "kpis": kpis,
         "topRecommendations": top_recommendations,
         "automation": {
@@ -2447,7 +2453,7 @@ def kis_token_status(current_user=Depends(get_current_user)):
                 "hasProfile": False,
                 "tradeType": "실계좌",
                 "expiresIn": None,
-                "asOf": datetime.now().isoformat(),
+                "asOf": datetime.now(KST).isoformat(),
             }
 
         try:
@@ -2464,7 +2470,7 @@ def kis_token_status(current_user=Depends(get_current_user)):
                 "hasProfile": True,
                 "tradeType": "실계좌",
                 "expiresIn": int(expires_in),
-                "asOf": datetime.now().isoformat(),
+                "asOf": datetime.now(KST).isoformat(),
             }
         except Exception as exc:
             return {
@@ -2473,7 +2479,7 @@ def kis_token_status(current_user=Depends(get_current_user)):
                 "tradeType": "실계좌",
                 "expiresIn": None,
                 "error": str(exc),
-                "asOf": datetime.now().isoformat(),
+                "asOf": datetime.now(KST).isoformat(),
             }
     finally:
         db.close()
@@ -2486,7 +2492,7 @@ def admin_generate_recommendations_today(_admin=Depends(require_admin)):
 
     db: Session = apollo_db.get_session_factory()()
     try:
-        today = date.today()
+        today = datetime.now(KST).date()
         count, score_date = _generate_recommendations_for_date(db, rec_date=today, limit=200)
         db.commit()
         return {"ok": True, "date": today.isoformat(), "scoreDate": score_date, "upserted": int(count)}
@@ -2501,9 +2507,9 @@ def admin_generate_recommendations_today(_admin=Depends(require_admin)):
 
 def _parse_session_date(value: str | None) -> date:
     if not value:
-        return date.today()
+        return datetime.now(KST).date()
     try:
-        return datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
+        return datetime.strptime(str(value).strip(), "%Y-%m-%d").replace(tzinfo=KST).date()
     except Exception as exc:
         raise HTTPException(status_code=400, detail="session_date 형식은 YYYY-MM-DD") from exc
 
@@ -3011,7 +3017,7 @@ def admin_scoring_run(
     finally:
         db.close()
 
-    today = date.today()
+    today = datetime.now(KST).date()
     results = _scoring_engine.run_batch(
         codes,
         scoring_date=today,
@@ -3105,7 +3111,7 @@ def admin_scoring_preview(
     try:
         result = _scoring_engine.compute_stock_score(
             code,
-            scoring_date=date.today(),
+            scoring_date=datetime.now(KST).date(),
             supply_demand=supply_demand,
         )
     except Exception as exc:
@@ -3270,7 +3276,7 @@ def get_sa_positions(include_closed: bool = False, current_user=Depends(get_curr
                 }
             )
 
-        return {"asOf": datetime.now().isoformat(), "items": items}
+        return {"asOf": datetime.now(KST).isoformat(), "items": items}
     finally:
         db.close()
 
@@ -3312,7 +3318,7 @@ def get_sa_logs(limit: int = 100, current_user=Depends(get_current_user)):
                 }
             )
 
-        return {"asOf": datetime.now().isoformat(), "items": items}
+        return {"asOf": datetime.now(KST).isoformat(), "items": items}
     finally:
         db.close()
 
@@ -3355,7 +3361,7 @@ def get_plus_positions(include_closed: bool = False, current_user=Depends(get_cu
                 }
             )
 
-        return {"asOf": datetime.now().isoformat(), "items": items}
+        return {"asOf": datetime.now(KST).isoformat(), "items": items}
     finally:
         db.close()
 
@@ -3397,7 +3403,7 @@ def get_plus_logs(limit: int = 100, current_user=Depends(get_current_user)):
                 }
             )
 
-        return {"asOf": datetime.now().isoformat(), "items": items}
+        return {"asOf": datetime.now(KST).isoformat(), "items": items}
     finally:
         db.close()
 
@@ -4614,7 +4620,8 @@ def admin_engine_tick_once(payload: dict = Body(...), _admin=Depends(require_adm
     if _is_kill_switch_on():
         raise HTTPException(status_code=400, detail="Manual tick is disabled when AUTOTRADING_KILL_SWITCH=1")
 
-    now = datetime.now()
+    # 수동 틱도 시장 시간(KST) 기준 — _is_market_open/_should_* 의 .time() 비교는 naive
+    now = datetime.now(KST).replace(tzinfo=None)
 
     def _effective_max_positions(cfg_obj: dict | None) -> int:
         max_positions = 5
@@ -5558,7 +5565,7 @@ async def ai_chart_analysis_image(
                             models.AiAnalysisCache.stock_code == vcode
                         )
                     ).scalar_one_or_none()
-                    now_utc = datetime.utcnow()
+                    now_utc = datetime.now(timezone.utc)
                     if existing is None:
                         db_cache.add(models.AiAnalysisCache(
                             stock_code=vcode, stock_name=vname, analyzed_at=now_utc,
@@ -5659,7 +5666,8 @@ def _upsert_crossval_corpus(symbol: str, merge: dict) -> None:
     raw_last = merge.get("last_data_at")
     if raw_last:
         try:
-            last_dt = datetime.strptime(raw_last, "%Y-%m-%d %H:%M")
+            # TradingView 봉 시각(KST). aware 로 표기하되 naive DateTime 컬럼엔 KST wall-clock 그대로 저장됨
+            last_dt = datetime.strptime(raw_last, "%Y-%m-%d %H:%M").replace(tzinfo=KST)
         except Exception:
             last_dt = None
     db: Session = apollo_db.get_session_factory()()
@@ -5720,7 +5728,8 @@ def ai_crossval_work_requests(_current_user=Depends(require_admin)):
             .distinct()
         ).all()
         corpus = {r.stock_code: r for r in db.execute(select(models.CrossvalCorpus)).scalars().all()}
-        now = datetime.utcnow()
+        # last_data_at(DB) 는 naive 로 저장되므로(아래 5735행 빼기) now 도 naive UTC 유지 — aware 로 바꾸면 TypeError
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         requests: list[dict] = []
         covered = 0
@@ -5992,7 +6001,7 @@ def public_recommendations():
     """공개 추천 종목 (DB 기준; 실시간가 없음 / KIS 불필요)."""
     if apollo_db is None or models is None:
         raise HTTPException(status_code=500, detail="DB module not available")
-    today = date.today()
+    today = datetime.now(KST).date()
     db: Session = apollo_db.get_session_factory()()
     try:
         rows = db.execute(
@@ -6167,7 +6176,7 @@ async def public_upload(file: UploadFile = FastAPIFile(...)):
         raise HTTPException(status_code=400, detail="5MB 이하만 업로드 가능합니다")
     updir = get_pipeline_paths().data_external / "uploads"
     updir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(KST).strftime("%Y%m%d-%H%M%S")
     dest = updir / f"{stamp}-{name}"
     dest.write_bytes(data)
     return {"ok": True, "saved": dest.name, "size": len(data)}
@@ -6640,7 +6649,7 @@ def _save_vision_cache(code: str, name: str | None, result: dict, image_hashes=N
         try:
             existing = db_c.execute(select(models.AiAnalysisCache).where(
                 models.AiAnalysisCache.stock_code == code)).scalar_one_or_none()
-            now_utc = datetime.utcnow()
+            now_utc = datetime.now(timezone.utc)
             payload = dict(result)
             payload["source"] = "chart-vision"
             if existing is None:
@@ -6897,7 +6906,7 @@ _PUBLIC_RATE: dict[str, dict] = {}
 
 
 def _public_rate_state(ip: str) -> dict:
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(KST).strftime("%Y-%m-%d")
     st = _PUBLIC_RATE.get(ip)
     if not st or st.get("date") != today:
         st = {"date": today, "calls": 0, "fresh": set()}
@@ -7080,7 +7089,7 @@ def _news_volume(code: str) -> dict | None:
     try:
         from datetime import timedelta as _td
         from sqlalchemy import func as _f
-        now = datetime.now()
+        now = datetime.now(KST)  # NewsArticle.published_at(KST) 와 SQL 비교
         d1, d10 = now - _td(days=1), now - _td(days=10)
         s = apollo_db.get_session_factory()()
         try:
@@ -7660,7 +7669,7 @@ def admin_system_status(_admin=Depends(require_admin)):
         try:
             db_sys: Session = apollo_db.get_session_factory()()
             try:
-                now_dt = datetime.now()
+                now_dt = datetime.now(KST)  # LoginHistory.at/AutomationEngineLog.at(KST) 와 SQL 비교, 시간 버킷도 KST
                 cutoff = now_dt - timedelta(hours=12)
 
                 # Build hour buckets
@@ -7688,7 +7697,7 @@ def admin_system_status(_admin=Depends(require_admin)):
                 hourly_activity = [{"hour": k, "count": v} for k, v in hour_counts.items()]
 
                 # Data freshness
-                today = date.today()
+                today = datetime.now(KST).date()
                 threshold_3d = today - timedelta(days=3)
 
                 last_price = db_sys.execute(select(func.max(models.DailyPrice.trading_date))).scalar()
@@ -7729,7 +7738,7 @@ def admin_system_status(_admin=Depends(require_admin)):
 
     return {
         "uptimeSec": uptime_sec,
-        "startTime": datetime.fromtimestamp(_app_start_time).isoformat(),
+        "startTime": datetime.fromtimestamp(_app_start_time, tz=KST).isoformat(),
         "killSwitchOn": _is_kill_switch_on(),
         "gitLastCommit": git_info,
         "scheduledTasks": scheduled_tasks,

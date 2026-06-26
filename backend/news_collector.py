@@ -16,7 +16,10 @@ from __future__ import annotations
 import threading
 import time
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional
+
+KST = ZoneInfo("Asia/Seoul")  # 네이버 기사 시각·뉴스 버킷 기준 — 시장(KST)
 
 import httpx
 
@@ -33,9 +36,9 @@ COLLECT_TTL = 1800  # 30분
 
 
 def _parse_dt(s: str) -> Optional[datetime]:
-    """'202606110400' → datetime."""
+    """'202606110400' → datetime (네이버 기사 시각은 KST)."""
     try:
-        return datetime.strptime(str(s)[:12], "%Y%m%d%H%M")
+        return datetime.strptime(str(s)[:12], "%Y%m%d%H%M").replace(tzinfo=KST)
     except Exception:
         return None
 
@@ -141,7 +144,7 @@ def get_news_context(max_headlines_per_sector: int = 5) -> dict:
     import models
     from sqlalchemy import select
 
-    now = datetime.now()
+    now = datetime.now(KST)
     d1, d7, d30 = now - timedelta(days=1), now - timedelta(days=7), now - timedelta(days=30)
 
     session = db.get_session_factory()()

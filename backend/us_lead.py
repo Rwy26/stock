@@ -18,7 +18,10 @@ import bisect
 import threading
 import time
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional
+
+KST = ZoneInfo("Asia/Seoul")  # 장중 판정·영업일·표시 기준 시장 시간
 
 # ---------------------------------------------------------------------------
 # 유니버스 (단일 소스 — 확장은 여기에 한 줄 추가). kr_sector_lead = 1차 선행 KR 섹터.
@@ -107,7 +110,7 @@ _cache_ts: float = 0.0
 
 
 def _ttl() -> int:
-    now = datetime.now()
+    now = datetime.now(KST)
     if now.weekday() < 5 and (9 * 60 <= now.hour * 60 + now.minute <= 15 * 60 + 30):
         return 1800
     return 28800
@@ -474,7 +477,7 @@ def compute_lead_corr(lookback_days: int = CORR_LOOKBACK_DAYS) -> dict:
     except Exception as exc:
         return {"ok": False, "error": f"sector_rotation 로드 실패: {type(exc).__name__}"}
 
-    since = date.today() - timedelta(days=lookback_days)
+    since = datetime.now(KST).date() - timedelta(days=lookback_days)
     updated = 0
     skipped: list[dict] = []
     try:
@@ -539,7 +542,7 @@ def compute_lead_corr(lookback_days: int = CORR_LOOKBACK_DAYS) -> dict:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     return {"ok": True, "updated": updated, "skipped": skipped,
-            "asof": date.today().isoformat(), "lookback_days": lookback_days}
+            "asof": datetime.now(KST).date().isoformat(), "lookback_days": lookback_days}
 
 
 # ---------------------------------------------------------------------------

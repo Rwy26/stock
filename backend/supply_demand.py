@@ -19,7 +19,10 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from typing import Any
+
+KST = ZoneInfo("Asia/Seoul")  # 영업일 기준; fetched_at 은 func.now()(naive KST)와 일관
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +120,7 @@ def fetch_supply_demand_batch(
 
     모든 필드는 Optional — 데이터 없으면 키 자체가 없음.
     """
-    today = date.today()
+    today = datetime.now(KST).date()
     result: dict[str, dict[str, Any]] = {c: {} for c in stock_codes}
 
     # ── 1. DB 캐시 로딩 ──────────────────────────────────────────────────────
@@ -262,7 +265,7 @@ def _save_investor_flow_cache(
                 "inst_net_buy_days":    int(data.get("inst_net_buy_days", 0)),
                 "inst_net_qty":         int(data.get("inst_net_qty", 0)),
                 "program_buy_days":     int(data.get("program_buy_days", 0)),
-                "fetched_at":           datetime.now(),
+                "fetched_at":           datetime.now(KST).replace(tzinfo=None),
             })
 
         if not rows_to_upsert:

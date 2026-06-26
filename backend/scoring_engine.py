@@ -37,7 +37,10 @@ import logging
 import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
+
+KST = ZoneInfo("Asia/Seoul")  # 스코어링 영업일(시장 거래일) 기준
 
 import numpy as np
 import pandas as pd
@@ -765,7 +768,7 @@ def compute_stock_score(
         "sector_peakout": False,
     }
     """
-    sd_date = scoring_date or date.today()
+    sd_date = scoring_date or datetime.now(KST).date()
     ticker  = yf_ticker or _yf_ticker(stock_code)
 
     result = StockScoreResult(stock_code=stock_code, scoring_date=sd_date)
@@ -1026,7 +1029,7 @@ def run_batch(
 
     # 호출자 dict 불변을 위해 미리 deep copy
     sd_map: dict[str, dict] = {k: dict(v) for k, v in (supply_demand_map or {}).items()}
-    sd_date = scoring_date or date.today()
+    sd_date = scoring_date or datetime.now(KST).date()
     results: list[StockScoreResult] = []
 
     # ── EPS/순이익률 선행 배치 조회 ────────────────────────────────────────
@@ -1094,7 +1097,7 @@ def _kr_close_series(ticker: str, period_days: int) -> pd.Series:
         import FinanceDataReader as fdr
 
         fdr_sym = ticker.replace(".KS", "").replace(".KQ", "").lstrip("^")
-        start = (_dt.date.today() - _dt.timedelta(days=int(need * 1.7) + 20)).strftime("%Y-%m-%d")
+        start = (_dt.datetime.now(KST).date() - _dt.timedelta(days=int(need * 1.7) + 20)).strftime("%Y-%m-%d")
         df = fdr.DataReader(fdr_sym, start)
         if df is not None and not df.empty and "Close" in df.columns:
             s = df["Close"].dropna()

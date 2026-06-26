@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Optional
+
+KST = ZoneInfo("Asia/Seoul")  # 뉴스/표시 시장 시간. DB 저장 타임스탬프(analyzed_at/predicted_at)는 UTC
 
 
 def _stock_news(code: str, sector: Optional[str], limit: int = 8) -> list[dict]:
@@ -31,7 +34,7 @@ def _stock_news(code: str, sector: Optional[str], limit: int = 8) -> list[dict]:
 
         s = db.get_session_factory()()
         try:
-            d7 = datetime.now() - timedelta(days=7)
+            d7 = datetime.now(KST) - timedelta(days=7)
             cond = (models.NewsArticle.stock_code == code)
             if sector:
                 cond = or_(cond, models.NewsArticle.sector == sector)
@@ -342,7 +345,7 @@ def analyze_stock(code: str, with_ai: bool = True) -> dict:
     composite = _composite_score(sector_score, mtf, targets)
 
     context = {
-        "asOf": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "asOf": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
         "stock": {
             "code": code,
             "name": targets.get("name", code),
@@ -578,9 +581,9 @@ def _log_signal_outcome(result: dict) -> None:
     """분석 1회당 signal_outcomes 1행 append (덮어쓰지 않음).
 
     entry_close = 분석 결과 series.closes[-1] 또는 stock.currentPrice (룩어헤드 없음 —
-    분석 시점의 마지막 종가). predicted_at = utcnow(naive).
+    분석 시점의 마지막 종가). predicted_at = now(UTC, aware).
     """
-    from datetime import datetime as _dt
+    from datetime import datetime as _dt, timezone as _tz
 
     import db
     import models
@@ -641,7 +644,7 @@ def _log_signal_outcome(result: dict) -> None:
             stock_code=st.get("code"),
             stock_name=st.get("name"),
             sector=st.get("sector"),
-            predicted_at=_dt.utcnow(),
+            predicted_at=_dt.now(_tz.utc),
             signal=signal,
             score=score,
             confidence=score,
@@ -660,7 +663,7 @@ def _save_history(result: dict) -> None:
     signal 매핑(결정론 점수 기준): 80+ STRONG_BUY / 70+ BUY / 55+ HOLD / 40+ SELL / 미만 STRONG_SELL
     confidence = 종합 점수, upside_probability = 목표가 선도달 확률(빈도 기반).
     """
-    from datetime import datetime as _dt
+    from datetime import datetime as _dt, timezone as _tz
 
     import db
     import models
@@ -711,7 +714,7 @@ def _save_history(result: dict) -> None:
             session.add(models.AiAnalysisCache(
                 stock_code=st.get("code"),
                 stock_name=st.get("name"),
-                analyzed_at=_dt.utcnow(),
+                analyzed_at=_dt.now(_tz.utc),
                 signal=signal,
                 confidence=score,
                 upside_probability=float(reach) if reach is not None else None,
@@ -719,7 +722,7 @@ def _save_history(result: dict) -> None:
             ))
         else:
             row.stock_name = st.get("name") or row.stock_name
-            row.analyzed_at = _dt.utcnow()
+            row.analyzed_at = _dt.now(_tz.utc)
             row.signal = signal
             row.confidence = score
             row.upside_probability = float(reach) if reach is not None else None

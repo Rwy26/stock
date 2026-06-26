@@ -13,7 +13,10 @@ import math
 import threading
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Optional
+
+KST = ZoneInfo("Asia/Seoul")  # 장중 판정·표시 기준 시장 시간
 
 import global_macro_feeds as feeds
 
@@ -50,7 +53,7 @@ _cache_ts: float = 0.0
 
 
 def _ttl() -> int:
-    now = datetime.now()
+    now = datetime.now(KST)
     if now.weekday() < 5 and (9 * 60 <= now.hour * 60 + now.minute <= 15 * 60 + 30):
         return 1800
     return 28800
@@ -513,7 +516,7 @@ def compute_global_macro(force: bool = False) -> dict:
     risk_signals = _risk_signals(scores, mkt, pred, prob)
 
     result = {
-        "asof": datetime.now().isoformat(timespec="seconds"),
+        "asof": datetime.now(KST).isoformat(timespec="seconds"),
         "scores": scores,
         "composite": composite,
         "flow": flow,

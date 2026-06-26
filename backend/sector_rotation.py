@@ -16,7 +16,10 @@ import threading
 import time
 import warnings
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
+
+KST = ZoneInfo("Asia/Seoul")  # KRX 정규장 판정·영업일·표시 기준 (서버 KST 가정 명시화)
 
 warnings.filterwarnings("ignore")
 
@@ -159,8 +162,8 @@ CACHE_TTL_MARKET = 900   # 장중: 15분 — 당일 실시간 레이어가 장�
 
 
 def _is_market_hours() -> bool:
-    """KRX 정규장 (평일 09:00~15:30 KST). 서버는 KST 가정."""
-    now = datetime.now()
+    """KRX 정규장 (평일 09:00~15:30 KST)."""
+    now = datetime.now(KST)
     if now.weekday() >= 5:
         return False
     hm = now.hour * 60 + now.minute
@@ -500,7 +503,7 @@ def _get_flow_scores() -> Dict[str, Dict[str, float]]:
     try:
         from kis_client import inquire_investor  # type: ignore
 
-        today = date.today()
+        today = datetime.now(KST).date()
         start_date = _date_str(today - timedelta(days=42))  # ~30 거래일 커버
         end_date = _date_str(today)
 
@@ -584,7 +587,7 @@ def _get_pv_scores() -> Dict[str, Dict[str, float]]:
     try:
         from pykrx import stock as pstock  # type: ignore
 
-        today = date.today()
+        today = datetime.now(KST).date()
         start = today - timedelta(days=90)
         start_str = _date_str(start)
         end_str = _date_str(today)
@@ -891,7 +894,7 @@ def compute_sector_rotation(force: bool = False) -> dict:
     sectors_out.sort(key=lambda x: x["score"], reverse=True)
 
     result: dict = {
-        "asOf":           datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "asOf":           datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
         "macroDetail":    macro_detail,
         "sectors":        sectors_out,
         "topSectors":     [s["sector"] for s in sectors_out[:3]],
